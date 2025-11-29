@@ -1,0 +1,46 @@
+# Configuration Cargo pour SecureVault
+# Optimisation du build et configuration des liens dynamiques
+
+[build]
+# Utiliser tous les CPU disponibles
+jobs = 8
+
+[target.aarch64-apple-darwin]
+# Configuration RPATH pour PyO3 sur macOS ARM64
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Library/Frameworks",
+    "-C", "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/Library/Frameworks",
+    "-C", "link-arg=-Wl,-rpath,/usr/local/Frameworks",
+]
+
+[target.x86_64-apple-darwin]
+# Configuration RPATH pour PyO3 sur macOS x86_64
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Library/Frameworks",
+    "-C", "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/Library/Frameworks",
+    "-C", "link-arg=-Wl,-rpath,/usr/local/Frameworks",
+]
+
+[profile.dev]
+# Optimisations pour le développement
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"
+
+[profile.release]
+# Optimisations maximum pour la production
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Optimisations spécifiques crypto
+[profile.release.package."*"]
+opt-level = 3
+
+[profile.release.package.ring]
+opt-level = 3
+
+[profile.release.package.argon2]
+opt-level = 3

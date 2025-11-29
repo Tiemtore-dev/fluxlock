@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  # API Go
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.go
+    container_name: securevault-api
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_PORT=8080
+      - DATABASE_DSN=file:/data/securevault.db?cache=shared
+      - JWT_SECRET=${JWT_SECRET:-change-this-secret}
+    volumes:
+      - ./data:/data
+      - ./config:/app/config:ro
+    depends_on:
+      - ml-engine
+    networks:
+      - securevault-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Python ML Engine
+  ml-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.python
+    container_name: securevault-ml
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./python-ml-engine/models:/app/models
+    networks:
+      - securevault-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus (Monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: securevault-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - securevault-network
+    restart: unless-stopped
+
+  # Grafana (Visualisation)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: securevault-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    networks:
+      - securevault-network
+    restart: unless-stopped
+
+networks:
+  securevault-network:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,106 @@
+# Rust
+rust-crypto-core/target/
+**/*.rs.bk
+*.pdb
+
+# Tauri Desktop
+tauri-desktop/node_modules/
+tauri-desktop/dist/
+tauri-desktop/src-tauri/target/
+tauri-desktop/src-tauri/Cargo.lock
+tauri-desktop/.vscode/
+tauri-desktop/src-tauri/gen/
+
+# Build outputs
+build-output/
+*.dmg
+*.exe
+*.msi
+*.deb
+*.rpm
+*.AppImage
+*.app
+*.pkg
+
+# Environment
+.env
+.env.local
+*.log
+
+# Database (keep structure, ignore data)
+database/secure_storage/*.enc
+database/*.db
+database/*.db-shm
+database/*.db-wal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Temporary files
+tmp_*
+*.tmp
+*.temp
+
+# Test outputs
+test-results/
+coverage/
+.pytest_cache/
+__pycache__/
+
+# Documentation files to exclude
+*.old.md
+ANALYSE_*.md
+BUILD_DEPLOY_GUIDE.md
+BUILD_GUIDE.md
+CHECKLIST_*.md
+CLI_GUIDE.md
+COMPILATION_*.md
+CORRECTIONS_*.md
+CRYPTO_INTEGRATION_*.md
+DEMARRAGE_*.md
+DEPLOYMENT.old.md
+DESKTOP_APP.md
+DISTRIBUTION_*.md
+EMBEDDED_*.md
+FINAL_SUMMARY.md
+GUIDE_*.md
+IMPLEMENTATION_*.md
+INTEGRATION_STATUS.md
+MISSION_*.md
+ML_*.md
+NATIVE_*.md
+OTP_*.md
+PRODUCTION_*.md
+QUICK_START_*.md
+RAPPORT_*.md
+README.old.md
+README_v*.md
+RECAPITULATIF_*.md
+RECAP_*.md
+RESOLUTION_*.md
+RESUME_*.md
+SECURITY_AUDIT_REPORT.md
+SURVEILLANCE_*.md
+SYSTEME_*.md
+SYSTEM_*.md
+TESTING_GUIDE.md
+TESTS_*.md
+UNIFIED_*.md
+
+# Scripts to exclude from tracking (keep locally)
+migrate.sh
+scripts.sh
+run-tests.sh
+test-all.sh
+create-dmg.sh
+create-simple-dmg.sh

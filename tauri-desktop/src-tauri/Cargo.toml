@@ -1,0 +1,70 @@
+[package]
+name = "securevault"
+version = "2.0.0"
+description = "SecureVault - Gestionnaire de mots de passe sécurisé avec backend intégré"
+authors = ["SecureVault Team"]
+license = "MIT"
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.5", features = [ "clipboard-write-text", "dialog-open", "dialog-save", "fs-all", "path-all", "shell-open", "updater"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros"], default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = "0.4"
+
+# Professional crypto core module (corrected and integrated)
+secure-vault-crypto-core = { path = "../../rust-crypto-core" }
+
+# Additional crypto utilities
+hex = "0.4"
+rand = "0.8"  # For random generation
+base64 = "0.22"  # For encoding
+
+# Secure storage in system keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service)
+keyring = "2.0"
+
+# Python ML integration
+pyo3 = { version = "0.20", features = ["abi3-py39"] }
+
+# 2FA/TOTP Authentication
+totp-rs = { version = "5.5", features = ["qr", "otpauth"] }
+qrcode = "0.14"
+image = "0.25"
+
+# Email/SMTP
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls"] }
+
+# Compression
+flate2 = "1.0"  # gzip
+
+# Environment variables
+dotenv = "0.15"
+
+# File system monitoring for ransomware detection
+notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+crossbeam-channel = "0.5"
+dirs = "5.0"  # Pour obtenir les répertoires utilisateur
+
+# CLI dependencies
+clap = { version = "4.4", features = ["derive"] }
+rpassword = "7.3"
+
+[[bin]]
+name = "securevault"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[features]
+# This feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]

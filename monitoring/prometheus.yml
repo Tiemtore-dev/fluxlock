@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'securevault'
+
+scrape_configs:
+  - job_name: 'securevault-api'
+    static_configs:
+      - targets: ['api:8080']
+    metrics_path: '/api/v1/metrics'
+
+  - job_name: 'securevault-ml'
+    static_configs:
+      - targets: ['ml-engine:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
