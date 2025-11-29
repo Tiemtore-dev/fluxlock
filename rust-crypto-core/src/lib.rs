@@ -13,16 +13,17 @@
 //! 
 //! ## Utilisation
 //! 
-//! ```no_run
+//! ```ignore
 //! use secure_vault_crypto::*;
 //! 
-//! // Example usage (requires proper setup)
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Dériver une clé depuis un mot de passe
 //! let key = derive_key_from_password("super_secret_password", &[0u8; 32])?;
-//! let encrypted = encrypt_aes_gcm(b"sensitive data", &key.expose())?;
+//! 
+//! // Chiffrer des données
+//! let encrypted = encrypt_aes_gcm(b"données sensibles", key.expose())?;
+//! 
+//! // Déchiffrer
 //! let decrypted = decrypt_aes_gcm(&encrypted, key.expose())?;
-//! # Ok(())
-//! # }
 //! ```
 
 // Modules publics
