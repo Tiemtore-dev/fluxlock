@@ -699,6 +699,10 @@ async fn create_secure_file(
         .map_err(|e| format!("Erreur création répertoire: {}", e))?;
 
     // Récupérer la clé de chiffrement depuis l'enclave sécurisée
+    // Note: La bibliothèque keyring gère automatiquement la sécurité sur chaque plateforme :
+    // - macOS: Keychain (Secure Enclave avec T2/M1/M2)
+    // - Windows: Credential Manager (Windows Data Protection API - DPAPI)
+    // - Linux: Secret Service (libsecret)
     let encryption_key = retrieve_encryption_key(user_id)
         .map_err(|e| format!("Erreur récupération clé: {}", e))?;
     
@@ -719,6 +723,7 @@ async fn create_secure_file(
     let file_path = files_dir.join(format!("{}.enc", file_id));
     
     println!("📝 Stockage fichier chiffré: {} -> {}", filename, file_id);
+    println!("🔐 Clé stockée de manière sécurisée dans l'enclave système");
 
     // Écrire le fichier chiffré sur le disque
     std::fs::write(&file_path, encrypted_data.as_bytes())
@@ -1768,6 +1773,22 @@ fn reset_filesystem_stats() -> Result<String, String> {
     Ok("Statistiques système réinitialisées".to_string())
 }
 
+#[tauri::command]
+fn enable_filesystem_monitoring() -> Result<String, String> {
+    let monitor = get_filesystem_monitor();
+    let guard = monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
+    guard.enable_monitoring();
+    Ok("Surveillance des fichiers activée".to_string())
+}
+
+#[tauri::command]
+fn disable_filesystem_monitoring() -> Result<String, String> {
+    let monitor = get_filesystem_monitor();
+    let guard = monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
+    guard.disable_monitoring();
+    Ok("Surveillance des fichiers désactivée".to_string())
+}
+
 // ========== COMMANDE RESET VAULT ==========
 
 #[tauri::command]
@@ -1934,6 +1955,8 @@ async fn main() {
             get_filesystem_stats,
             disable_filesystem_readonly,
             reset_filesystem_stats,
+            enable_filesystem_monitoring,
+            disable_filesystem_monitoring,
             // Vault reset command
             reset_vault_completely,
         ])

@@ -21,6 +21,7 @@ interface FilesystemStats {
   monitored_paths: string[]
   active_threats: string[]
   threat_level: string
+  monitoring_enabled: boolean
 }
 
 export default function SystemSecurityPage() {
@@ -155,6 +156,20 @@ export default function SystemSecurityPage() {
       await loadSecurityState()
     } catch (err: any) {
       alert('Erreur: ' + err.toString())
+    }
+  }
+
+  const handleToggleMonitoring = async (enable: boolean) => {
+    const action = enable ? 'activer' : 'désactiver'
+    if (!confirm(`Voulez-vous vraiment ${action} la surveillance des fichiers ?`)) return
+
+    try {
+      const command = enable ? 'enable_filesystem_monitoring' : 'disable_filesystem_monitoring'
+      const result = await invoke<string>(command)
+      alert(`✅ ${result}`)
+      await loadSecurityState()
+    } catch (err: any) {
+      alert('❌ Erreur: ' + err.toString())
     }
   }
 
@@ -297,7 +312,38 @@ export default function SystemSecurityPage() {
                 Actions de Sécurité
               </h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Toujours afficher le bouton */}
+                {/* Toggle surveillance fichiers */}
+                <div className="border-2 border-blue-200 dark:border-blue-700 rounded-lg p-4 bg-blue-50 dark:bg-blue-900/20">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-5 h-5 text-blue-600" />
+                      <h3 className="font-semibold text-gray-900 dark:text-white">
+                        Surveillance Fichiers
+                      </h3>
+                    </div>
+                    <button
+                      onClick={() => handleToggleMonitoring(!filesystemStats?.monitoring_enabled)}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        filesystemStats?.monitoring_enabled
+                          ? 'bg-green-600'
+                          : 'bg-gray-300 dark:bg-gray-600'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                          filesystemStats?.monitoring_enabled ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-gray-400">
+                    {filesystemStats?.monitoring_enabled
+                      ? '🟢 Surveillance active - Détection ransomware en temps réel'
+                      : '🔴 Surveillance désactivée - Aucune protection active'}
+                  </p>
+                </div>
+
+                {/* Désactiver mode lecture seule */}
                 <button
                   onClick={(e) => {
                     console.log('🖱️ CLICK DÉTECTÉ sur le bouton readonly');

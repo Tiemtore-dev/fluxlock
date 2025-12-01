@@ -2,11 +2,11 @@ name: Build Multi-Platform
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [main, master, develop]
     tags:
-      - 'v*'
+      - "v*"
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
   workflow_dispatch:
 
 env:
@@ -19,12 +19,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-      
+
       - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
@@ -33,7 +33,7 @@ jobs:
             ~/.cargo/git
             rust-crypto-core/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      
+
       - name: Build Rust Crypto Core
         working-directory: rust-crypto-core
         run: |
@@ -47,23 +47,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest'
-            os: 'macos'
-            arch: 'aarch64'
-            rust_target: 'aarch64-apple-darwin'
-          
-          - platform: 'ubuntu-22.04'
-            os: 'linux'
-            arch: 'x86_64'
-            rust_target: 'x86_64-unknown-linux-gnu'
-          
-          - platform: 'windows-latest'
-            os: 'windows'
-            arch: 'x86_64'
-            rust_target: 'x86_64-pc-windows-msvc'
+          - platform: "macos-latest"
+            os: "macos"
+            arch: "aarch64"
+            rust_target: "aarch64-apple-darwin"
+
+          - platform: "ubuntu-22.04"
+            os: "linux"
+            arch: "x86_64"
+            rust_target: "x86_64-unknown-linux-gnu"
+
+          - platform: "windows-latest"
+            os: "windows"
+            arch: "x86_64"
+            rust_target: "x86_64-pc-windows-msvc"
 
     runs-on: ${{ matrix.platform }}
-    
+
     steps:
       - uses: actions/checkout@v4
 
@@ -76,8 +76,8 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
           cache-dependency-path: tauri-desktop/package-lock.json
 
       - name: Install Linux dependencies
@@ -130,14 +130,14 @@ jobs:
         run: |
           echo "=== macOS bundles ==="
           ls -lh tauri-desktop/src-tauri/target/release/bundle/macos/ 2>/dev/null || echo "No macOS bundles"
-          
+
           echo "=== DMG files ==="
           ls -lh tauri-desktop/src-tauri/target/release/bundle/dmg/ 2>/dev/null || echo "No DMG files"
-          
+
           echo "=== Windows bundles ==="
           ls -lh tauri-desktop/src-tauri/target/release/bundle/msi/ 2>/dev/null || echo "No MSI files"
           ls -lh tauri-desktop/src-tauri/target/release/bundle/nsis/ 2>/dev/null || echo "No NSIS files"
-          
+
           echo "=== Linux bundles ==="
           ls -lh tauri-desktop/src-tauri/target/release/bundle/deb/ 2>/dev/null || echo "No DEB files"
           ls -lh tauri-desktop/src-tauri/target/release/bundle/appimage/ 2>/dev/null || echo "No AppImage files"
@@ -148,12 +148,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts
-          
+
           # Copy DMG if exists
           if [ -f tauri-desktop/src-tauri/target/release/bundle/dmg/*.dmg ]; then
             cp tauri-desktop/src-tauri/target/release/bundle/dmg/*.dmg artifacts/
           fi
-          
+
           # Create DMG from .app if DMG doesn't exist
           if [ -d "tauri-desktop/src-tauri/target/release/bundle/macos/SecureVault.app" ]; then
             if [ ! -f artifacts/*.dmg ]; then
@@ -167,12 +167,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts
-          
+
           # Copy MSI installer
           if compgen -G "tauri-desktop/src-tauri/target/release/bundle/msi/*.msi" > /dev/null; then
             cp tauri-desktop/src-tauri/target/release/bundle/msi/*.msi artifacts/
           fi
-          
+
           # Copy NSIS installer
           if compgen -G "tauri-desktop/src-tauri/target/release/bundle/nsis/*.exe" > /dev/null; then
             cp tauri-desktop/src-tauri/target/release/bundle/nsis/*.exe artifacts/
@@ -183,17 +183,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts
-          
+
           # Copy DEB package
           if compgen -G "tauri-desktop/src-tauri/target/release/bundle/deb/*.deb" > /dev/null; then
             cp tauri-desktop/src-tauri/target/release/bundle/deb/*.deb artifacts/
           fi
-          
+
           # Copy AppImage
           if compgen -G "tauri-desktop/src-tauri/target/release/bundle/appimage/*.AppImage" > /dev/null; then
             cp tauri-desktop/src-tauri/target/release/bundle/appimage/*.AppImage artifacts/
           fi
-          
+
           # Copy RPM (if available)
           if compgen -G "tauri-desktop/src-tauri/target/release/bundle/rpm/*.rpm" > /dev/null; then
             cp tauri-desktop/src-tauri/target/release/bundle/rpm/*.rpm artifacts/
@@ -212,10 +212,10 @@ jobs:
     needs: build-tauri
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    
+
     permissions:
       contents: write
-    
+
     steps:
       - uses: actions/checkout@v4
 
@@ -244,7 +244,7 @@ jobs:
     needs: build-tauri
     runs-on: ubuntu-latest
     if: always()
-    
+
     steps:
       - name: Summary
         run: |

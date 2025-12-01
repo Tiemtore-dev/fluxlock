@@ -5,6 +5,7 @@
 Before building on Windows, install:
 
 1. **Rust** (latest stable)
+
    ```powershell
    # Download and run from: https://rustup.rs/
    # Or use winget:
@@ -12,6 +13,7 @@ Before building on Windows, install:
    ```
 
 2. **Node.js 18+** and npm
+
    ```powershell
    # Download from: https://nodejs.org/
    # Or use winget:
@@ -19,6 +21,7 @@ Before building on Windows, install:
    ```
 
 3. **Visual Studio Build Tools** (C++ toolchain)
+
    ```powershell
    # Download Visual Studio Installer from: https://visualstudio.microsoft.com/downloads/
    # Install "Desktop development with C++" workload
@@ -72,6 +75,7 @@ After successful build, find your executable at:
 ### Error: `icon.ico` not found
 
 **Solution:** Make sure you pulled the latest code:
+
 ```powershell
 git pull origin main
 ```
@@ -81,6 +85,7 @@ The `icon.ico` file should be in `tauri-desktop\src-tauri\icons\icon.ico`
 ### Error: WebView2 not found
 
 **Solution:** Install WebView2 Runtime:
+
 ```powershell
 # Download and install from:
 https://developer.microsoft.com/en-us/microsoft-edge/webview2/
@@ -89,6 +94,7 @@ https://developer.microsoft.com/en-us/microsoft-edge/webview2/
 ### Error: MSVC toolchain not found
 
 **Solution:** Install Visual Studio Build Tools with C++ workload:
+
 ```powershell
 winget install Microsoft.VisualStudio.2022.BuildTools
 # Then run Visual Studio Installer and add "Desktop development with C++"
@@ -97,6 +103,7 @@ winget install Microsoft.VisualStudio.2022.BuildTools
 ### Build takes too long or fails
 
 **Solution:** Increase available RAM and close unnecessary programs. Building requires:
+
 - **RAM:** 4GB minimum, 8GB recommended
 - **Disk Space:** 5GB free space
 - **Time:** 10-20 minutes (first build)
@@ -104,6 +111,7 @@ winget install Microsoft.VisualStudio.2022.BuildTools
 ### Error: npm ERR! or cargo error
 
 **Solution:** Clean and rebuild:
+
 ```powershell
 cd tauri-desktop
 Remove-Item -Recurse -Force node_modules, src-tauri\target

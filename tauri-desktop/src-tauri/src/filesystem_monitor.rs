@@ -51,6 +51,7 @@ pub struct MonitoringStats {
     pub monitored_paths: Vec<String>,
     pub active_threats: Vec<String>,
     pub threat_level: String,
+    pub monitoring_enabled: bool,  // État de la surveillance
 }
 
 /// Structure interne pour suivre l'activité d'un fichier
@@ -68,6 +69,7 @@ pub struct FilesystemMonitor {
     file_activities: Arc<Mutex<HashMap<String, FileActivity>>>,
     suspicious_activities: Arc<Mutex<Vec<SuspiciousActivity>>>,
     readonly_mode: Arc<Mutex<bool>>,
+    monitoring_enabled: Arc<Mutex<bool>>,  // Toggle surveillance
     
     // Canaux de communication
     event_sender: Option<Sender<Event>>,
@@ -125,10 +127,12 @@ impl FilesystemMonitor {
                 monitored_paths: Vec::new(),
                 active_threats: Vec::new(),
                 threat_level: "NONE".to_string(),
+                monitoring_enabled: true,  // Activé par défaut
             })),
             file_activities: Arc::new(Mutex::new(HashMap::new())),
             suspicious_activities: Arc::new(Mutex::new(Vec::new())),
             readonly_mode: Arc::new(Mutex::new(false)),
+            monitoring_enabled: Arc::new(Mutex::new(true)),  // Activé par défaut
             event_sender: Some(sender),
             event_receiver: Some(receiver),
             monitored_paths: Vec::new(),
@@ -246,6 +250,7 @@ impl FilesystemMonitor {
         let file_activities = Arc::clone(&self.file_activities);
         let suspicious_activities = Arc::clone(&self.suspicious_activities);
         let readonly_mode = Arc::clone(&self.readonly_mode);
+        let monitoring_enabled = Arc::clone(&self.monitoring_enabled);
         let suspicious_extensions = self.suspicious_extensions.clone();
         
         thread::spawn(move || {
@@ -254,6 +259,11 @@ impl FilesystemMonitor {
             loop {
                 match receiver.recv_timeout(Duration::from_secs(1)) {
                     Ok(event) => {
+                        // Vérifier si la surveillance est activée
+                        if !*monitoring_enabled.lock().unwrap() {
+                            continue;
+                        }
+                        
                         Self::process_event(
                             event,
                             &stats,
@@ -509,6 +519,33 @@ impl FilesystemMonitor {
         stats.active_threats.clear();
         
         println!("✅ Mode lecture seule désactivé");
+    }
+    
+    /// Active la surveillance des fichiers
+    pub fn enable_monitoring(&self) {
+        let mut enabled = self.monitoring_enabled.lock().unwrap();
+        *enabled = true;
+        
+        let mut stats = self.stats.lock().unwrap();
+        stats.monitoring_enabled = true;
+        
+        println!("🔍 Surveillance des fichiers ACTIVÉE");
+    }
+    
+    /// Désactive la surveillance des fichiers
+    pub fn disable_monitoring(&self) {
+        let mut enabled = self.monitoring_enabled.lock().unwrap();
+        *enabled = false;
+        
+        let mut stats = self.stats.lock().unwrap();
+        stats.monitoring_enabled = false;
+        
+        println!("⏸️  Surveillance des fichiers DÉSACTIVÉE");
+    }
+    
+    /// Vérifie si la surveillance est active
+    pub fn is_monitoring_enabled(&self) -> bool {
+        *self.monitoring_enabled.lock().unwrap()
     }
     
     /// Réinitialise toutes les statistiques
