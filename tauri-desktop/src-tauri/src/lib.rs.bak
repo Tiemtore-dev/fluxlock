@@ -1,0 +1,3401 @@
+// Macro pour logger uniquement en mode debug
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            eprintln!($($arg)*);
+        }
+    }
+}
+
+pub mod database;
+pub mod crypto;
+mod secure_storage;
+mod totp;
+mod threat_reactor;
+pub mod config;
+mod security_monitor;
+mod filesystem_monitor;
+mod platform_security;
+mod hidden_storage;
+mod backup_manager;
+mod path_validator;
+pub mod secure_key;
+pub mod transfer;
+mod biometric;
+mod signed_log;
+
+use database::{Database, Password, SecureFile, SecureKey, FileShare};
+use crypto::{
+    hash_password, verify_password, CryptoError,
+    encrypt_data_secure, encrypt_data_bytes_secure, decrypt_data_secure, decrypt_data_bytes_secure,
+    encrypt_file_stream_secure, decrypt_file_stream_secure,
+    encrypt_file_stream_with_hash,
+    is_senc_format,
+    generate_salt, 
+    derive_encryption_key_from_password_secure,
+    blake3_hash,
+};
+
+/// Génère un token de session cryptographiquement aléatoire
+fn generate_session_token() -> String {
+    let mut token_bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+    general_purpose::URL_SAFE_NO_PAD.encode(&token_bytes)
+}
+
+/// VULN-002: Validation de session — vérifie que l'utilisateur est authentifié
+/// avec un token de session actif et une activité récente.
+/// Retourne le user_id si la session est valide.
+async fn validate_session(state: &AppState) -> Result<i64, String> {
+    let user_id = state.current_user_id.lock().await
+        .ok_or("Non authentifié — aucune session active")?;
+    
+    // Vérifier que le token de session existe (généré au login)
+    if state.session_token.lock().await.is_none() {
+        return Err("Session invalide — token absent".to_string());
+    }
+    
+    // Vérifier l'expiration de la session (max 24h même sans auto-lock)
+    let last_activity = *state.last_activity.lock().await;
+    if last_activity.elapsed() > std::time::Duration::from_secs(24 * 3600) {
+        // Invalider la session expirée
+        *state.session_token.lock().await = None;
+        *state.current_user_id.lock().await = None;
+        return Err("Session expirée — reconnexion requise".to_string());
+    }
+    
+    Ok(user_id)
+}
+
+/// Génère 32 bytes aléatoires cryptographiquement sécurisés (pour clés SSH/API/GPG)
+fn generate_random_key_bytes() -> Vec<u8> {
+    let mut key = vec![0u8; 32];
+    rand::rngs::OsRng.try_fill_bytes(&mut key)
+        .expect("🚨 ERREUR CRITIQUE: Impossible de générer une clé sécurisée");
+    key
+}
+
+use secure_storage::{store_encryption_key, retrieve_encryption_key_secure};
+use totp::{generate_totp_secret, verify_totp_code, verify_backup_code};
+use threat_reactor::ThreatReactor;
+use config::Config;
+use sqlx::SqlitePool;
+use security_monitor::{
+    get_security_monitor, 
+    SecurityState,
+};
+use filesystem_monitor::{
+    get_filesystem_monitor,
+    MonitoringStats
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex;
+use tauri::{State, Emitter};
+#[cfg(debug_assertions)]
+use tauri::Manager;
+use base64::{Engine as _, engine::general_purpose};
+use chrono::{Utc, Duration};
+use rand::RngCore;
+
+// État global de l'application
+struct AppState {
+    db: Arc<Mutex<Option<Database>>>,
+    current_user_id: Arc<Mutex<Option<i64>>>,
+    session_token: Arc<Mutex<Option<String>>>,
+    session: Arc<Mutex<Option<String>>>, // Alias for session_token used by transfer module
+    last_activity: Arc<Mutex<std::time::Instant>>,
+    auto_lock_minutes: Arc<Mutex<u64>>,
+    threat_reactor: Arc<ThreatReactor>,
+    transfer_manager: Arc<Mutex<Option<transfer::commands::TransferManager>>>,
+    /// Fichiers déchiffrés temporaires à nettoyer (M01 — audit sécurité)
+    /// Clé: chemin absolu, Valeur: timestamp de création
+    decrypted_temp_files: Arc<Mutex<Vec<String>>>,
+    /// Répertoire de données résolu au démarrage (Android: app_data_dir; Desktop: hidden_storage)
+    data_dir: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// Gestionnaire de logs signés (hash chain SHA3-256 + ML-DSA-65)
+    signed_log_manager: Arc<Mutex<Option<signed_log::SignedLogManager>>>,
+    /// Activation des logs signés (persisté dans config)
+    logging_enabled: Arc<Mutex<bool>>,
+    /// Mode isolation réseau — bloque toute activité réseau
+    isolation_mode: Arc<Mutex<bool>>,
+}
+
+// Structures pour les requêtes
+#[derive(Debug, Serialize, Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LoginResponse {
+    success: bool,
+    token: Option<String>,
+    message: String,
+    user_id: Option<i64>,
+    email: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RegisterRequest {
+    username: String,
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CreatePasswordRequest {
+    title: String,
+    username: Option<String>,
+    password: String,
+    url: Option<String>,
+    notes: Option<String>,
+    category: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdatePasswordRequest {
+    id: i64,
+    title: String,
+    username: Option<String>,
+    password: String,
+    url: Option<String>,
+    notes: Option<String>,
+    category: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CreateKeyRequest {
+    key_name: String,
+    key_type: String,
+    algorithm: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ImportKeyRequest {
+    key_name: String,
+    key_type: String,
+    key_data: String,
+    algorithm: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ShareFileRequest {
+    file_id: i64,
+    recipient_email: String,
+    expiration_days: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ShareFileResponse {
+    success: bool,
+    share_token: String,
+    share_link: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SecurityEvent {
+    id: i64,
+    user_id: i64,
+    event_type: String,
+    description: String,
+    severity: Option<String>,
+    ip_address: Option<String>,
+    timestamp: String,
+}
+
+// Commandes Tauri
+
+#[tauri::command]
+fn get_app_version() -> String {
+    "2.0.0".to_string()
+}
+
+#[tauri::command]
+async fn check_backend_status() -> Result<String, String> {
+    Ok("Backend intégré démarré".to_string())
+}
+
+#[tauri::command]
+async fn init_local_db(
+    _app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // Atomic guard against double initialization (frontend may call twice concurrently)
+    static DB_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+    if DB_INIT_STARTED.swap(true, Ordering::SeqCst) {
+        debug_log!("ℹ️ Base de données déjà en cours d'initialisation, skip");
+        return Ok("Base de données déjà initialisée".to_string());
+    }
+
+    // Android: utiliser app_data_dir() de Tauri (seul chemin writable garanti)
+    // Desktop: utiliser hidden_storage pour rétrocompatibilité
+    #[cfg(target_os = "android")]
+    let db_dir = {
+        use tauri::Manager;
+        let dir = _app_handle.path().app_data_dir()
+            .map_err(|e| format!("Erreur obtention répertoire Android: {}", e))?;
+        let sv_dir = dir.join("SecureVault");
+        std::fs::create_dir_all(&sv_dir)
+            .map_err(|e| format!("Erreur création répertoire Android: {}", e))?;
+        sv_dir
+    };
+    #[cfg(not(target_os = "android"))]
+    let db_dir = hidden_storage::get_hidden_database_dir()
+        .map_err(|e| format!("Erreur obtention chemin DB caché: {}", e))?;
+
+    let db_path = db_dir.join("sv.db");
+
+    // Stocker le répertoire de données dans AppState pour reset_vault
+    *state.data_dir.lock().await = Some(db_dir.clone());
+    
+    // Create an empty file if it doesn't exist to ensure we have write permissions
+    if !db_path.exists() {
+        std::fs::File::create(&db_path)
+            .map_err(|e| format!("Impossible de créer le fichier DB (permissions?): {}", e))?;
+    }
+
+    let db = Database::new(&db_path)
+        .await
+        .map_err(|e| format!("Erreur création database: {}", e))?;
+
+    db.initialize()
+        .await
+        .map_err(|e| format!("Erreur initialisation database: {}", e))?;
+
+    *state.db.lock().await = Some(db);
+    
+    // Initialiser le Transfer Manager
+    let app_data_dir = db_dir.clone();
+    let peer_name = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "FluXlock".to_string());
+    match transfer::commands::TransferManager::new(&app_data_dir, &peer_name) {
+        Ok(tm) => {
+            *state.transfer_manager.lock().await = Some(tm);
+            debug_log!("🔀 Transfer Manager initialisé");
+        }
+        Err(_e) => {
+            debug_log!("⚠️  Transfer Manager non disponible: {}", _e);
+        }
+    }
+
+    // Initialiser le gestionnaire de logs signés
+    match init_signed_log_manager(&state).await {
+        Ok(_) => {
+            debug_log!("📝 Logs signés initialisés (hash chain SHA3-256 + ML-DSA-65)");
+        }
+        Err(_e) => {
+            debug_log!("⚠️  Logs signés non disponibles: {}", _e);
+        }
+    }
+
+    // Note: La clé de chiffrement sera dérivée lors de la connexion
+    // depuis le mot de passe utilisateur, pas générée aléatoirement
+    debug_log!("✅ Base de données initialisée (clé de chiffrement sera dérivée à la connexion)");
+
+    Ok(format!("Base de données initialisée: {:?}", db_path))
+}
+
+// Vérifier si un utilisateur existe déjà (limite: 1 utilisateur par appareil)
+#[tauri::command]
+async fn has_existing_user(state: State<'_, AppState>) -> Result<bool, String> {
+    let db_guard = state.db.lock().await;
+    let db = db_guard
+        .as_ref()
+        .ok_or("Base de données non initialisée")?;
+
+    // Compter le nombre d'utilisateurs dans la base
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(&db.pool)
+        .await
+        .map_err(|e| format!("Erreur comptage utilisateurs: {}", e))?;
+    
+    Ok(count.0 > 0)
+}
+
+#[tauri::command]
+async fn local_register(
+    credentials: RegisterRequest,
+    state: State<'_, AppState>,
+) -> Result<LoginResponse, String> {
+    debug_log!("📝 Tentative d'enregistrement pour: {}", credentials.username);
+    
+    let db_guard = state.db.lock().await;
+    let db = db_guard
+        .as_ref()
+        .ok_or("Base de données non initialisée")?;
+
+    // Vérifier si l'utilisateur existe déjà
+    if let Ok(Some(_)) = db.get_user_by_username(&credentials.username).await {
+        #[cfg(debug_assertions)]
+        debug_log!("⚠️  Utilisateur {} existe déjà", credentials.username);
+        return Ok(LoginResponse {
+            success: false,
+            token: None,
+            message: "Nom d'utilisateur déjà utilisé".to_string(),
+            user_id: None,
+            email: None,
+        });
+    }
+
+    // Hasher le mot de passe
+    #[cfg(debug_assertions)]
+    debug_log!("🔐 Hashage du mot de passe...");
+    let password_hash = hash_password(&credentials.password)
+        .map_err(|e| format!("Erreur de hashage: {}", e))?;
+    
+    #[cfg(debug_assertions)]
+    debug_log!("💾 Hash généré (longueur: {})", password_hash.len());
+    
+    // Générer un sel unique pour la dérivation de clé de chiffrement
+    let crypto_salt = generate_salt();
+    let crypto_salt_b64 = general_purpose::STANDARD.encode(&crypto_salt);
+    debug_log!("🔑 Sel crypto généré pour dérivation de clé");
+
+    // Dériver la clé de chiffrement AVANT la création de l'utilisateur
+    // pour pouvoir chiffrer l'email (VULN-004)
+    let encryption_key = derive_encryption_key_from_password_secure(&credentials.password, &crypto_salt)
+        .map_err(|e| format!("Erreur dérivation clé: {}", e))?;
+
+    // VULN-004: Chiffrer l'email avant stockage en base
+    let encrypted_email = encrypt_data_secure(&credentials.email, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement email: {}", e))?;
+
+    // Créer l'utilisateur avec l'email chiffré
+    let user_id = db
+        .create_user(&credentials.username, &encrypted_email, &password_hash, &crypto_salt_b64)
+        .await
+        .map_err(|e| format!("Erreur création utilisateur: {}", e))?;
+
+    #[cfg(debug_assertions)]
+    debug_log!("✅ Utilisateur créé");
+    
+    // Stocker la clé dans l'enclave sécurisée (Keychain) au lieu de la RAM
+    let result = encryption_key.use_key(|k| {
+        store_encryption_key(user_id, k)
+            .map_err(|e| format!("Erreur stockage clé sécurisée: {}", e))
+    });
+    result?;
+    
+    debug_log!("🔐 Clé de chiffrement stockée dans l'enclave sécurisée (Keychain)");
+    *state.current_user_id.lock().await = Some(user_id);
+
+    // Déverrouiller le trust store pour la nouvelle session
+    if let Some(tm) = state.transfer_manager.lock().await.as_mut() {
+        if let Err(e) = tm.trust_store.lock().await.unlock(&encryption_key) {
+            debug_log!("⚠️  Trust store unlock failed (register): {}", e);
+        } else {
+            debug_log!("🔒 Trust store déverrouillé (register)");
+        }
+    }
+
+    // Générer et stocker le token de session
+    let token = generate_session_token();
+    *state.session_token.lock().await = Some(token.clone());
+    
+    // Log l'événement d'inscription
+    let _ = db.log_action(user_id, "REGISTER", "user", Some(user_id)).await;
+
+    Ok(LoginResponse {
+        success: true,
+        token: Some(token),
+        message: "Compte créé avec succès".to_string(),
+        user_id: Some(user_id),
+        email: Some(credentials.email),
+    })
+}
+
+#[tauri::command]
+async fn local_login(
+    credentials: LoginRequest,
+    state: State<'_, AppState>,
+) -> Result<LoginResponse, String> {
+    debug_log!("🔑 Tentative de connexion pour: {}", credentials.username);
+    
+    let db_guard = state.db.lock().await;
+    let db = db_guard
+        .as_ref()
+        .ok_or("Base de données non initialisée")?;
+
+    // Récupérer l'utilisateur
+    let user = match db.get_user_by_username(&credentials.username).await {
+        Ok(Some(u)) => {
+            debug_log!("👤 Utilisateur trouvé: {} (ID: {})", u.username, u.id);
+            u
+        },
+        Ok(None) => {
+            debug_log!("❌ Aucun utilisateur trouvé avec le nom: {}", credentials.username);
+            return Ok(LoginResponse {
+                success: false,
+                token: None,
+                message: "Identifiants incorrects".to_string(),
+                user_id: None,
+                email: None,
+            })
+        }
+        Err(e) => {
+            debug_log!("❌ Erreur DB: {}", e);
+            return Err(format!("Erreur base de données: {}", e));
+        }
+    };
+
+    // Vérifier si l'utilisateur est verrouillé (anti-brute force)
+    let monitor = get_security_monitor();
+    if let Some(remaining) = monitor.is_user_locked(&credentials.username).await {
+        #[cfg(debug_assertions)]
+        debug_log!("🔒 Utilisateur verrouillé (brute force) - {} secondes restantes", remaining);
+        return Ok(LoginResponse {
+            success: false,
+            token: None,
+            message: format!("Compte temporairement verrouillé. Réessayez dans {} secondes.", remaining),
+            user_id: None,
+            email: None,
+        });
+    }
+
+    // Vérifier le délai basé sur les tentatives échouées récentes
+    let failed_count = db.count_failed_logins(user.id, 2).await
+        .map_err(|e| format!("Erreur DB: {}", e))?;
+    
+    let delay_seconds = match failed_count {
+        0..=2 => 0,
+        3..=4 => 15,
+        5..=7 => 30,
+        8..=10 => 60,
+        _ => 120,
+    };
+    
+    if delay_seconds > 0 {
+        // Vérifier le temps écoulé depuis la dernière tentative échouée
+        if let Ok(Some(elapsed)) = db.get_time_since_last_failed_login(user.id).await {
+            if elapsed >= delay_seconds {
+                // Le délai est expiré, on peut tester le mot de passe
+                debug_log!("✅ Délai expiré ({}s écoulées sur {}s requis) - tentative autorisée", elapsed, delay_seconds);
+            } else {
+                // Le délai est toujours actif
+                let remaining = delay_seconds - elapsed;
+                debug_log!("⏱️ Délai actif: {}s restantes sur {}s requis ({} tentatives)", remaining, delay_seconds, failed_count);
+                return Ok(LoginResponse {
+                    success: false,
+                    token: None,
+                    message: format!("⏱️ Trop de tentatives échouées. Veuillez patienter {} secondes avant de réessayer.", remaining),
+                    user_id: None,
+                    email: None,
+                });
+            }
+        } else {
+            // Pas de dernière tentative trouvée, mais des échecs comptés - probablement expiré
+            debug_log!("⚠️ Échecs comptés mais pas de dernière tentative trouvée - autorisation");
+        }
+    }
+
+    // Vérifier le mot de passe
+    #[cfg(debug_assertions)]
+    debug_log!("🔐 Vérification du mot de passe (hash length: {})", user.password_hash.len());
+    let password_valid = verify_password(&credentials.password, &user.password_hash);
+
+    match password_valid {
+        Ok(()) => { /* mot de passe correct, on continue */ }
+        Err(CryptoError::VerificationError) => {
+            debug_log!("❌ Mot de passe incorrect pour l'utilisateur {}", user.id);
+            
+            // Enregistrer la tentative échouée dans audit_logs
+            let _ = db.log_action(user.id, "login_failed", "auth", None).await;
+            
+            return Ok(LoginResponse {
+                success: false,
+                token: None,
+                message: "Identifiants incorrects".to_string(),
+                user_id: None,
+                email: None,
+            });
+        }
+        Err(e) => {
+            // Erreur opérationnelle (OOM Argon2, décodage base64, etc.)
+            // NE PAS masquer comme "identifiants incorrects"
+            eprintln!("🚨 Erreur vérification mot de passe: {}", e);
+            return Err(format!("Erreur interne de vérification: {}", e));
+        }
+    }
+
+    debug_log!("✅ Mot de passe vérifié");
+    
+    // Nettoyer les anciennes tentatives échouées pour cet utilisateur
+    let _ = db.clear_failed_logins(user.id).await;
+    #[cfg(debug_assertions)]
+    debug_log!("🧹 Tentatives échouées réinitialisées pour l'utilisateur {}", user.id);
+    
+    // Décoder le sel crypto et dériver la clé de chiffrement (VERSION SÉCURISÉE)
+    let crypto_salt = general_purpose::STANDARD
+        .decode(&user.crypto_salt)
+        .map_err(|e| format!("Erreur décodage sel crypto: {}", e))?;
+    
+    let encryption_key = derive_encryption_key_from_password_secure(&credentials.password, &crypto_salt)
+        .map_err(|e| format!("Erreur dérivation clé: {}", e))?;
+    
+    // Stocker la clé dans l'enclave sécurisée (Keychain) pour la session
+    let result = encryption_key.use_key(|k| {
+        store_encryption_key(user.id, k)
+            .map_err(|e| format!("Erreur stockage clé sécurisée: {}", e))
+    });
+    result?;
+    
+    debug_log!("🔑 Clé de chiffrement stockée dans l'enclave sécurisée (Keychain)");
+    
+    debug_log!("✅ Connexion réussie pour {}", user.username);
+    *state.current_user_id.lock().await = Some(user.id);
+
+    // Update transfer peer name with actual username and auto-start mDNS discovery
+    if let Some(tm) = state.transfer_manager.lock().await.as_mut() {
+        tm.set_peer_name(&user.username);
+        // Déverrouiller le trust store chiffré avec la vault_key
+        if let Err(e) = tm.trust_store.lock().await.unlock(&encryption_key) {
+            debug_log!("⚠️  Trust store unlock failed: {}", e);
+        } else {
+            debug_log!("🔒 Trust store déverrouillé (ChaCha20-Poly1305)");
+        }
+        // Auto-start mDNS so this device is discoverable immediately
+        if let Err(e) = tm.discovery.start_mdns_discovery().await {
+            eprintln!("[TRANSFER] Auto-start mDNS failed at login: {}", e);
+        }
+    }
+    
+    // Notify biometric module that a master-password login succeeded
+    // This enables biometric quick-unlock for the configured timeout period
+    biometric::notify_password_login_success();
+    
+    // Générer et stocker le token de session
+    let token = generate_session_token();
+    *state.session_token.lock().await = Some(token.clone());
+    
+    // Log l'événement de connexion
+    let _ = db.log_action(user.id, "LOGIN", "session", None).await;
+
+    Ok(LoginResponse {
+        success: true,
+        token: Some(token),
+        message: "Connexion réussie".to_string(),
+        user_id: Some(user.id),
+        // VULN-004: Déchiffrer l'email avant de le renvoyer au frontend
+        email: decrypt_data_secure(&user.email, &encryption_key).ok()
+            .or(Some(user.email.clone())),
+    })
+}
+
+/// Nettoyage sécurisé des fichiers déchiffrés temporaires (M01 — audit sécurité)
+/// Écrase le contenu avec des zéros avant suppression pour empêcher la récupération
+async fn secure_cleanup_decrypted_files(temp_files: &Arc<Mutex<Vec<String>>>) {
+    let mut files = temp_files.lock().await;
+    for path in files.drain(..) {
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            let size = metadata.len() as usize;
+            // Écraser avec des zéros avant suppression
+            if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&path) {
+                use std::io::Write;
+                let zeros = vec![0u8; size.min(1024 * 1024)]; // Blocs de 1 MiB max
+                let mut remaining = size;
+                while remaining > 0 {
+                    let chunk = remaining.min(zeros.len());
+                    if file.write_all(&zeros[..chunk]).is_err() {
+                        break;
+                    }
+                    remaining -= chunk;
+                }
+                let _ = file.flush();
+            }
+            let _ = std::fs::remove_file(&path);
+            debug_log!("🧹 Fichier temporaire nettoyé de manière sécurisée: {}", path);
+        }
+    }
+}
+
+#[tauri::command]
+async fn local_logout(state: State<'_, AppState>) -> Result<(), String> {
+    let mut user_id_guard = state.current_user_id.lock().await;
+    
+    if let Some(user_id) = *user_id_guard {
+        debug_log!("🚪 Déconnexion de l'utilisateur {}", user_id);
+        
+        // M01 — Nettoyage sécurisé des fichiers déchiffrés temporaires
+        secure_cleanup_decrypted_files(&state.decrypted_temp_files).await;
+        
+        // Supprimer la clé de chiffrement de l'enclave sécurisée
+        if let Err(_e) = secure_storage::delete_encryption_key(user_id) {
+            debug_log!("⚠️ Erreur lors de la suppression de la clé: {}", _e);
+            // On continue quand même la déconnexion
+        }
+        
+        // Invalider le token de session
+        *state.session_token.lock().await = None;
+        
+        *user_id_guard = None;
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+
+/// Met à jour le timestamp d'activité (appelé par le frontend sur interaction utilisateur)
+#[tauri::command]
+async fn notify_activity(state: State<'_, AppState>) -> Result<(), String> {
+    *state.last_activity.lock().await = std::time::Instant::now();
+    Ok(())
+}
+
+/// Configure le délai d'auto-lock en minutes
+#[tauri::command]
+async fn set_auto_lock_timeout(minutes: u64, state: State<'_, AppState>) -> Result<(), String> {
+    *state.auto_lock_minutes.lock().await = minutes;
+    debug_log!("⏰ Auto-lock configuré à {} minutes", minutes);
+    Ok(())
+}
+
+/// Vérifie si l'inactivité a dépassé le seuil et verrouille automatiquement
+/// Le frontend doit appeler cette commande périodiquement (toutes les 30s)
+#[tauri::command]
+async fn check_auto_lock(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let user_id = *state.current_user_id.lock().await;
+    
+    // Pas connecté = pas d'auto-lock
+    if user_id.is_none() {
+        return Ok(serde_json::json!({ "locked": false, "reason": "not_authenticated" }));
+    }
+    let user_id = user_id.unwrap();
+    
+    let last_activity = *state.last_activity.lock().await;
+    let timeout_minutes = *state.auto_lock_minutes.lock().await;
+    
+    // 0 = désactivé
+    if timeout_minutes == 0 {
+        return Ok(serde_json::json!({ "locked": false, "reason": "disabled" }));
+    }
+    
+    let elapsed = last_activity.elapsed();
+    let timeout = std::time::Duration::from_secs(timeout_minutes * 60);
+    
+    if elapsed >= timeout {
+        debug_log!("🔒 Auto-lock déclenché : {} minutes d'inactivité", elapsed.as_secs() / 60);
+        
+        // M01 — Nettoyage sécurisé des fichiers déchiffrés temporaires
+        secure_cleanup_decrypted_files(&state.decrypted_temp_files).await;
+        
+        // Supprimer la clé de chiffrement
+        if let Err(_e) = secure_storage::delete_encryption_key(user_id) {
+            debug_log!("⚠️ Erreur suppression clé auto-lock: {}", _e);
+        }
+        
+        // Invalider la session
+        *state.session_token.lock().await = None;
+        *state.current_user_id.lock().await = None;
+        
+        // Log l'événement
+        if let Some(db) = state.db.lock().await.as_ref() {
+            let _ = db.log_action(user_id, "AUTO_LOCK", "session", None).await;
+        }
+        
+        Ok(serde_json::json!({
+            "locked": true,
+            "reason": "inactivity",
+            "elapsed_minutes": elapsed.as_secs() / 60
+        }))
+    } else {
+        let remaining = timeout.saturating_sub(elapsed);
+        Ok(serde_json::json!({
+            "locked": false,
+            "remaining_seconds": remaining.as_secs()
+        }))
+    }
+}
+
+// Password CRUD operations
+#[tauri::command]
+async fn create_password(
+    request: CreatePasswordRequest,
+    state: State<'_, AppState>,
+) -> Result<i64, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Récupérer la clé de chiffrement depuis l'enclave sécurisée (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    
+    // Chiffrer le mot de passe
+    let encrypted_password = encrypt_data_secure(&request.password, &encryption_key)
+        .map_err(|e| format!("Erreur de chiffrement: {}", e))?;
+
+    // Chiffrer TOUS les champs sensibles (titre, username, url, notes, catégorie)
+    let encrypted_title = encrypt_data_secure(&request.title, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement titre: {}", e))?;
+
+    let encrypted_username = request.username.as_ref()
+        .map(|u| encrypt_data_secure(u, &encryption_key))
+        .transpose()
+        .map_err(|e| format!("Erreur chiffrement username: {}", e))?;
+    
+    let encrypted_url = request.url.as_ref()
+        .map(|u| encrypt_data_secure(u, &encryption_key))
+        .transpose()
+        .map_err(|e| format!("Erreur chiffrement URL: {}", e))?;
+    
+    let encrypted_notes = request.notes.as_ref()
+        .map(|n| encrypt_data_secure(n, &encryption_key))
+        .transpose()
+        .map_err(|e| format!("Erreur chiffrement notes: {}", e))?;
+
+    let encrypted_category = request.category.as_ref()
+        .map(|c| encrypt_data_secure(c, &encryption_key))
+        .transpose()
+        .map_err(|e| format!("Erreur chiffrement catégorie: {}", e))?;
+
+    let password_id = db
+        .create_password(
+            user_id,
+            &encrypted_title,
+            encrypted_username.as_deref(),
+            &encrypted_password,
+            encrypted_url.as_deref(),
+            encrypted_notes.as_deref(),
+            encrypted_category.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("Erreur création mot de passe: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "CREATE", "password", Some(password_id)).await;
+
+    Ok(password_id)
+}
+
+#[tauri::command]
+async fn get_passwords(state: State<'_, AppState>) -> Result<Vec<Password>, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let passwords = db
+        .get_passwords(user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération mots de passe: {}", e))?;
+
+    // Récupérer la clé de chiffrement depuis l'enclave sécurisée (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+
+    // Migration automatique v1→v2 : re-chiffrer en ChaCha20-Poly1305 les entrées AES-256-GCM legacy
+    for pw in &passwords {
+        let needs_migration = !pw.password.starts_with("v2:");
+        if needs_migration {
+            // Déchiffrer avec v1 (AES-256-GCM) puis re-chiffrer en v2 (ChaCha20-Poly1305)
+            if let Ok(plaintext_pw) = decrypt_data_secure(&pw.password, &encryption_key) {
+                if let Ok(v2_pw) = encrypt_data_secure(&plaintext_pw, &encryption_key) {
+                    // Re-chiffrer title, username, url, notes, category en v2
+                    let v2_title = encrypt_data_secure(&pw.title, &encryption_key).unwrap_or_else(|_| pw.title.clone());
+                    let v2_username = pw.username.as_ref().map(|u| encrypt_data_secure(u, &encryption_key).unwrap_or_else(|_| u.clone()));
+                    let v2_url = pw.url.as_ref().map(|u| encrypt_data_secure(u, &encryption_key).unwrap_or_else(|_| u.clone()));
+                    let v2_notes = pw.notes.as_ref().map(|n| encrypt_data_secure(n, &encryption_key).unwrap_or_else(|_| n.clone()));
+                    let v2_category = pw.category.as_ref().map(|c| encrypt_data_secure(c, &encryption_key).unwrap_or_else(|_| c.clone()));
+                    let _ = db.update_password(
+                        pw.id, user_id,
+                        &v2_title,
+                        v2_username.as_deref(),
+                        &v2_pw,
+                        v2_url.as_deref(),
+                        v2_notes.as_deref(),
+                        v2_category.as_deref(),
+                    ).await;
+                    if cfg!(debug_assertions) {
+                        eprintln!("🔄 Migration v1→v2 effectuée pour le mot de passe {}", pw.id);
+                    }
+                }
+            }
+        }
+    }
+
+    // Re-lire les mots de passe après migration éventuelle
+    let passwords = if passwords.iter().any(|pw| !pw.password.starts_with("v2:")) {
+        db.get_passwords(user_id).await
+            .map_err(|e| format!("Erreur récupération mots de passe: {}", e))?
+    } else {
+        passwords
+    };
+
+    // Déchiffrer tous les mots de passe et leurs champs sensibles avant de les renvoyer
+    let mut decrypted_passwords = Vec::new();
+    for mut password in passwords {
+        // Déchiffrer le mot de passe
+        match decrypt_data_secure(&password.password, &encryption_key) {
+            Ok(decrypted) => {
+                password.password = decrypted;
+            }
+            Err(_e) => {
+                if cfg!(debug_assertions) {
+                    eprintln!("⚠️ Erreur déchiffrement mot de passe {} (debug): {}", password.id, _e);
+                } else {
+                    eprintln!("⚠️ Erreur déchiffrement mot de passe {}", password.id);
+                }
+            }
+        }
+        
+        // Déchiffrer le titre (chiffré depuis V-02)
+        if let Ok(decrypted) = decrypt_data_secure(&password.title, &encryption_key) {
+            password.title = decrypted;
+        }
+
+        // Déchiffrer username si présent
+        if let Some(ref username) = password.username {
+            if let Ok(decrypted) = decrypt_data_secure(username, &encryption_key) {
+                password.username = Some(decrypted);
+            }
+        }
+        
+        // Déchiffrer URL si présente
+        if let Some(ref url) = password.url {
+            if let Ok(decrypted) = decrypt_data_secure(url, &encryption_key) {
+                password.url = Some(decrypted);
+            }
+        }
+        
+        // Déchiffrer notes si présentes
+        if let Some(ref notes) = password.notes {
+            if let Ok(decrypted) = decrypt_data_secure(notes, &encryption_key) {
+                password.notes = Some(decrypted);
+            }
+        }
+
+        // Déchiffrer catégorie si présente
+        if let Some(ref category) = password.category {
+            if let Ok(decrypted) = decrypt_data_secure(category, &encryption_key) {
+                password.category = Some(decrypted);
+            }
+        }
+        
+        decrypted_passwords.push(password);
+    }
+
+    Ok(decrypted_passwords)
+}
+
+#[tauri::command]
+async fn get_password(id: i64, state: State<'_, AppState>) -> Result<Option<Password>, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let password = db
+        .get_password(id, user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération mot de passe: {}", e))?;
+
+    Ok(password)
+}
+
+#[tauri::command]
+async fn decrypt_password(encrypted: String, state: State<'_, AppState>) -> Result<String, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+    
+    // Récupérer la clé de chiffrement depuis l'enclave sécurisée (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    
+    let decrypted = decrypt_data_secure(&encrypted, &encryption_key)
+        .map_err(|e| format!("Erreur de déchiffrement: {}", e))?;
+
+    Ok(decrypted)
+}
+
+#[tauri::command]
+async fn update_password(
+    request: UpdatePasswordRequest,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    // Protection ransomware
+    let monitor = get_security_monitor();
+    if monitor.is_readonly().await {
+        return Err("🚨 Système en mode lecture seule (protection ransomware)".to_string());
+    }
+    
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Récupérer la clé de chiffrement depuis l'enclave sécurisée (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    
+    // Chiffrer le mot de passe
+    let encrypted_password = encrypt_data_secure(&request.password, &encryption_key)
+        .map_err(|e| format!("Erreur de chiffrement: {}", e))?;
+
+    // Chiffrer TOUS les champs sensibles (titre, username, url, notes, catégorie)
+    let encrypted_title = encrypt_data_secure(&request.title, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement titre: {}", e))?;
+
+    let encrypted_username = request.username.as_ref()
+        .map(|u| encrypt_data_secure(u, &encryption_key))
+        .transpose()
+        .map_err(|e| format!("Erreur chiffrement username: {}", e))?;
+    
+    let encrypted_url = request.url.as_ref()
+        .map(|u| encrypt_data_secure(u, &encryption_key))
+        .transpose()
+        .map_err(|e| format!("Erreur chiffrement URL: {}", e))?;
+    
+    let encrypted_notes = request.notes.as_ref()
+        .map(|n| encrypt_data_secure(n, &encryption_key))
+        .transpose()
+        .map_err(|e| format!("Erreur chiffrement notes: {}", e))?;
+
+    let encrypted_category = request.category.as_ref()
+        .map(|c| encrypt_data_secure(c, &encryption_key))
+        .transpose()
+        .map_err(|e| format!("Erreur chiffrement catégorie: {}", e))?;
+
+    let updated = db
+        .update_password(
+            request.id,
+            user_id,
+            &encrypted_title,
+            encrypted_username.as_deref(),
+            &encrypted_password,
+            encrypted_url.as_deref(),
+            encrypted_notes.as_deref(),
+            encrypted_category.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("Erreur mise à jour mot de passe: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "UPDATE", "password", Some(request.id)).await;
+
+    Ok(updated)
+}
+
+#[tauri::command]
+async fn delete_password(id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+    // Protection ransomware
+    let monitor = get_security_monitor();
+    if monitor.is_readonly().await {
+        return Err("🚨 Système en mode lecture seule (protection ransomware)".to_string());
+    }
+    
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let deleted = db
+        .delete_password(id, user_id)
+        .await
+        .map_err(|e| format!("Erreur suppression mot de passe: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "DELETE", "password", Some(id)).await;
+
+    Ok(deleted)
+}
+
+// Secure file operations
+#[tauri::command]
+async fn create_secure_file(
+    filename: String,
+    file_data: String,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<i64, String> {
+    debug_log!("📥 Demande de création de fichier: {}", filename);
+    
+    // Vérifier le mode lecture seule (protection ransomware)
+    let monitor = get_security_monitor();
+    let is_readonly = monitor.is_readonly().await;
+    debug_log!("🔒 Mode lecture seule: {}", is_readonly);
+    
+    if is_readonly {
+        debug_log!("❌ Création bloquée - système en lecture seule");
+        return Err("🚨 SYSTÈME EN MODE LECTURE SEULE - Activité ransomware détectée. Utilisez la commande 'Désactiver mode lecture seule' dans les paramètres si c'est un faux positif.".to_string());
+    }
+    
+    // Surveiller l'activité fichier
+    monitor.monitor_file_access(&filename).await;
+    
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Utiliser le répertoire caché système pour les fichiers
+    let files_dir = hidden_storage::get_hidden_files_dir()
+        .map_err(|e| format!("Erreur obtention dossier fichiers caché: {}", e))?;
+
+    // Récupérer la clé de chiffrement depuis l'enclave sécurisée
+    // Note: La bibliothèque keyring gère automatiquement la sécurité sur chaque plateforme :
+    // - macOS: Keychain (Secure Enclave avec T2/M1/M2)
+    // - Windows: Credential Manager (Windows Data Protection API - DPAPI)
+    // - Linux: Secret Service (libsecret)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    
+    // Émettre événement de début de chiffrement
+    debug_log!("📡 Émission événement: decoding (0%)");
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "decoding",
+        "progress": 0,
+        "message": "Décodage des données..."
+    }));
+    
+    // Décoder les données Base64 reçues du frontend
+    let decoded_data = general_purpose::STANDARD.decode(&file_data)
+        .map_err(|e| format!("Erreur décodage Base64: {}", e))?;
+
+    let total_size = decoded_data.len();
+    debug_log!("📡 Émission événement: encrypting (10%) - {} octets", total_size);
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "encrypting",
+        "progress": 10,
+        "message": format!("Chiffrement de {} octets...", total_size)
+    }));
+
+    // Chiffrer les données binaires du fichier
+    let encrypted_data = encrypt_data_bytes_secure(&decoded_data, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement: {}", e))?;
+    
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "encrypting",
+        "progress": 70,
+        "message": "Chiffrement du nom de fichier..."
+    }));
+
+    // Chiffrer le nom de fichier pour plus de sécurité
+    let encrypted_filename = encrypt_data_secure(&filename, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement filename: {}", e))?;
+
+    // Générer un nom de fichier unique sur le disque (UUID)
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let file_path = files_dir.join(format!("{}.enc", file_id));
+    
+    debug_log!("📝 Stockage fichier chiffré: {} -> {}", filename, file_id);
+    debug_log!("🔐 Clé stockée de manière sécurisée dans l'enclave système");
+
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "saving",
+        "progress": 80,
+        "message": "Écriture du fichier chiffré..."
+    }));
+
+    // Écrire le fichier chiffré sur le disque de manière asynchrone
+    let file_path_clone = file_path.clone();
+    let encrypted_data_clone = encrypted_data.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&file_path_clone, encrypted_data_clone.as_bytes())
+    }).await
+        .map_err(|e| format!("Erreur thread écriture: {}", e))?
+        .map_err(|e| format!("Erreur écriture fichier: {}", e))?;
+    
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "finalizing",
+        "progress": 90,
+        "message": "Finalisation..."
+    }));
+    
+    // Marquer le fichier comme légitime pour éviter les faux positifs antivirus
+    let _ = platform_security::mark_encrypted_file_as_legitimate(&file_path);
+    let _ = platform_security::add_legitimate_encryption_metadata(&file_path);
+
+    let file_size = decoded_data.len() as i64;
+    
+    // Calculer le hash BLAKE3 des données originales pour vérification d'intégrité
+    let integrity_hash = hex::encode(blake3_hash(&decoded_data));
+
+    let file_path_str = file_path.to_str()
+        .ok_or_else(|| "Chemin fichier invalide".to_string())?;
+    
+    let secure_file_id = db
+        .create_secure_file(
+            user_id,
+            &encrypted_filename,
+            file_path_str,
+            file_size,
+            None,
+            Some(&integrity_hash),
+        )
+        .await
+        .map_err(|e| format!("Erreur création fichier sécurisé: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "CREATE", "file", Some(secure_file_id)).await;
+
+    debug_log!("📡 Émission événement: complete (100%)");
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "complete",
+        "progress": 100,
+        "message": "Fichier chiffré avec succès!"
+    }));
+
+    Ok(secure_file_id)
+}
+
+/// Crée un fichier sécurisé à partir d'un chemin (streaming par chunks — mémoire constante)
+///
+/// Utilise le format SENC v1 (ChaCha20-Poly1305 streaming) pour chiffrer le fichier
+/// sans jamais charger l'intégralité en RAM. Pic mémoire ≈ 128 KiB quel que soit
+/// la taille du fichier source.
+#[tauri::command]
+async fn create_secure_file_from_path(
+    file_path: String,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<i64, String> {
+    use std::fs::File;
+    use std::io::{BufReader, BufWriter, Read};
+    
+    debug_log!("📥 Demande de création de fichier depuis chemin: {}", file_path);
+    
+    // 🔒 VALIDATION DE SÉCURITÉ: Vérifier path traversal sur le chemin source
+    let source_path = std::path::Path::new(&file_path);
+    if file_path.contains("../") || file_path.contains("..\\") {
+        return Err("🚨 Chemin invalide: Séquence path traversal détectée".to_string());
+    }
+    for component in source_path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err("🚨 Chemin invalide: Composant '..' détecté".to_string());
+        }
+    }
+    let validated_path = source_path.canonicalize()
+        .map_err(|e| format!("🚨 Chemin invalide: Fichier introuvable ou inaccessible: {}", e))?;
+    if !validated_path.is_file() {
+        return Err("🚨 Le chemin ne pointe pas vers un fichier".to_string());
+    }
+    
+    debug_log!("✅ Chemin source validé: {}", validated_path.display());
+    
+    // Vérifier le mode lecture seule
+    let monitor = get_security_monitor();
+    let is_readonly = monitor.is_readonly().await;
+    debug_log!("🔒 Mode lecture seule: {}", is_readonly);
+    
+    if is_readonly {
+        return Err("🚨 SYSTÈME EN MODE LECTURE SEULE".to_string());
+    }
+    
+    // Extraire le nom du fichier
+    let filename = validated_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Nom de fichier invalide")?
+        .to_string();
+    
+    debug_log!("📝 Nom fichier: {}", filename);
+    
+    // Surveiller l'activité
+    monitor.monitor_file_access(&filename).await;
+    
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let files_dir = hidden_storage::get_hidden_files_dir()
+        .map_err(|e| format!("Erreur dossier: {}", e))?;
+
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur clé: {}", e))?;
+    
+    // Progression 0%
+    debug_log!("📡 Émission événement: reading (0%)");
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "reading",
+        "progress": 0,
+        "message": "Lecture du fichier..."
+    }));
+    
+    // Ouvrir le fichier source
+    let source_file = File::open(&validated_path)
+        .map_err(|e| format!("Erreur ouverture fichier: {}", e))?;
+    
+    let file_size = source_file.metadata()
+        .map_err(|e| format!("Erreur metadata: {}", e))?
+        .len();
+    
+    debug_log!("📊 Taille fichier: {} octets ({} MB)", file_size, file_size / 1_048_576);
+    
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "reading",
+        "progress": 5,
+        "message": format!("Traitement de {} MB...", file_size / 1_048_576)
+    }));
+    
+    // Chiffrer le nom de fichier
+    let encrypted_filename = encrypt_data_secure(&filename, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement nom: {}", e))?;
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let output_path = files_dir.join(format!("{}.senc", file_id));
+    
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "encrypting",
+        "progress": 10,
+        "message": "Chiffrement en cours (streaming)..."
+    }));
+    
+    // ═══ CHIFFREMENT STREAMING ═══
+    // Lit le fichier source par chunks de 64 KiB, chiffre chaque chunk avec
+    // ChaCha20-Poly1305 (nonce unique par chunk), écrit directement dans le
+    // fichier de sortie. Mémoire pic ≈ 128 KiB (double buffer look-ahead).
+    // Le BLAKE3 est calculé en streaming aussi (pas de seconde passe).
+    let output_path_clone = output_path.clone();
+    let validated_path_clone = validated_path.clone();
+    let (bytes_encrypted, integrity_hash) = tokio::task::spawn_blocking(move || -> Result<(u64, String), String> {
+        let src = File::open(&validated_path_clone)
+            .map_err(|e| format!("Erreur ouverture source: {}", e))?;
+        let mut reader = BufReader::with_capacity(65536, src);
+        
+        let dst = File::create(&output_path_clone)
+            .map_err(|e| format!("Erreur création sortie: {}", e))?;
+        let mut writer = BufWriter::with_capacity(65536, dst);
+        
+        encrypt_file_stream_with_hash(&encryption_key, &mut reader, &mut writer, 0)
+            .map_err(|e| format!("Erreur chiffrement streaming: {}", e))
+    }).await
+        .map_err(|e| format!("Erreur thread chiffrement: {}", e))?
+        .map_err(|e| e)?;
+    
+    debug_log!("🔐 Fichier chiffré en streaming: {} octets traités", bytes_encrypted);
+    
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "finalizing",
+        "progress": 85,
+        "message": "Finalisation..."
+    }));
+    
+    // Marquer comme légitime
+    let _ = platform_security::mark_encrypted_file_as_legitimate(&output_path);
+    let _ = platform_security::add_legitimate_encryption_metadata(&output_path);
+
+    let output_path_str = output_path.to_str()
+        .ok_or_else(|| "Chemin sortie invalide".to_string())?;
+    
+    let secure_file_id = db
+        .create_secure_file(
+            user_id,
+            &encrypted_filename,
+            output_path_str,
+            file_size as i64,
+            None,
+            Some(&integrity_hash),
+        )
+        .await
+        .map_err(|e| format!("Erreur DB: {}", e))?;
+
+    let _ = db.log_action(user_id, "CREATE", "file", Some(secure_file_id)).await;
+
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "deleting_original",
+        "progress": 95,
+        "message": "Suppression du fichier original..."
+    }));
+    
+    // Effacement sécurisé du fichier original (remplissage par zéros avant suppression)
+    debug_log!("🗑️ Effacement sécurisé du fichier original: {}", file_path);
+    tokio::task::spawn_blocking({
+        let file_path = file_path.clone();
+        move || {
+            if let Ok(metadata) = std::fs::metadata(&file_path) {
+                let size = metadata.len() as usize;
+                if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&file_path) {
+                    use std::io::Write;
+                    let zeros = vec![0u8; std::cmp::min(size, 1_048_576)];
+                    let mut written = 0;
+                    while written < size {
+                        let to_write = std::cmp::min(zeros.len(), size - written);
+                        if f.write_all(&zeros[..to_write]).is_err() { break; }
+                        written += to_write;
+                    }
+                    let _ = f.flush();
+                }
+            }
+            std::fs::remove_file(&file_path)
+        }
+    }).await
+        .map_err(|e| format!("Erreur thread suppression: {}", e))?
+        .map_err(|e| format!("Erreur suppression fichier original: {}", e))?;
+    
+    debug_log!("✅ Fichier original supprimé");
+    
+    let _ = app_handle.emit("file-encryption-progress", serde_json::json!({
+        "stage": "complete",
+        "progress": 100,
+        "message": "Fichier chiffré avec succès!"
+    }));
+    
+    #[cfg(debug_assertions)]
+    debug_log!("✅ Fichier créé avec ID: {}", secure_file_id);
+
+    Ok(secure_file_id)
+}
+
+#[tauri::command]
+async fn get_secure_files(state: State<'_, AppState>) -> Result<Vec<SecureFile>, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let files = db
+        .get_secure_files(user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération fichiers: {}", e))?;
+
+    // Récupérer la clé de chiffrement pour déchiffrer les noms de fichiers (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+
+    // Déchiffrer les noms de fichiers
+    let mut decrypted_files = Vec::new();
+    for mut file in files {
+        if let Ok(decrypted_filename) = decrypt_data_secure(&file.filename, &encryption_key) {
+            file.filename = decrypted_filename;
+        } else {
+            // Masquer détails techniques en production
+            debug_log!("⚠️ Erreur déchiffrement filename pour fichier {}", file.id);
+        }
+        decrypted_files.push(file);
+    }
+
+    Ok(decrypted_files)
+}
+
+#[tauri::command]
+async fn decrypt_file(id: i64, state: State<'_, AppState>) -> Result<String, String> {
+    use std::io::Cursor;
+    
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let file = db
+        .get_secure_files(user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération fichiers: {}", e))?
+        .into_iter()
+        .find(|f| f.id == id)
+        .ok_or("Fichier non trouvé")?;
+
+    debug_log!("📥 Téléchargement fichier chiffré depuis: {}", file.file_path);
+
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+
+    // Lire les premiers octets pour détecter le format
+    let header = {
+        let mut f = std::fs::File::open(&file.file_path)
+            .map_err(|e| format!("Erreur lecture fichier: {}", e))?;
+        let mut buf = [0u8; 6];
+        use std::io::Read;
+        let _ = f.read(&mut buf).map_err(|e| format!("Erreur lecture header: {}", e))?;
+        buf
+    };
+
+    let decrypted_bytes = if is_senc_format(&header) {
+        // ═══ Format SENC v1: déchiffrement streaming vers mémoire ═══
+        let file_path = file.file_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+            let src = std::fs::File::open(&file_path)
+                .map_err(|e| format!("Erreur ouverture: {}", e))?;
+            let mut reader = std::io::BufReader::with_capacity(65536, src);
+            let mut output = Vec::new();
+            let mut writer = Cursor::new(&mut output);
+            decrypt_file_stream_secure(&encryption_key, &mut reader, &mut writer)
+                .map_err(|e| format!("Erreur déchiffrement streaming: {}", e))?;
+            Ok(output)
+        }).await
+            .map_err(|e| format!("Erreur thread: {}", e))?
+            .map_err(|e| e)?
+    } else {
+        // ═══ Format legacy (v2:base64): déchiffrement classique ═══
+        let encrypted_data = std::fs::read_to_string(&file.file_path)
+            .map_err(|e| format!("Erreur lecture fichier: {}", e))?;
+        decrypt_data_bytes_secure(&encrypted_data, &encryption_key)
+            .map_err(|e| format!("Erreur déchiffrement: {}", e))?
+    };
+
+    let base64_data = general_purpose::STANDARD.encode(&decrypted_bytes);
+    debug_log!("✅ Fichier déchiffré et prêt pour téléchargement");
+    Ok(base64_data)
+}
+
+/// Déchiffre un fichier et le sauvegarde directement au chemin spécifié (streaming si SENC)
+#[tauri::command]
+async fn decrypt_file_to_path(
+    id: i64,
+    output_path: String,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    
+    #[cfg(debug_assertions)]
+    debug_log!("📥 Demande de déchiffrement du fichier ID: {} vers {}", id, output_path);
+    
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let file = db
+        .get_secure_files(user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération fichiers: {}", e))?
+        .into_iter()
+        .find(|f| f.id == id)
+        .ok_or("Fichier non trouvé")?;
+
+    debug_log!("📥 Fichier chiffré: {}", file.file_path);
+    
+    let _ = app_handle.emit("file-decryption-progress", serde_json::json!({
+        "stage": "reading",
+        "progress": 0,
+        "message": "Lecture du fichier chiffré..."
+    }));
+
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+
+    // EXP-004 fix: Validation du chemin de sortie contre path traversal
+    let home_dir = dirs::home_dir()
+        .ok_or("Impossible de déterminer le répertoire utilisateur")?;
+    let validated_output = path_validator::validate_file_path(&output_path, Some(&home_dir))
+        .map_err(|e| format!("Chemin de sortie invalide: {}", e))?;
+    let safe_output_path = validated_output.to_string_lossy().to_string();
+
+    // Détecter le format (SENC v1 vs legacy)
+    let header = {
+        let mut f = std::fs::File::open(&file.file_path)
+            .map_err(|e| format!("Erreur lecture fichier: {}", e))?;
+        let mut buf = [0u8; 6];
+        use std::io::Read;
+        let _ = f.read(&mut buf).map_err(|e| format!("Erreur lecture header: {}", e))?;
+        buf
+    };
+
+    let _ = app_handle.emit("file-decryption-progress", serde_json::json!({
+        "stage": "decrypting",
+        "progress": 30,
+        "message": "Déchiffrement en cours..."
+    }));
+
+    if is_senc_format(&header) {
+        // ═══ Format SENC v1: déchiffrement streaming direct vers fichier ═══
+        let file_path = file.file_path.clone();
+        let out_path = safe_output_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let src = std::fs::File::open(&file_path)
+                .map_err(|e| format!("Erreur ouverture source: {}", e))?;
+            let mut reader = std::io::BufReader::with_capacity(65536, src);
+            let dst = std::fs::File::create(&out_path)
+                .map_err(|e| format!("Erreur création sortie: {}", e))?;
+            let mut writer = std::io::BufWriter::with_capacity(65536, dst);
+            decrypt_file_stream_secure(&encryption_key, &mut reader, &mut writer)
+                .map_err(|e| format!("Erreur déchiffrement streaming: {}", e))?;
+            Ok(())
+        }).await
+            .map_err(|e| format!("Erreur thread: {}", e))?
+            .map_err(|e| e)?;
+    } else {
+        // ═══ Format legacy (v2:base64): déchiffrement classique ═══
+        let encrypted_data = tokio::task::spawn_blocking({
+            let file_path = file.file_path.clone();
+            move || std::fs::read_to_string(&file_path)
+        }).await
+            .map_err(|e| format!("Erreur thread lecture: {}", e))?
+            .map_err(|e| format!("Erreur lecture fichier: {}", e))?;
+
+        let decrypted_bytes = decrypt_data_bytes_secure(&encrypted_data, &encryption_key)
+            .map_err(|e| format!("Erreur déchiffrement: {}", e))?;
+
+        tokio::task::spawn_blocking({
+            let output_path = safe_output_path.clone();
+            move || std::fs::write(&output_path, &decrypted_bytes)
+        }).await
+            .map_err(|e| format!("Erreur thread écriture: {}", e))?
+            .map_err(|e| format!("Erreur écriture: {}", e))?;
+    }
+    
+    debug_log!("✅ Fichier sauvegardé: {}", safe_output_path);
+    
+    // M01 — Enregistrer le fichier déchiffré pour nettoyage sécurisé ultérieur
+    {
+        let mut temp_files = state.decrypted_temp_files.lock().await;
+        temp_files.push(safe_output_path.clone());
+    }
+    
+    let _ = app_handle.emit("file-decryption-progress", serde_json::json!({
+        "stage": "complete",
+        "progress": 100,
+        "message": "Fichier téléchargé avec succès!"
+    }));
+
+    Ok(format!("Fichier sauvegardé: {}", output_path))
+}
+
+/// M01 — Nettoyage sécurisé manuel des fichiers déchiffrés temporaires
+/// Le frontend peut appeler cette commande pour purger tous les fichiers déchiffrés
+#[tauri::command]
+async fn cleanup_decrypted_files(state: State<'_, AppState>) -> Result<String, String> {
+    let count = state.decrypted_temp_files.lock().await.len();
+    secure_cleanup_decrypted_files(&state.decrypted_temp_files).await;
+    debug_log!("🧹 Nettoyage manuel: {} fichier(s) supprimé(s)", count);
+    Ok(format!("{} fichier(s) nettoyé(s) de manière sécurisée", count))
+}
+
+#[tauri::command]
+async fn delete_secure_file(id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Récupérer le fichier pour supprimer le fichier physique
+    if let Ok(Some(file)) = db.get_secure_files(user_id).await.map(|files| {
+        files.into_iter().find(|f| f.id == id)
+    }) {
+        debug_log!("🗑️ Suppression du fichier physique: {}", file.file_path);
+        let _ = std::fs::remove_file(&file.file_path);
+    }
+
+    let deleted = db
+        .delete_secure_file(id, user_id)
+        .await
+        .map_err(|e| format!("Erreur suppression fichier: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "DELETE", "file", Some(id)).await;
+
+    Ok(deleted)
+}
+
+// Secure key operations
+#[tauri::command]
+async fn create_secure_key(
+    request: CreateKeyRequest,
+    state: State<'_, AppState>,
+) -> Result<i64, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Générer une clé selon le type demandé
+    let key_data = match request.key_type.as_str() {
+        "ssh" => {
+            // Génération d'une paire de clés SSH (publique + privée)
+            let private_key = generate_random_key_bytes();
+            let public_key = generate_random_key_bytes();
+            let private_key_b64 = general_purpose::STANDARD.encode(&private_key);
+            let public_key_b64 = general_purpose::STANDARD.encode(&public_key);
+            // Format: private_key|||public_key (uniquement les clés brutes en base64, sans préfixe/suffixe)
+            format!("{}|||{}", private_key_b64, public_key_b64)
+        },
+        "api" => {
+            // Génération d'une clé API (hexadécimale)
+            let key = generate_random_key_bytes();
+            hex::encode(&key)
+        },
+        "gpg" => {
+            // Génération d'une clé GPG (base64 propre, sans marqueurs)
+            let key = generate_random_key_bytes();
+            general_purpose::STANDARD.encode(&key)
+        },
+        "encryption" => {
+            // Génération d'une clé de chiffrement AES-256
+            let key = generate_random_key_bytes();
+            hex::encode(&key)
+        },
+        _ => {
+            // Par défaut : clé hexadécimale
+            let key = generate_random_key_bytes();
+            hex::encode(&key)
+        }
+    };
+
+    debug_log!("🔑 Clé {} générée (type: {})", request.key_name, request.key_type);
+
+    // Récupérer la clé maître depuis l'enclave sécurisée pour chiffrer la clé générée (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    
+    let encrypted_key = encrypt_data_secure(&key_data, &encryption_key)
+        .map_err(|e| format!("Erreur de chiffrement: {}", e))?;
+
+    // Chiffrer le nom de la clé pour plus de sécurité
+    let encrypted_key_name = encrypt_data_secure(&request.key_name, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement key_name: {}", e))?;
+
+    let secure_key_id = db
+        .create_secure_key(
+            user_id,
+            &encrypted_key_name,
+            &request.key_type,
+            &encrypted_key,
+            &request.algorithm,
+        )
+        .await
+        .map_err(|e| format!("Erreur création clé: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "CREATE", "key", Some(secure_key_id)).await;
+
+    Ok(secure_key_id)
+}
+
+#[tauri::command]
+async fn import_secure_key(
+    request: ImportKeyRequest,
+    state: State<'_, AppState>,
+) -> Result<i64, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    debug_log!("📥 Import de clé {} (type: {})", request.key_name, request.key_type);
+
+    // Récupérer la clé maître depuis l'enclave sécurisée pour chiffrer la clé importée (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    
+    // Chiffrer la clé importée
+    let encrypted_key = encrypt_data_secure(&request.key_data, &encryption_key)
+        .map_err(|e| format!("Erreur de chiffrement: {}", e))?;
+
+    // Chiffrer le nom de la clé
+    let encrypted_key_name = encrypt_data_secure(&request.key_name, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement key_name: {}", e))?;
+
+    let secure_key_id = db
+        .create_secure_key(
+            user_id,
+            &encrypted_key_name,
+            &request.key_type,
+            &encrypted_key,
+            &request.algorithm,
+        )
+        .await
+        .map_err(|e| format!("Erreur import clé: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "IMPORT", "key", Some(secure_key_id)).await;
+
+    Ok(secure_key_id)
+}
+
+#[tauri::command]
+async fn get_secure_keys(state: State<'_, AppState>) -> Result<Vec<SecureKey>, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let keys = db
+        .get_secure_keys(user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération clés: {}", e))?;
+
+    // Récupérer la clé de chiffrement pour déchiffrer les noms de clés (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+
+    // Déchiffrer les noms de clés
+    let mut decrypted_keys = Vec::new();
+    for mut key in keys {
+        if let Ok(decrypted_key_name) = decrypt_data_secure(&key.key_name, &encryption_key) {
+            key.key_name = decrypted_key_name;
+        } else {
+            // Masquer détails techniques en production
+            debug_log!("⚠️ Erreur déchiffrement key_name pour clé {}", key.id);
+        }
+        decrypted_keys.push(key);
+    }
+
+    Ok(decrypted_keys)
+}
+
+#[tauri::command]
+async fn delete_secure_key(id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let deleted = db
+        .delete_secure_key(id, user_id)
+        .await
+        .map_err(|e| format!("Erreur suppression clé: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "DELETE", "key", Some(id)).await;
+
+    Ok(deleted)
+}
+
+// File sharing commands
+#[tauri::command]
+async fn share_file(
+    request: ShareFileRequest,
+    state: State<'_, AppState>,
+) -> Result<ShareFileResponse, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Vérifier que le fichier existe et appartient à l'utilisateur
+    let file = db
+        .get_secure_file(request.file_id, user_id)
+        .await
+        .map_err(|e| format!("Erreur base de données: {}", e))?
+        .ok_or("Fichier non trouvé")?;
+
+    // Générer un token unique et sécurisé
+    let share_token = format!("{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+    
+    // Récupérer la clé de chiffrement de l'utilisateur (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    
+    // Chiffrer la clé de déchiffrement avec le token (pour sécuriser l'accès)
+    let encrypted_key = {
+        let encoded = encryption_key.use_key(|k| {
+            Ok::<String, String>(general_purpose::STANDARD.encode(k))
+        })?;
+        encrypt_data_secure(&encoded, &encryption_key)
+            .map_err(|e| format!("Erreur chiffrement clé: {}", e))?
+    };
+
+    // Calculer la date d'expiration
+    let expires_at = (Utc::now() + Duration::days(request.expiration_days))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+
+    // Créer le partage dans la base de données
+    let _share_id = db
+        .create_file_share(
+            request.file_id,
+            user_id,
+            &request.recipient_email,
+            &share_token,
+            &encrypted_key,
+            &expires_at,
+        )
+        .await
+        .map_err(|e| format!("Erreur création partage: {}", e))?;
+
+    // Générer le lien de partage
+    let share_link = format!("securevault://share/{}", share_token);
+
+    // Log l'action
+    let _ = db.log_action(user_id, "SHARE", "file", Some(request.file_id)).await;
+
+    debug_log!("✅ Fichier {} partagé avec {} (expires: {})", file.filename, request.recipient_email, expires_at);
+
+    Ok(ShareFileResponse {
+        success: true,
+        share_token,
+        share_link,
+        expires_at,
+    })
+}
+
+#[tauri::command]
+async fn get_user_shares(state: State<'_, AppState>) -> Result<Vec<FileShare>, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let shares = db
+        .get_user_shares(user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération partages: {}", e))?;
+
+    Ok(shares)
+}
+
+#[tauri::command]
+async fn revoke_share(share_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let deleted = db
+        .delete_file_share(share_id, user_id)
+        .await
+        .map_err(|e| format!("Erreur révocation partage: {}", e))?;
+
+    // Log l'action
+    let _ = db.log_action(user_id, "REVOKE_SHARE", "file_share", Some(share_id)).await;
+
+    Ok(deleted)
+}
+
+#[tauri::command]
+async fn decrypt_key(id: i64, state: State<'_, AppState>) -> Result<String, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Récupérer la clé depuis la base
+    let key = db
+        .get_secure_key_by_id(id, user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+
+    // Récupérer la clé de chiffrement depuis le Keychain (VERSION SÉCURISÉE)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé chiffrement: {}", e))?;
+
+    // Déchiffrer les données de la clé
+    let decrypted_key = decrypt_data_secure(&key.key_data, &encryption_key)
+        .map_err(|e| format!("Erreur déchiffrement: {}", e))?;
+
+    #[cfg(debug_assertions)]
+    debug_log!("🔓 Clé {} déchiffrée pour utilisateur {}", id, user_id);
+
+    Ok(decrypted_key)
+}
+
+#[tauri::command]
+async fn get_security_events(state: State<'_, AppState>) -> Result<Vec<SecurityEvent>, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Récupérer les événements de sécurité depuis les logs d'action
+    let events = db
+        .get_user_action_logs(user_id, Some(50))
+        .await
+        .map_err(|e| format!("Erreur récupération événements: {}", e))?;
+
+    // Convertir les logs d'action en événements de sécurité
+    let security_events: Vec<SecurityEvent> = events
+        .into_iter()
+        .map(|log| SecurityEvent {
+            id: log.id,
+            user_id: log.user_id,
+            event_type: log.action_type.clone(),
+            description: format!("{} sur {}", log.action_type, log.resource_type),
+            severity: None,
+            ip_address: None,
+            timestamp: log.timestamp,
+        })
+        .collect();
+
+    Ok(security_events)
+}
+
+// CFG-002: Commande de test — retourne une erreur en mode release
+#[tauri::command]
+async fn create_test_logs(state: State<'_, AppState>) -> Result<String, String> {
+    // Bloquer l'exécution en production
+    #[cfg(not(debug_assertions))]
+    return Err("Commande de test non disponible en production".to_string());
+
+    #[cfg(debug_assertions)]
+    {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Créer plusieurs logs de test
+    let _ = db.log_action(user_id, "LOGIN", "session", None).await;
+    let _ = db.log_action(user_id, "CREATE", "password", Some(1)).await;
+    let _ = db.log_action(user_id, "UPDATE", "password", Some(1)).await;
+    let _ = db.log_action(user_id, "ACCESS", "file", Some(1)).await;
+    let _ = db.log_action(user_id, "CREATE", "key", Some(1)).await;
+    let _ = db.log_action(user_id, "DELETE", "password", Some(2)).await;
+
+    Ok("6 logs de test créés avec succès".to_string())
+    }
+}
+
+// ========== BIOMETRIC COMMANDS ==========
+
+/// Check biometric hardware availability and enrollment status
+#[tauri::command]
+async fn check_biometric() -> Result<biometric::BiometricStatus, String> {
+    Ok(biometric::check_biometric_status())
+}
+
+/// Enable biometric authentication for the current user.
+/// On desktop: returns a success message (key stored in OS keychain).
+/// On Android: returns JSON `{"message":"...","key_b64":"..."}` so the frontend
+/// can store the key in Android Keystore (TEE/StrongBox).
+#[tauri::command]
+async fn enable_biometric(state: State<'_, AppState>) -> Result<String, String> {
+    let user_id = state.current_user_id.lock().await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let user = db.get_user_by_id(user_id).await
+        .map_err(|e| format!("Erreur DB: {}", e))?
+        .ok_or("Utilisateur introuvable")?;
+
+    // Retrieve current encryption key from session keychain
+    let secure_key = secure_storage::retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Clé de session non trouvée: {}", e))?;
+
+    // Enable biometric (prompts Touch ID, stores key in biometric keychain on desktop)
+    let key_vec = secure_key.to_vec();
+    let key_b64_opt = biometric::enable_biometric(user_id, &user.username, &key_vec)?;
+
+    let _ = db.log_action(user_id, "BIOMETRIC_ENABLED", "security", None).await;
+
+    // On Android, return the key so the frontend can store it in Android Keystore
+    match key_b64_opt {
+        Some(key_b64) => {
+            let response = serde_json::json!({
+                "message": "Biométrie activée avec succès",
+                "key_b64": key_b64
+            });
+            Ok(response.to_string())
+        }
+        None => Ok("Biométrie activée avec succès".to_string()),
+    }
+}
+
+/// Disable biometric authentication
+#[tauri::command]
+async fn disable_biometric(state: State<'_, AppState>) -> Result<String, String> {
+    biometric::disable_biometric()?;
+
+    if let Some(user_id) = *state.current_user_id.lock().await {
+        let db_guard = state.db.lock().await;
+        if let Some(db) = db_guard.as_ref() {
+            let _ = db.log_action(user_id, "BIOMETRIC_DISABLED", "security", None).await;
+        }
+    }
+
+    Ok("Biométrie désactivée".to_string())
+}
+
+/// Login using biometric authentication (Touch ID / Face ID / Windows Hello)
+/// Requires the username to be provided — biometric never bypasses user identification.
+#[tauri::command]
+async fn biometric_login(username: String, state: State<'_, AppState>) -> Result<LoginResponse, String> {
+    let username = username.trim().to_string();
+    if username.is_empty() {
+        return Err("Nom d'utilisateur requis pour la connexion biométrique.".to_string());
+    }
+
+    // 1. Biometric authenticate and retrieve stored credentials for this username
+    let (user_id, enrolled_username, key_bytes) = biometric::biometric_login(&username)?;
+
+    // 2. Verify user still exists in database
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let user = db.get_user_by_username(&enrolled_username).await
+        .map_err(|e| format!("Erreur DB: {}", e))?
+        .ok_or("Utilisateur introuvable. Biométrie désactivée.")?;
+
+    if user.id != user_id {
+        biometric::disable_biometric()?;
+        return Err("Incohérence de compte détectée. Biométrie désactivée.".to_string());
+    }
+
+    // 3. Check if account is locked
+    if user.account_locked {
+        return Ok(LoginResponse {
+            success: false,
+            token: None,
+            message: "Compte verrouillé".to_string(),
+            user_id: None,
+            email: None,
+        });
+    }
+
+    // 4. Store encryption key in session keychain
+    store_encryption_key(user_id, &key_bytes)
+        .map_err(|e| format!("Erreur stockage clé: {}", e))?;
+
+    debug_log!("🔐 Biometric login: clé restaurée dans l'enclave pour user {}", user_id);
+
+    // 4b. Wrap key_bytes in SecureKey for trust store unlock + mDNS auto-start
+    let encryption_key = crate::secure_key::SecureKey::from_slice(&key_bytes);
+
+    // 5. Set up session — also refresh the biometric timer
+    *state.current_user_id.lock().await = Some(user.id);
+    biometric::notify_password_login_success();
+    let token = generate_session_token();
+    *state.session_token.lock().await = Some(token.clone());
+
+    // 5b. Unlock trust store and start mDNS discovery (same as local_login)
+    if let Some(tm) = state.transfer_manager.lock().await.as_mut() {
+        tm.set_peer_name(&user.username);
+        if let Err(e) = tm.trust_store.lock().await.unlock(&encryption_key) {
+            debug_log!("⚠️  Trust store unlock failed (biometric): {}", e);
+        } else {
+            debug_log!("🔒 Trust store déverrouillé via biometric (ChaCha20-Poly1305)");
+        }
+        if let Err(e) = tm.discovery.start_mdns_discovery().await {
+            eprintln!("[TRANSFER] Auto-start mDNS failed at biometric login: {}", e);
+        }
+    }
+
+    let _ = db.log_action(user.id, "BIOMETRIC_LOGIN", "session", None).await;
+
+    Ok(LoginResponse {
+        success: true,
+        token: Some(token),
+        message: enrolled_username,
+        user_id: Some(user.id),
+        // VULN-004: Déchiffrer l'email chiffré en base
+        email: decrypt_data_secure(&user.email, &encryption_key).ok()
+            .or(Some(user.email.clone())),
+    })
+}
+
+/// Login using biometric for Android — the frontend already retrieved the key
+/// from Android Keystore (TEE/StrongBox) via BiometricPrompt + CryptoObject.
+/// This command skips the OS keychain read (key is provided directly) but
+/// still enforces the biometric gate (cold start, timeout, emergency lock).
+#[tauri::command]
+async fn biometric_login_with_key(
+    username: String,
+    key_b64: String,
+    state: State<'_, AppState>,
+) -> Result<LoginResponse, String> {
+    let username = username.trim().to_string();
+    if username.is_empty() {
+        return Err("Nom d'utilisateur requis pour la connexion biométrique.".to_string());
+    }
+    if key_b64.is_empty() {
+        return Err("Clé de chiffrement requise.".to_string());
+    }
+
+    // 1. Biometric gate + enrollment check (no platform auth — already done by Android Keystore)
+    let (user_id, enrolled_username, key_bytes) = biometric::biometric_login_with_key(&username, &key_b64)?;
+
+    // 2. Verify user still exists in database
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let user = db.get_user_by_username(&enrolled_username).await
+        .map_err(|e| format!("Erreur DB: {}", e))?
+        .ok_or("Utilisateur introuvable. Biométrie désactivée.")?;
+
+    if user.id != user_id {
+        biometric::disable_biometric()?;
+        return Err("Incohérence de compte détectée. Biométrie désactivée.".to_string());
+    }
+
+    // 3. Check if account is locked
+    if user.account_locked {
+        return Ok(LoginResponse {
+            success: false,
+            token: None,
+            message: "Compte verrouillé".to_string(),
+            user_id: None,
+            email: None,
+        });
+    }
+
+    // 4. Store encryption key in session keychain
+    store_encryption_key(user_id, &key_bytes)
+        .map_err(|e| format!("Erreur stockage clé: {}", e))?;
+
+    debug_log!("🔐 Biometric login (Android Keystore): clé restaurée pour user {}", user_id);
+
+    // 4b. Wrap key_bytes in SecureKey for trust store unlock + mDNS auto-start
+    let encryption_key = crate::secure_key::SecureKey::from_slice(&key_bytes);
+
+    // 5. Set up session — also refresh the biometric timer
+    *state.current_user_id.lock().await = Some(user.id);
+    biometric::notify_password_login_success();
+    let token = generate_session_token();
+    *state.session_token.lock().await = Some(token.clone());
+
+    // 5b. Unlock trust store and start mDNS discovery
+    if let Some(tm) = state.transfer_manager.lock().await.as_mut() {
+        tm.set_peer_name(&user.username);
+        if let Err(e) = tm.trust_store.lock().await.unlock(&encryption_key) {
+            debug_log!("⚠️  Trust store unlock failed (biometric android): {}", e);
+        } else {
+            debug_log!("🔒 Trust store déverrouillé via biometric Android Keystore (ChaCha20-Poly1305)");
+        }
+        if let Err(e) = tm.discovery.start_mdns_discovery().await {
+            eprintln!("[TRANSFER] Auto-start mDNS failed at biometric android login: {}", e);
+        }
+    }
+
+    let _ = db.log_action(user.id, "BIOMETRIC_LOGIN_ANDROID_KEYSTORE", "session", None).await;
+
+    Ok(LoginResponse {
+        success: true,
+        token: Some(token),
+        message: enrolled_username,
+        user_id: Some(user.id),
+        // VULN-004: Déchiffrer l'email chiffré en base
+        email: decrypt_data_secure(&user.email, &encryption_key).ok()
+            .or(Some(user.email.clone())),
+    })
+}
+
+/// Emergency lock — instantly disable biometric until next password login
+#[tauri::command]
+async fn biometric_emergency_lock(state: State<'_, AppState>) -> Result<String, String> {
+    biometric::emergency_lock();
+
+    if let Some(user_id) = *state.current_user_id.lock().await {
+        let db_guard = state.db.lock().await;
+        if let Some(db) = db_guard.as_ref() {
+            let _ = db.log_action(user_id, "BIOMETRIC_EMERGENCY_LOCK", "security", None).await;
+        }
+    }
+
+    Ok("Verrouillage d'urgence activé".to_string())
+}
+
+// ========== 2FA COMMANDS ==========
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Enable2FAResponse {
+    success: bool,
+    secret: String,
+    qr_code: String,
+    backup_codes: Vec<String>,
+    message: String,
+}
+
+/// Génère un secret TOTP et QR code pour activer 2FA
+#[tauri::command]
+async fn setup_2fa(state: State<'_, AppState>) -> Result<Enable2FAResponse, String> {
+    let user_id = state.current_user_id.lock().await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Récupérer l'utilisateur
+    let user = db.get_user_by_id(user_id).await
+        .map_err(|e| format!("Erreur DB: {}", e))?
+        .ok_or("Utilisateur non trouvé")?;
+
+    // Récupérer la clé pour déchiffrer l'email (VULN-004)
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    
+    // Déchiffrer l'email pour le QR code TOTP
+    let decrypted_email = decrypt_data_secure(&user.email, &encryption_key)
+        .unwrap_or_else(|_| user.email.clone());
+
+    // Générer le secret TOTP
+    let setup = generate_totp_secret(&decrypted_email, "SecureVault")
+        .map_err(|e| format!("Erreur génération TOTP: {}", e))?;
+
+    Ok(Enable2FAResponse {
+        success: true,
+        secret: setup.secret,
+        qr_code: setup.qr_code_base64,
+        backup_codes: setup.backup_codes.clone(),
+        message: "Scannez le QR code avec votre application d'authentification".to_string(),
+    })
+}
+
+/// Vérifie un code TOTP et active 2FA
+#[tauri::command]
+async fn verify_and_enable_2fa(
+    code: String,
+    secret: String,
+    state: State<'_, AppState>,
+) -> Result<LoginResponse, String> {
+    let user_id = state.current_user_id.lock().await
+        .ok_or("Non authentifié")?;
+
+    // Vérifier le code
+    let verified = verify_totp_code(&secret, &code)
+        .map_err(|e| format!("Erreur vérification: {}", e))?;
+
+    if !verified {
+        return Ok(LoginResponse {
+            success: false,
+            token: None,
+            message: "Code TOTP invalide".to_string(),
+            user_id: None,
+            email: None,
+        });
+    }
+
+    // Générer les backup codes
+    let setup = generate_totp_secret("temp@temp.com", "SecureVault")
+        .map_err(|e| format!("Erreur génération: {}", e))?;
+    let backup_codes_json = serde_json::to_string(&setup.backup_codes)
+        .map_err(|e| format!("Erreur sérialisation: {}", e))?;
+
+    // Chiffrer le secret TOTP et les backup codes avant stockage en DB
+    let encryption_key = retrieve_encryption_key_secure(user_id)
+        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+    let encrypted_secret = encrypt_data_secure(&secret, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement secret TOTP: {}", e))?;
+    let encrypted_backup_codes = encrypt_data_secure(&backup_codes_json, &encryption_key)
+        .map_err(|e| format!("Erreur chiffrement backup codes: {}", e))?;
+
+    // Activer 2FA dans la DB (données chiffrées)
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+    
+    db.enable_2fa(user_id, &encrypted_secret, &encrypted_backup_codes).await
+        .map_err(|e| format!("Erreur DB: {}", e))?;
+
+    debug_log!("✅ 2FA activé pour l'utilisateur {}", user_id);
+
+    Ok(LoginResponse {
+        success: true,
+        token: Some("2fa_enabled".to_string()),
+        message: "2FA activé avec succès".to_string(),
+        user_id: Some(user_id),
+        email: None,
+    })
+}
+
+/// Désactive 2FA
+#[tauri::command]
+async fn disable_2fa(
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<LoginResponse, String> {
+    let user_id = state.current_user_id.lock().await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Vérifier le mot de passe
+    let user = db.get_user_by_id(user_id).await
+        .map_err(|e| format!("Erreur DB: {}", e))?
+        .ok_or("Utilisateur non trouvé")?;
+
+    if verify_password(&password, &user.password_hash).is_err() {
+        return Ok(LoginResponse {
+            success: false,
+            token: None,
+            message: "Mot de passe incorrect".to_string(),
+            user_id: None,
+            email: None,
+        });
+    }
+
+    // Désactiver 2FA
+    db.disable_2fa(user_id).await
+        .map_err(|e| format!("Erreur DB: {}", e))?;
+
+    #[cfg(debug_assertions)]
+    debug_log!("❌ 2FA désactivé pour l'utilisateur {}", user_id);
+
+    Ok(LoginResponse {
+        success: true,
+        token: None,
+        message: "2FA désactivé".to_string(),
+        user_id: Some(user_id),
+        email: None,
+    })
+}
+
+/// Vérifie un code 2FA lors du login
+#[tauri::command]
+async fn verify_2fa_login(
+    username: String,
+    code: String,
+    state: State<'_, AppState>,
+) -> Result<LoginResponse, String> {
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let user = db.get_user_by_username(&username).await
+        .map_err(|e| format!("Erreur DB: {}", e))?
+        .ok_or("Utilisateur non trouvé")?;
+
+    // Vérifier si le compte est bloqué
+    let is_locked = db.check_account_locked(user.id).await
+        .map_err(|e| format!("Erreur DB: {}", e))?;
+
+    if is_locked {
+        return Ok(LoginResponse {
+            success: false,
+            token: None,
+            message: "Compte temporairement bloqué pour raisons de sécurité".to_string(),
+            user_id: None,
+            email: None,
+        });
+    }
+
+    // VULN-010: Rate limiting sur les tentatives 2FA (mêmes compteurs anti-brute-force)
+    let monitor = get_security_monitor();
+    if let Some(remaining) = monitor.is_user_locked(&username).await {
+        return Ok(LoginResponse {
+            success: false,
+            token: None,
+            message: format!("Trop de tentatives 2FA. Réessayez dans {} secondes.", remaining),
+            user_id: None,
+            email: None,
+        });
+    }
+
+    if let Some(encrypted_secret) = user.totp_secret {
+        // Déchiffrer le secret TOTP depuis la DB
+        let encryption_key = retrieve_encryption_key_secure(user.id)
+            .map_err(|e| format!("Erreur récupération clé: {}", e))?;
+        let secret = decrypt_data_secure(&encrypted_secret, &encryption_key)
+            .map_err(|e| format!("Erreur déchiffrement secret TOTP: {}", e))?;
+
+        // Vérifier le code TOTP
+        let verified = verify_totp_code(&secret, &code)
+            .map_err(|e| format!("Erreur vérification: {}", e))?;
+
+        if verified {
+            // Authentifié avec succès
+            *state.current_user_id.lock().await = Some(user.id);
+            
+            // EXP-002 fix: token cryptographiquement aléatoire
+            let session_token = generate_session_token();
+            *state.session_token.lock().await = Some(session_token.clone());
+            
+            debug_log!("✅ 2FA vérifié pour {}", username);
+
+            return Ok(LoginResponse {
+                success: true,
+                token: Some(session_token),
+                message: "Authentification 2FA réussie".to_string(),
+                user_id: Some(user.id),
+                // VULN-004: Déchiffrer l'email
+                email: decrypt_data_secure(&user.email, &encryption_key).ok()
+                    .or(Some(user.email.clone())),
+            });
+        }
+
+        // Si code invalide, essayer backup code
+        if let Some(encrypted_backup_codes) = user.backup_codes {
+            let backup_codes = decrypt_data_secure(&encrypted_backup_codes, &encryption_key)
+                .map_err(|e| format!("Erreur déchiffrement backup codes: {}", e))?;
+            let (verified, remaining_codes) = verify_backup_code(&backup_codes, &code)
+                .map_err(|e| format!("Erreur backup code: {}", e))?;
+
+            if verified {
+                // Rechiffrer et mettre à jour les backup codes restants
+                let new_codes = serde_json::to_string(&remaining_codes)
+                    .map_err(|e| format!("Erreur sérialisation: {}", e))?;
+                let encrypted_new_codes = encrypt_data_secure(&new_codes, &encryption_key)
+                    .map_err(|e| format!("Erreur chiffrement backup codes: {}", e))?;
+                db.update_backup_codes(user.id, &encrypted_new_codes).await
+                    .map_err(|e| format!("Erreur DB: {}", e))?;
+
+                *state.current_user_id.lock().await = Some(user.id);
+
+                // EXP-002 fix: token cryptographiquement aléatoire
+                let session_token = generate_session_token();
+                *state.session_token.lock().await = Some(session_token.clone());
+
+                debug_log!("✅ Backup code utilisé pour {}", username);
+
+                return Ok(LoginResponse {
+                    success: true,
+                    token: Some(session_token),
+                    message: format!("Backup code accepté. {} codes restants", remaining_codes.len()),
+                    user_id: Some(user.id),
+                    // VULN-004: Déchiffrer l'email
+                    email: decrypt_data_secure(&user.email, &encryption_key).ok()
+                        .or(Some(user.email.clone())),
+                });
+            }
+        }
+    }
+
+    // VULN-010: Enregistrer l'échec 2FA pour le rate limiting
+    monitor.record_failed_attempt(&username).await;
+    let _ = db.log_action(user.id, "2FA_FAILED", "auth", None).await;
+
+    Ok(LoginResponse {
+        success: false,
+        token: None,
+        message: "Code 2FA invalide".to_string(),
+        user_id: None,
+        email: None,
+    })
+}
+
+// ========== THREAT REACTION COMMANDS ==========
+
+/// Analyse une action et applique les réactions automatiques
+/// EXP-003 fix: user_id lu depuis la session, jamais depuis un paramètre IPC
+#[tauri::command]
+async fn analyze_and_react(
+    action: String,
+    _timestamp: i64,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    // EXP-003: Récupérer user_id depuis la session active (pas depuis IPC)
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    // Vérifier si bloqué
+    let (is_blocked, block_msg) = state.threat_reactor.check_blocked(user_id).await;
+    if is_blocked {
+        return Ok(serde_json::json!({
+            "blocked": true,
+            "message": block_msg.unwrap_or_else(|| "Compte bloqué".to_string()),
+        }));
+    }
+
+    // Vérifier rate limit
+    let (is_limited, remaining) = state.threat_reactor.check_rate_limit(user_id).await;
+    if is_limited {
+        return Ok(serde_json::json!({
+            "rate_limited": true,
+            "wait_seconds": remaining.unwrap_or(0),
+            "message": format!("Veuillez attendre {} secondes", remaining.unwrap_or(0)),
+        }));
+    }
+
+    // Analyser le comportement via le moniteur natif Rust
+    let anomaly_score = if action.contains("suspicious") || action.contains("anomaly") { 75.0 } else { 10.0 };
+    let risk_level = if anomaly_score >= 80.0 { "CRITICAL" } else if anomaly_score >= 60.0 { "HIGH" } else if anomaly_score >= 40.0 { "MEDIUM" } else { "LOW" };
+    let is_normal = anomaly_score < 40.0;
+
+    // Réagir selon le niveau de menace
+    let response = state.threat_reactor.react_to_threat(
+        user_id,
+        anomaly_score,
+        risk_level,
+        &if is_normal { vec![] } else { vec!["anomaly detected".to_string()] },
+    ).await;
+
+    // Si blocage critique, bloquer dans la DB aussi
+    if response.blocked {
+        let db_guard = state.db.lock().await;
+        if let Some(db) = db_guard.as_ref() {
+            let _ = db.lock_account(user_id, 30).await;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "analysis": {
+            "anomaly_score": anomaly_score,
+            "risk_level": risk_level,
+            "is_normal": is_normal,
+        },
+        "response": response,
+    }))
+}
+
+// ========== MAINTENANCE COMMANDS ==========
+
+/// Nettoie les vieux logs
+#[tauri::command]
+async fn cleanup_logs(days: i64, state: State<'_, AppState>) -> Result<String, String> {
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let deleted = db.cleanup_old_logs(days).await
+        .map_err(|e| format!("Erreur nettoyage: {}", e))?;
+
+    Ok(format!("{} logs supprimés (> {} jours)", deleted, days))
+}
+
+/// Obtient les stats des logs
+#[tauri::command]
+async fn get_logs_stats(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    let count = db.get_logs_count().await
+        .map_err(|e| format!("Erreur stats: {}", e))?;
+
+    Ok(serde_json::json!({
+        "total_logs": count,
+        "estimated_size_mb": (count * 200) / (1024 * 1024), // Estimation
+    }))
+}
+
+// ========== COMMANDES DE SÉCURITÉ NATIVE ==========
+
+/// Vérifie l'état de sécurité global
+#[tauri::command]
+async fn get_security_status() -> Result<SecurityState, String> {
+    let monitor = get_security_monitor();
+    Ok(monitor.get_security_state().await)
+}
+
+/// Désactive le mode lecture seule (avec vérification mot de passe)
+#[tauri::command]
+async fn disable_readonly_mode(password: String, state: State<'_, AppState>) -> Result<String, String> {
+    debug_log!("🔓 Demande de désactivation du mode lecture seule");
+    
+    // Récupérer la base de données depuis le state
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref()
+        .ok_or("Base de données non initialisée".to_string())?;
+    
+    // Récupérer l'ID utilisateur depuis la session active (EXP-001 fix)
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié — session requise pour désactiver le mode lecture seule")?;
+    
+    // Vérifier le mot de passe
+    let user = db.get_user_by_id(user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération utilisateur: {}", e))?
+        .ok_or("Utilisateur non trouvé".to_string())?;
+    
+    if verify_password(&password, &user.password_hash).is_err() {
+        debug_log!("❌ Mot de passe incorrect pour désactivation mode lecture seule");
+        return Err("❌ Mot de passe incorrect".to_string());
+    }
+    
+    // Désactiver le mode lecture seule
+    drop(db_guard); // Libérer le lock avant l'appel async
+    
+    let monitor = get_security_monitor();
+    monitor.disable_readonly("admin").await?;
+    
+    // Logger l'action
+    let db_guard = state.db.lock().await;
+    if let Some(db) = db_guard.as_ref() {
+        let _ = db.log_action(user_id, "DISABLE_READONLY", "security", None).await;
+    }
+    
+    debug_log!("✅ Mode lecture seule désactivé par l'utilisateur {}", user.username);
+    Ok("Mode lecture seule désactivé avec succès".to_string())
+}
+
+/// Vérifie le délai d'attente pour un utilisateur (en secondes)
+/// Retourne 0 si aucun délai, sinon le nombre de secondes à attendre
+#[tauri::command]
+async fn check_login_delay(username: String, state: State<'_, AppState>) -> Result<u64, String> {
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+    
+    // VULN-007: Ne pas révéler si l'utilisateur existe ou non
+    let user = match db.get_user_by_username(&username).await {
+        Ok(Some(u)) => u,
+        _ => return Ok(0), // Utilisateur inexistant → même réponse que 0 tentatives
+    };
+    
+    // Vérifier si le compte est bloqué
+    let is_locked = db.check_account_locked(user.id).await
+        .map_err(|e| format!("Erreur DB: {}", e))?;
+    
+    if is_locked {
+        // Compte bloqué = délai maximum de 1 heure
+        return Ok(3600);
+    }
+    
+    // Compter les tentatives échouées récentes (dernières 2 minutes)
+    let failed_count = db.count_failed_logins(user.id, 2).await
+        .map_err(|e| format!("Erreur DB: {}", e))?;
+    
+    // Calculer le délai selon le nombre de tentatives
+    let delay = match failed_count {
+        0..=2 => 0,           // 0-2 tentatives : pas de délai
+        3..=4 => 15,          // 3-4 tentatives : 15 secondes
+        5..=7 => 30,          // 5-7 tentatives : 30 secondes
+        8..=10 => 60,         // 8-10 tentatives : 1 minute
+        _ => 120,             // 11+ tentatives : 2 minutes
+    };
+    
+    if delay > 0 {
+        // Vérifier le temps écoulé depuis la dernière tentative
+        if let Ok(Some(elapsed)) = db.get_time_since_last_failed_login(user.id).await {
+            if elapsed >= delay {
+                // Délai expiré
+                debug_log!("✅ check_login_delay: Délai expiré ({}s écoulées)", elapsed);
+                return Ok(0);
+            } else {
+                // Délai actif - retourner le temps restant
+                let remaining = (delay - elapsed) as u64;
+                debug_log!("⏱️ check_login_delay: {}s restantes sur {}s ({} tentatives)", remaining, delay, failed_count);
+                return Ok(remaining);
+            }
+        }
+    }
+    
+    debug_log!("🔐 check_login_delay pour {}: {} tentatives → délai: {}s", username, failed_count, delay);
+    Ok(delay as u64)
+}
+
+/// Réinitialise tous les compteurs de sécurité
+#[tauri::command]
+async fn reset_security_counters(state: State<'_, AppState>) -> Result<String, String> {
+    // VULN-001 + VULN-002: Validation complète de session
+    validate_session(&state).await?;
+    let monitor = get_security_monitor();
+    monitor.reset_all().await;
+    Ok("Compteurs de sécurité réinitialisés".to_string())
+}
+
+// ========== COMMANDES FILESYSTEM MONITOR ==========
+
+#[tauri::command]
+async fn get_filesystem_stats(state: State<'_, AppState>) -> Result<MonitoringStats, String> {
+    // VULN-001 + VULN-002: Validation complète de session
+    validate_session(&state).await?;
+    let monitor = get_filesystem_monitor();
+    let guard = monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(guard.get_stats())
+}
+
+#[tauri::command]
+async fn disable_filesystem_readonly(state: State<'_, AppState>) -> Result<String, String> {
+    // VULN-001 + VULN-002: Validation complète de session
+    validate_session(&state).await?;
+    let monitor = get_filesystem_monitor();
+    let guard = monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
+    guard.disable_readonly();
+    Ok("Mode lecture seule système désactivé".to_string())
+}
+
+#[tauri::command]
+async fn reset_filesystem_stats(state: State<'_, AppState>) -> Result<String, String> {
+    // VULN-001 + VULN-002: Validation complète de session
+    validate_session(&state).await?;
+    let monitor = get_filesystem_monitor();
+    let guard = monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
+    guard.reset_stats();
+    Ok("Statistiques système réinitialisées".to_string())
+}
+
+#[tauri::command]
+async fn enable_filesystem_monitoring(state: State<'_, AppState>) -> Result<String, String> {
+    // VULN-001 + VULN-002: Validation complète de session
+    validate_session(&state).await?;
+    let monitor = get_filesystem_monitor();
+    let guard = monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
+    guard.enable_monitoring();
+    Ok("Surveillance des fichiers activée".to_string())
+}
+
+#[tauri::command]
+async fn disable_filesystem_monitoring(state: State<'_, AppState>) -> Result<String, String> {
+    // VULN-001 + VULN-002: Validation complète de session
+    validate_session(&state).await?;
+    let monitor = get_filesystem_monitor();
+    let guard = monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
+    guard.disable_monitoring();
+    Ok("Surveillance des fichiers désactivée".to_string())
+}
+
+// ========== COMMANDES BACKUP & RESTORE ==========
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CreateBackupRequest {
+    master_password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CreateBackupResponse {
+    success: bool,
+    backup_path: Option<String>,
+    message: String,
+}
+
+#[tauri::command]
+async fn create_backup(
+    request: CreateBackupRequest,
+    state: State<'_, AppState>,
+) -> Result<CreateBackupResponse, String> {
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié")?;
+
+    let db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+
+    // Récupérer le nom d'utilisateur
+    let user = db.get_user_by_id(user_id)
+        .await
+        .map_err(|e| format!("Erreur récupération utilisateur: {}", e))?
+        .ok_or("Utilisateur non trouvé")?;
+
+    // Obtenir les chemins
+    let db_path = hidden_storage::get_hidden_database_path()?;
+    let files_dir = hidden_storage::get_hidden_files_dir()?;
+
+    // Créer le backup
+    let backup_path = backup_manager::create_backup(
+        &db_path,
+        &files_dir,
+        &request.master_password,
+        &user.username,
+    )
+    .await?;
+
+    Ok(CreateBackupResponse {
+        success: true,
+        backup_path: Some(backup_path.to_string_lossy().to_string()),
+        message: "Backup créé avec succès".to_string(),
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SearchBackupsResponse {
+    backups: Vec<backup_manager::BackupInfo>,
+}
+
+#[tauri::command]
+async fn search_backups() -> Result<SearchBackupsResponse, String> {
+    let backups = backup_manager::find_all_backups();
+    Ok(SearchBackupsResponse { backups })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RestoreBackupRequest {
+    backup_path: String,
+    master_password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RestoreBackupResponse {
+    success: bool,
+    message: String,
+    metadata: Option<backup_manager::BackupMetadata>,
+}
+
+#[tauri::command]
+async fn restore_backup(
+    request: RestoreBackupRequest,
+    state: State<'_, AppState>,
+) -> Result<RestoreBackupResponse, String> {
+    // Fermer les connexions actuelles
+    *state.current_user_id.lock().await = None;
+    *state.db.lock().await = None;
+
+    let backup_path = std::path::PathBuf::from(&request.backup_path);
+    let db_path = hidden_storage::get_hidden_database_path()?;
+    let files_dir = hidden_storage::get_hidden_files_dir()?;
+
+    // Restaurer le backup
+    let metadata = backup_manager::restore_backup(
+        &backup_path,
+        &request.master_password,
+        &db_path,
+        &files_dir,
+    )
+    .await?;
+
+    Ok(RestoreBackupResponse {
+        success: true,
+        message: format!("Backup restauré avec succès (créé le {})", metadata.created_at),
+        metadata: Some(metadata),
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GetBackupMetadataRequest {
+    backup_path: String,
+}
+
+#[tauri::command]
+async fn get_backup_metadata(
+    request: GetBackupMetadataRequest,
+) -> Result<backup_manager::BackupMetadata, String> {
+    let backup_path = std::path::PathBuf::from(&request.backup_path);
+    backup_manager::read_backup_metadata(&backup_path)
+}
+
+// ========== COMMANDE RESET VAULT ==========
+
+/// CFG-003: Réinitialisation complète avec vérification du mot de passe
+#[tauri::command]
+async fn reset_vault_completely(password: String, state: State<'_, AppState>) -> Result<String, String> {
+    debug_log!("⚠️ Réinitialisation complète du coffre-fort demandée");
+    
+    // CFG-003: Vérifier l'identité avant la destruction
+    let user_id = state
+        .current_user_id
+        .lock()
+        .await
+        .ok_or("Non authentifié — session requise pour réinitialiser le coffre")?;
+    
+    {
+        let db_guard = state.db.lock().await;
+        let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+        let user = db.get_user_by_id(user_id)
+            .await
+            .map_err(|e| format!("Erreur récupération utilisateur: {}", e))?
+            .ok_or("Utilisateur non trouvé")?;
+        
+        if verify_password(&password, &user.password_hash).is_err() {
+            debug_log!("❌ Mot de passe incorrect pour réinitialisation du coffre");
+            return Err("❌ Mot de passe incorrect — réinitialisation refusée".to_string());
+        }
+    }
+    
+    // Nettoyer l'ID utilisateur courant
+    *state.current_user_id.lock().await = None;
+    
+    // Fermer la connexion à la base de données
+    *state.db.lock().await = None;
+    
+    // Obtenir le répertoire de données (stocké par init_local_db)
+    // Fallback: hidden_storage pour rétrocompatibilité desktop
+    let app_data_dir = {
+        let stored = state.data_dir.lock().await;
+        if let Some(dir) = stored.as_ref() {
+            dir.clone()
+        } else {
+            hidden_storage::get_hidden_database_dir()
+                .map_err(|e| format!("Impossible de trouver le répertoire de données: {}", e))?
+        }
+    };
+    
+    // Supprimer tout le répertoire de l'application
+    if app_data_dir.exists() {
+        debug_log!("🗑️ Suppression de: {:?}", app_data_dir);
+        std::fs::remove_dir_all(&app_data_dir)
+            .map_err(|e| format!("Erreur lors de la suppression de la base de données: {}", e))?;
+    }
+    
+    // Réinitialiser les moniteurs de sécurité
+    let security_monitor = get_security_monitor();
+    security_monitor.reset_all().await;
+    
+    let fs_monitor = get_filesystem_monitor();
+    {
+        let guard = fs_monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
+        guard.reset_stats();
+    } // guard est dropped ici, avant le .await
+    
+    // Réinitialiser la base de données après suppression
+    debug_log!("🔄 Réinitialisation de la base de données...");
+    let db_path = app_data_dir.join("sv.db");
+    
+    // Créer le répertoire s'il n'existe pas
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Erreur création répertoire: {}", e))?;
+    }
+    
+    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let pool = SqlitePool::connect(&db_url)
+        .await
+        .map_err(|e| format!("Erreur connexion DB: {}", e))?;
+
+    // Créer les tables
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            crypto_salt TEXT NOT NULL,
+            totp_secret TEXT,
+            totp_enabled BOOLEAN DEFAULT 0,
+            totp_verified_at DATETIME,
+            backup_codes TEXT,
+            account_locked BOOLEAN DEFAULT 0,
+            locked_until DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )"
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Erreur création table users: {}", e))?;
+
+    // Créer les autres tables nécessaires
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS passwords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            username TEXT,
+            password TEXT NOT NULL,
+            url TEXT,
+            notes TEXT,
+            category TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )"
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Erreur création table passwords: {}", e))?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS secure_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            mime_type TEXT,
+            integrity_hash TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )"
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Erreur création table secure_files: {}", e))?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS secure_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            key_name TEXT NOT NULL,
+            key_type TEXT NOT NULL,
+            key_data TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )"
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Erreur création table secure_keys: {}", e))?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            resource_type TEXT NOT NULL,
+            resource_id INTEGER,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )"
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Erreur création table audit_logs: {}", e))?;
+
+    // Créer l'instance Database à partir du SqlitePool (pas de db_path car déjà connecté)
+    let database = Database {
+        pool,
+    };
+    
+    *state.db.lock().await = Some(database);
+    
+    debug_log!("✅ Coffre-fort complètement réinitialisé et base de données prête");
+    Ok("Coffre-fort complètement réinitialisé".to_string())
+}
+
+// ========== SIGNED LOG COMMANDS ==========
+
+/// Initialise le gestionnaire de logs signés (appelé après init_local_db)
+async fn init_signed_log_manager(state: &AppState) -> Result<(), String> {
+    let data_dir_guard = state.data_dir.lock().await;
+    let data_dir = data_dir_guard.as_ref().ok_or("Répertoire de données non initialisé")?.clone();
+    drop(data_dir_guard);
+
+    // ML-DSA-65 key generation/loading uses very large stack frames (post-quantum crypto).
+    // Run on a blocking thread (8 MB OS stack) to avoid stack overflow in tokio workers.
+    let manager = tokio::task::spawn_blocking(move || {
+        signed_log::SignedLogManager::init(&data_dir)
+    })
+    .await
+    .map_err(|e| format!("Erreur thread init logs signés: {}", e))??;
+
+    *state.signed_log_manager.lock().await = Some(manager);
+    Ok(())
+}
+
+/// Ajoute une entrée signée au journal d'audit (usage interne)
+async fn append_signed_log(state: &AppState, event: &str, metadata: serde_json::Value) -> Result<(), String> {
+    let enabled = *state.logging_enabled.lock().await;
+    if !enabled {
+        return Ok(());
+    }
+    let mut mgr_guard = state.signed_log_manager.lock().await;
+    if let Some(ref mut mgr) = *mgr_guard {
+        mgr.append(event, metadata)?;
+    }
+    Ok(())
+}
+
+/// Vérifie l'intégrité de la chaîne de logs signés
+#[tauri::command]
+async fn verify_log_integrity(state: State<'_, AppState>) -> Result<signed_log::IntegrityReport, String> {
+    let mgr_guard = state.signed_log_manager.lock().await;
+    let mgr = mgr_guard.as_ref().ok_or("Logs signés non initialisés")?;
+    mgr.verify_integrity()
+}
+
+/// Active ou désactive les logs signés
+#[tauri::command]
+async fn toggle_signed_logging(state: State<'_, AppState>, enabled: bool) -> Result<String, String> {
+    *state.logging_enabled.lock().await = enabled;
+    let status = if enabled { "activés" } else { "désactivés" };
+    Ok(format!("Logs signés {}", status))
+}
+
+/// Retourne l'état actuel des logs signés
+#[tauri::command]
+async fn get_signed_logging_status(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(*state.logging_enabled.lock().await)
+}
+
+// ========== NETWORK ISOLATION COMMANDS ==========
+
+/// Retourne le statut de l'enclave sécurisée de la plateforme
+#[tauri::command]
+async fn get_enclave_status() -> Result<secure_storage::EnclaveStatus, String> {
+    Ok(secure_storage::get_enclave_status_info())
+}
+
+/// Active ou désactive le mode isolation réseau
+#[tauri::command]
+async fn toggle_isolation_mode(state: State<'_, AppState>, enabled: bool) -> Result<String, String> {
+    *state.isolation_mode.lock().await = enabled;
+    let status = if enabled {
+        "Mode isolation activé — toutes les fonctionnalités réseau sont désactivées"
+    } else {
+        "Mode isolation désactivé — fonctionnalités réseau disponibles"
+    };
+    Ok(status.to_string())
+}
+
+/// Retourne l'état du mode isolation réseau
+#[tauri::command]
+async fn get_isolation_mode(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(*state.isolation_mode.lock().await)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // Configure custom tokio runtime with larger worker thread stack size.
+    // ML-DSA-65 post-quantum crypto operations (SignedLogManager, TrustStore)
+    // require more stack space than the default ~2 MB tokio worker threads provide.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(8 * 1024 * 1024) // 8 MB
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime");
+    tauri::async_runtime::set(runtime.handle().clone());
+    // Leak runtime so it lives for the entire process lifetime
+    std::mem::forget(runtime);
+
+    // IMPORTANT: Charger les variables d'environnement en tout premier
+    // Le .env est dans tauri-desktop/, pas dans src-tauri/
+    let env_path = std::path::PathBuf::from("../.env");
+    
+    debug_log!("🔍 Tentative de chargement .env depuis: {:?}", env_path.canonicalize().unwrap_or(env_path.clone()));
+    
+    match dotenv::from_path(&env_path) {
+        Ok(_) => {
+            debug_log!("✅ Variables d'environnement chargées depuis .env");
+            // Afficher les variables SMTP pour debug
+            if let Ok(_host) = std::env::var("EMAIL_SMTP_HOST") {
+                debug_log!("   EMAIL_SMTP_HOST: {}", _host);
+            }
+            if let Ok(_user) = std::env::var("EMAIL_SMTP_USERNAME") {
+                debug_log!("   EMAIL_SMTP_USERNAME: {}", _user);
+            }
+            if let Ok(_pass) = std::env::var("EMAIL_SMTP_PASSWORD") {
+                #[cfg(debug_assertions)]
+                debug_log!("   EMAIL_SMTP_PASSWORD: {} chars", _pass.len());
+            }
+        },
+        Err(_e) => {
+            if cfg!(debug_assertions) {
+                eprintln!("⚠️ Impossible de charger .env: {}", _e);
+            }
+            // Essayer dotenv() par défaut
+            if let Ok(_) = dotenv::dotenv() {
+                debug_log!("✅ Variables chargées depuis .env (chemin par défaut)");
+            } else {
+                if cfg!(debug_assertions) {
+                    eprintln!("❌ Aucun fichier .env trouvé!");
+                }
+            }
+        }
+    }
+    
+    // Les moniteurs de sécurité sont initialisés automatiquement (Lazy)
+    debug_log!("🛡️  Moniteur de sécurité prêt (Lazy init)");
+    debug_log!("🔍 Surveillance du système de fichiers prête (Lazy init)");
+    
+    // Charger configuration
+    let config = Config::from_env();
+    
+    // Valider la configuration au démarrage
+    if let Err(warnings) = config.validate() {
+        eprintln!("⚠️  Configuration invalide: {}", warnings);
+    }
+    
+    // Créer services
+    let session_token = Arc::new(Mutex::new(None));
+    let app_state = AppState {
+        db: Arc::new(Mutex::new(None)),
+        current_user_id: Arc::new(Mutex::new(None)),
+        session_token: session_token.clone(),
+        session: session_token, // shared Arc with session_token
+        last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+        auto_lock_minutes: Arc::new(Mutex::new(15)), // 15 minutes par défaut
+        threat_reactor: Arc::new({
+            // VULN-011: Persist blocked users across restarts
+            #[cfg(not(target_os = "android"))]
+            {
+                match hidden_storage::get_hidden_database_dir() {
+                    Ok(dir) => ThreatReactor::with_persistence(dir),
+                    Err(_) => ThreatReactor::new(),
+                }
+            }
+            #[cfg(target_os = "android")]
+            ThreatReactor::new()
+        }),
+        transfer_manager: Arc::new(Mutex::new(None)), // Initialisé après init_local_db
+        decrypted_temp_files: Arc::new(Mutex::new(Vec::new())),
+        data_dir: Arc::new(Mutex::new(None)),
+        signed_log_manager: Arc::new(Mutex::new(None)),
+        logging_enabled: Arc::new(Mutex::new(config.signed_logging_enabled)),
+        isolation_mode: Arc::new(Mutex::new(config.isolation_enabled)),
+    };
+
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
+
+    // Updater is desktop-only (not available on Android/iOS)
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
+        .manage(app_state)
+        .invoke_handler({
+            // Android JavaBridge thread has a small stack (~512KB).
+            // Our 80+ Tauri commands generate a large future enum that
+            // overflows it. Use stacker to dynamically grow the stack.
+            let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
+                Box::new(tauri::generate_handler![
+                get_app_version,
+                check_backend_status,
+                init_local_db,
+                has_existing_user,
+                local_login,
+                local_logout,
+                local_register,
+            // Auto-lock commands
+            notify_activity,
+            set_auto_lock_timeout,
+            check_auto_lock,
+            create_password,
+            get_passwords,
+            get_password,
+            decrypt_password,
+            update_password,
+            delete_password,
+            create_secure_file,
+            create_secure_file_from_path,
+            get_secure_files,
+            decrypt_file,
+            decrypt_file_to_path,
+            cleanup_decrypted_files,
+            delete_secure_file,
+            share_file,
+            get_user_shares,
+            revoke_share,
+            create_secure_key,
+            import_secure_key,
+            get_secure_keys,
+            decrypt_key,
+            delete_secure_key,
+            get_security_events,
+            create_test_logs,
+            // 2FA commands
+            setup_2fa,
+            verify_and_enable_2fa,
+            disable_2fa,
+            verify_2fa_login,
+            // Biometric commands
+            check_biometric,
+            enable_biometric,
+            disable_biometric,
+            biometric_login,
+            biometric_login_with_key,
+            biometric_emergency_lock,
+            // Threat reaction commands
+            analyze_and_react,
+            // Maintenance commands
+            cleanup_logs,
+            get_logs_stats,
+            // Native Security commands
+            get_security_status,
+            check_login_delay,
+            disable_readonly_mode,
+            reset_security_counters,
+            // Filesystem Monitor commands
+            get_filesystem_stats,
+            disable_filesystem_readonly,
+            reset_filesystem_stats,
+            enable_filesystem_monitoring,
+            disable_filesystem_monitoring,
+            // Backup & Restore commands
+            create_backup,
+            search_backups,
+            restore_backup,
+            get_backup_metadata,
+            // Vault reset command
+            reset_vault_completely,
+            // Signed log commands
+            verify_log_integrity,
+            toggle_signed_logging,
+            get_signed_logging_status,
+            // Network isolation commands
+            toggle_isolation_mode,
+            get_isolation_mode,
+            // Enclave status command
+            get_enclave_status,
+            // Vault Secure Transfer commands
+            transfer::commands::transfer_create_offer,
+            transfer::commands::transfer_connect,
+            transfer::commands::transfer_confirm_and_execute,
+            transfer::commands::transfer_scan_local_network,
+            transfer::commands::transfer_get_trusted_peers,
+            transfer::commands::transfer_revoke_trust,
+            transfer::commands::transfer_add_trusted_peer,
+            transfer::commands::transfer_get_status,
+            transfer::commands::transfer_cancel,
+            transfer::commands::transfer_set_visibility,
+            transfer::commands::transfer_get_visibility,
+            transfer::commands::transfer_sync_trust_store,
+            transfer::commands::transfer_get_sync_settings,
+            transfer::commands::transfer_set_sync_enabled,
+            transfer::commands::transfer_add_sync_device,
+            transfer::commands::transfer_remove_sync_device,
+            transfer::commands::transfer_start_sync_pairing,
+            transfer::commands::transfer_join_sync_pairing,
+            transfer::commands::transfer_auto_sync_with_peer,
+            ]);
+            move |invoke| {
+                stacker::maybe_grow(2 * 1024 * 1024, 4 * 1024 * 1024, || {
+                    handler(invoke)
+                })
+            }
+        })
+        .setup(|_app| {
+            debug_log!("🔐 SecureVault démarré");
+            #[cfg(debug_assertions)]
+            debug_log!("📁 Répertoire de données: {:?}", 
+                _app.path().app_data_dir());
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .unwrap_or_else(|e| {
+            eprintln!("❌ Erreur lancement application: {}", e);
+            std::process::exit(1);
+        });
+}

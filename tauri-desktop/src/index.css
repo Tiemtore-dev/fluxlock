@@ -1,35 +1,11 @@
+@import './design-system/tokens.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-  line-height: 1.6;
-  font-weight: 400;
-
   color-scheme: dark;
-  
-  /* Thème Noir et Bleu Nuit */
-  --color-bg-primary: #0a0e1a;
-  --color-bg-secondary: #121826;
-  --color-bg-tertiary: #1a2234;
-  --color-bg-elevated: #1e2738;
-  
-  --color-blue-primary: #3b82f6;
-  --color-blue-light: #60a5fa;
-  --color-blue-dark: #2563eb;
-  --color-blue-glow: rgba(59, 130, 246, 0.15);
-  
-  --color-text-primary: #e2e8f0;
-  --color-text-secondary: #94a3b8;
-  --color-text-muted: #64748b;
-  
-  --color-border: rgba(148, 163, 184, 0.1);
-  --color-border-hover: rgba(148, 163, 184, 0.2);
-  
-  background-color: var(--color-bg-primary);
-  color: var(--color-text-primary);
-
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -40,8 +16,10 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: linear-gradient(135deg, #0a0e1a 0%, #121826 50%, #0f1420 100%);
-  background-attachment: fixed;
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  line-height: 1.6;
 }
 
 #root {
@@ -51,140 +29,70 @@ body {
   padding: 0;
 }
 
-/* Scrollbar personnalisée */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-surface); }
+::-webkit-scrollbar-thumb { background: var(--bg-hover); border-radius: var(--radius-sm); }
+::-webkit-scrollbar-thumb:hover { background: var(--bg-active); }
 
-::-webkit-scrollbar-track {
-  background: var(--color-bg-secondary);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--color-bg-elevated);
-  border-radius: 5px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #2a3548;
-}
-
-@layer components {
-  .btn {
-    @apply px-4 py-2 rounded-lg font-semibold transition-all duration-300;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+/* ── Mobile responsive ── */
+@media (max-width: 768px) {
+  /* Hide desktop sidebar on mobile */
+  .sidebar-desktop {
+    display: none !important;
   }
 
-  .btn-primary {
-    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-    color: white;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3), 0 0 20px rgba(59, 130, 246, 0.1);
-  }
-  
-  .btn-primary:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4), 0 0 30px rgba(59, 130, 246, 0.15);
-  }
-  
-  .btn-primary:active {
-    transform: translateY(0);
+  /* Show bottom nav on mobile */
+  .mobile-bottom-nav {
+    display: block !important;
   }
 
-  .btn-secondary {
-    background: var(--color-bg-elevated);
-    color: var(--color-text-primary);
-    border: 1px solid var(--color-border);
-  }
-  
-  .btn-secondary:hover {
-    background: #2a3548;
-    border-color: var(--color-border-hover);
-    transform: translateY(-1px);
+  /* Remove sidebar margin, add bottom padding for tab bar */
+  .app-main {
+    margin-left: 0 !important;
+    padding: var(--space-3) !important;
+    padding-top: max(var(--space-3), env(safe-area-inset-top)) !important;
+    padding-bottom: 80px !important;
   }
 
-  .btn-danger {
-    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-    color: white;
-    border: 1px solid rgba(239, 68, 68, 0.3);
-  }
-  
-  .btn-danger:hover {
-    box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
-    transform: translateY(-1px);
+  /* Responsive page headings */
+  h1 { font-size: var(--text-xl) !important; }
+  h2 { font-size: var(--text-lg) !important; }
+
+  /* Page header rows: stack vertically on mobile */
+  .app-main > div > div:first-child {
+    flex-wrap: wrap;
+    gap: var(--space-3);
   }
 
-  .input {
-    @apply w-full px-4 py-3 rounded-lg focus:outline-none transition-all duration-300;
-    background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
-    color: var(--color-text-primary);
-  }
-  
-  .input:focus {
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1), 0 0 20px rgba(59, 130, 246, 0.1);
-    background: var(--color-bg-tertiary);
-  }
-  
-  .input::placeholder {
-    color: var(--color-text-muted);
+  /* All buttons: don't force min-width */
+  button { min-width: auto !important; }
+
+  /* Cards: reduce padding on mobile */
+  .app-main [style*="padding: var(--space-6)"] {
+    padding: var(--space-4) !important;
   }
 
-  .card {
-    background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
-    border-radius: 16px;
-    padding: 1.5rem;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
-    transition: all 0.3s ease;
+  /* Backup list buttons: stack */
+  .app-main [style*="justifyContent: space-between"] {
+    flex-wrap: wrap;
+    gap: var(--space-3);
   }
-  
-  .card:hover {
-    border-color: var(--color-border-hover);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3), 0 0 40px rgba(59, 130, 246, 0.05);
-    transform: translateY(-2px);
+
+  /* Fade-in animation for mobile drawer */
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 }
 
-/* Animations */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
+/* Desktop: ensure mobile nav is hidden */
+@media (min-width: 769px) {
+  .mobile-bottom-nav {
+    display: none !important;
   }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+  .mobile-more-drawer {
+    display: none !important;
   }
-}
-
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateX(-20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-@keyframes glow {
-  0%, 100% {
-    box-shadow: 0 0 20px rgba(59, 130, 246, 0.2);
-  }
-  50% {
-    box-shadow: 0 0 30px rgba(59, 130, 246, 0.4);
-  }
-}
-
-.animate-fadeIn {
-  animation: fadeIn 0.5s ease-out;
-}
-
-.animate-slideIn {
-  animation: slideIn 0.5s ease-out;
 }
 

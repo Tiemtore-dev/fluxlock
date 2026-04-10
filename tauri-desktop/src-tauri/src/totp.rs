@@ -1,7 +1,7 @@
 use totp_rs::{Algorithm, Secret, TOTP};
 use qrcode::QrCode;
 use image::Luma;
-use rand::Rng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use base64::Engine;
 
@@ -12,6 +12,7 @@ pub struct TotpSetup {
     pub backup_codes: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TotpVerification {
     pub verified: bool,
@@ -20,15 +21,15 @@ pub struct TotpVerification {
 
 /// Génère un secret TOTP et un QR code pour configuration
 pub fn generate_totp_secret(username: &str, issuer: &str) -> Result<TotpSetup, String> {
-    // Générer un secret aléatoire (32 bytes = 256 bits)
-    let mut rng = rand::thread_rng();
-    let secret_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+    // Générer un secret aléatoire (32 bytes = 256 bits) avec OsRng
+    let mut secret_bytes = vec![0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
     let secret = Secret::Raw(secret_bytes);
     let secret_base32 = secret.to_encoded().to_string();
     
-    // Créer l'instance TOTP
+    // Créer l'instance TOTP avec SHA-256 (SHA-1 est cryptographiquement cassé)
     let totp = TOTP::new(
-        Algorithm::SHA1,
+        Algorithm::SHA256,
         6,  // 6 digits
         1,  // 1 step (tolérance)
         30, // 30 secondes de validité
@@ -70,7 +71,7 @@ pub fn verify_totp_code(secret: &str, code: &str) -> Result<bool, String> {
         .map_err(|e| format!("Secret invalide: {}", e))?;
     
     let totp = TOTP::new(
-        Algorithm::SHA1,
+        Algorithm::SHA256,
         6,
         1,
         30,
@@ -85,21 +86,23 @@ pub fn verify_totp_code(secret: &str, code: &str) -> Result<bool, String> {
 
 /// Génère des codes de backup aléatoires
 fn generate_backup_codes(count: usize) -> Vec<String> {
-    let mut rng = rand::thread_rng();
-    (0..count)
-        .map(|_| {
-            // Format: XXXX-XXXX (8 caractères alphanumériques)
-            let code: String = (0..8)
-                .map(|i| {
-                    let chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // Sans ambiguïtés (I, O, 0, 1)
-                    let idx = rng.gen_range(0..chars.len());
-                    let c = chars.chars().nth(idx).unwrap();
-                    if i == 4 { format!("-{}", c) } else { c.to_string() }
-                })
-                .collect();
-            code
-        })
-        .collect()
+    let mut codes = Vec::with_capacity(count);
+    let chars = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // Sans ambiguïtés (I, O, 0, 1)
+    
+    for _ in 0..count {
+        let mut code_bytes = [0u8; 8];
+        rand::rngs::OsRng.fill_bytes(&mut code_bytes);
+        
+        let code: String = code_bytes.iter().enumerate()
+            .map(|(i, b)| {
+                let c = chars[(*b as usize) % chars.len()] as char;
+                if i == 4 { format!("-{}", c) } else { c.to_string() }
+            })
+            .collect();
+        codes.push(code);
+    }
+    
+    codes
 }
 
 /// Vérifie un code de backup
@@ -107,14 +110,21 @@ pub fn verify_backup_code(backup_codes_json: &str, code: &str) -> Result<(bool, 
     let mut codes: Vec<String> = serde_json::from_str(backup_codes_json)
         .map_err(|e| format!("Erreur parsing backup codes: {}", e))?;
     
-    // Chercher le code (insensible à la casse)
+    // Normaliser le code entré
     let code_upper = code.to_uppercase().replace("-", "");
     
-    if let Some(pos) = codes.iter().position(|c| c.to_uppercase().replace("-", "") == code_upper) {
-        // Code trouvé, le retirer de la liste
+    // Comparaison constant-time : toujours itérer sur TOUS les codes
+    use subtle::ConstantTimeEq;
+    let mut found_index: Option<usize> = None;
+    for (i, c) in codes.iter().enumerate() {
+        let stored = c.to_uppercase().replace("-", "");
+        if stored.as_bytes().ct_eq(code_upper.as_bytes()).into() {
+            found_index = Some(i);
+        }
+    }
+    
+    if let Some(pos) = found_index {
         codes.remove(pos);
-        let updated_json = serde_json::to_string(&codes)
-            .map_err(|e| format!("Erreur sérialisation: {}", e))?;
         Ok((true, codes))
     } else {
         Ok((false, codes))
@@ -136,12 +146,13 @@ mod tests {
     #[test]
     fn test_totp_verification() {
         let mut rng = rand::thread_rng();
-        let secret_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+        let mut secret_bytes = vec![0u8; 32];
+        rng.fill_bytes(&mut secret_bytes);
         let secret = Secret::Raw(secret_bytes);
         let secret_base32 = secret.to_encoded().to_string();
         
         let totp = TOTP::new(
-            Algorithm::SHA1,
+            Algorithm::SHA256, // VULN-018: align with production (was SHA1)
             6,
             1,
             30,

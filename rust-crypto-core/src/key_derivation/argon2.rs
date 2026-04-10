@@ -4,7 +4,6 @@
 //! résistant aux attaques GPU et par canal auxiliaire.
 
 use argon2::{
-    password_hash::{PasswordHasher, SaltString},
     Argon2, ParamsBuilder, Version,
 };
 use rand::rngs::OsRng;
@@ -175,16 +174,8 @@ pub fn verify_password(password: &str, expected_key: &[u8], salt: &[u8]) -> Resu
 
 /// Comparaison à temps constant de deux slices
 fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-
-    result == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 #[cfg(test)]

@@ -1,12 +1,12 @@
 //! Module de chiffrement AES-GCM
-//! 
+//!
 //! Implémentation du chiffrement authentifié AES-256-GCM utilisant
-//! la bibliothèque `ring` de Google (fork de BoringSSL).
+//! la bibliothèque RustCrypto `aes-gcm`.
 
-use ring::aead::{Aad, BoundKey, Nonce, NonceSequence, OpeningKey, SealingKey, UnboundKey, AES_256_GCM};
-use ring::error::Unspecified;
-use ring::rand::{SecureRandom, SystemRandom};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+use aes_gcm::aead::generic_array::GenericArray;
 use crate::errors::{CryptoError, Result};
+use zeroize::Zeroizing;
 use crate::secure_memory::EncryptedData;
 
 /// Taille du nonce pour AES-GCM (12 bytes recommandés)
@@ -15,38 +15,11 @@ const NONCE_SIZE: usize = 12;
 /// Taille de la clé AES-256 (32 bytes)
 const KEY_SIZE: usize = 32;
 
-/// Générateur de nonce unique pour chaque opération
-struct NonceGenerator {
-    rng: SystemRandom,
-}
-
-impl NonceGenerator {
-    fn new() -> Self {
-        NonceGenerator {
-            rng: SystemRandom::new(),
-        }
-    }
-
-    fn generate(&self) -> Result<Vec<u8>> {
-        let mut nonce = vec![0u8; NONCE_SIZE];
-        self.rng
-            .fill(&mut nonce)
-            .map_err(|_| CryptoError::RandomGenerationError("Failed to generate nonce".to_string()))?;
-        Ok(nonce)
-    }
-}
-
-impl NonceSequence for NonceGenerator {
-    fn advance(&mut self) -> std::result::Result<Nonce, Unspecified> {
-        let mut nonce_bytes = [0u8; NONCE_SIZE];
-        self.rng.fill(&mut nonce_bytes)?;
-        Nonce::try_assume_unique_for_key(&nonce_bytes)
-    }
-}
-
 /// Cipher AES-GCM avec gestion d'état
+///
+/// La clé est protégée par `Zeroizing` pour effacement automatique à la destruction.
 pub struct AesGcmCipher {
-    key: Vec<u8>,
+    key: Zeroizing<Vec<u8>>,
 }
 
 impl AesGcmCipher {
@@ -60,36 +33,29 @@ impl AesGcmCipher {
         }
 
         Ok(AesGcmCipher {
-            key: key.to_vec(),
+            key: Zeroizing::new(key.to_vec()),
         })
     }
 
     /// Chiffre des données
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<EncryptedData> {
-        // Génér un nonce aléatoire
-        let rng = SystemRandom::new();
-        let mut nonce_bytes = vec![0u8; NONCE_SIZE];
-        rng.fill(&mut nonce_bytes)
-            .map_err(|_| CryptoError::RandomGenerationError("Failed to generate nonce".to_string()))?;
+        use aes_gcm::AeadCore;
+        use aes_gcm::aead::OsRng;
 
-        let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes)
-            .map_err(|_| CryptoError::EncryptionError("Invalid nonce".to_string()))?;
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&self.key));
 
-        let unbound_key = UnboundKey::new(&AES_256_GCM, &self.key)
-            .map_err(|_| CryptoError::EncryptionError("Invalid key".to_string()))?;
+        // Générer un nonce aléatoire via OsRng (CSPRNG)
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce_bytes = nonce.to_vec();
 
-        // Utiliser LessSafeKey pour avoir le contrôle direct du nonce
-        let key = ring::aead::LessSafeKey::new(unbound_key);
-
-        let mut in_out = plaintext.to_vec();
-        
-        key.seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
-            .map_err(|_| CryptoError::EncryptionError("Encryption failed".to_string()))?;
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext)
+            .map_err(|_| CryptoError::EncryptionError("AES-256-GCM encryption failed".to_string()))?;
 
         Ok(EncryptedData::new(
             "AES-256-GCM".to_string(),
             nonce_bytes,
-            in_out,
+            ciphertext,
         ))
     }
 
@@ -102,33 +68,18 @@ impl AesGcmCipher {
             });
         }
 
-        let unbound_key = UnboundKey::new(&AES_256_GCM, &self.key)
-            .map_err(|_| CryptoError::DecryptionError("Invalid key".to_string()))?;
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&self.key));
+        let nonce = GenericArray::from_slice(&encrypted.nonce);
 
-        let nonce = Nonce::try_assume_unique_for_key(&encrypted.nonce)
-            .map_err(|_| CryptoError::DecryptionError("Invalid nonce".to_string()))?;
-
-        // Utiliser LessSafeKey pour avoir le contrôle direct
-        let key = ring::aead::LessSafeKey::new(unbound_key);
-
-        let mut in_out = encrypted.ciphertext.clone();
-
-        let plaintext = key
-            .open_in_place(nonce, Aad::empty(), &mut in_out)
+        let plaintext = cipher
+            .decrypt(nonce, encrypted.ciphertext.as_ref())
             .map_err(|_| CryptoError::AuthenticationFailed)?;
 
-        Ok(plaintext.to_vec())
+        Ok(plaintext)
     }
 }
 
-/// Nonce à usage unique pour le déchiffrement
-struct SingleUseNonce(Option<Nonce>);
 
-impl NonceSequence for SingleUseNonce {
-    fn advance(&mut self) -> std::result::Result<Nonce, Unspecified> {
-        self.0.take().ok_or(Unspecified)
-    }
-}
 
 /// Fonction utilitaire pour chiffrer rapidement avec AES-GCM
 ///

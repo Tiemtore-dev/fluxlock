@@ -3,7 +3,6 @@
 use blake3::Hasher as Blake3Hasher;
 use sha2::{Sha256, Digest as Sha2Digest};
 use sha3::Sha3_256;
-use crate::errors::{CryptoError, Result};
 
 /// Calcule le hachage BLAKE3 (rapide et moderne)
 ///

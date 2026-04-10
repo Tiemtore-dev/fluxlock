@@ -1,311 +1,417 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Lock, User, Sparkles, Shield, AlertTriangle, LogIn } from 'lucide-react'
-import { tauriAPI } from '../lib/tauri-api'
+import { Lock, User, AlertTriangle, LogIn, Fingerprint, Info, Loader2 } from 'lucide-react'
+import { auth, biometric, type BiometricStatus } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
-import { invoke } from '@tauri-apps/api/tauri'
+import { Button, Input } from '../design-system/atoms'
+import { hasAndroidBiometric, androidBiometricAvailable, androidAuthenticate, hasAndroidKeystore, androidKeystoreRetrieve } from '../lib/android-biometric'
 
 export default function LoginPage() {
   const navigate = useNavigate()
   const setAuth = useAuthStore((state) => state.setAuth)
-  
-  const [formData, setFormData] = useState({
-    username: '',
-    password: '',
-  })
+  const dbReady = useAuthStore((state) => state.dbReady)
+
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [loginDelay, setLoginDelay] = useState(0)
   const [remainingTime, setRemainingTime] = useState(0)
   const [error, setError] = useState('')
+  const [info, setInfo] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [biometricLoading, setBiometricLoading] = useState(false)
+  const [bioStatus, setBioStatus] = useState<BiometricStatus | null>(null)
+  const biometricTriggered = useRef(false)
 
-  // Formater le temps en minutes:secondes
-  const formatTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
+  // Derived: can the user use biometric for this username?
+  const canUseBiometric =
+    bioStatus?.available &&
+    bioStatus?.enrolled &&
+    !bioStatus?.requires_password &&
+    username.trim().length > 0 &&
+    bioStatus?.enrolled_username?.toLowerCase() === username.trim().toLowerCase()
+
+  // Derived: show biometric button but as disabled with reason
+  const showBiometricSection =
+    bioStatus?.available &&
+    bioStatus?.enrolled &&
+    username.trim().length > 0 &&
+    bioStatus?.enrolled_username?.toLowerCase() === username.trim().toLowerCase()
+
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60)
+    const sec = s % 60
+    return m > 0 ? `${m}m ${sec}s` : `${sec}s`
   }
 
-  // Compte à rebours pour le délai de connexion
   useEffect(() => {
-    if (remainingTime > 0) {
-      const timer = setInterval(() => {
-        setRemainingTime(prev => {
-          if (prev <= 1) {
-            setLoginDelay(0)
-            setError('')
-            return 0
-          }
-          return prev - 1
-        })
-      }, 1000)
-      
-      return () => clearInterval(timer)
-    }
+    if (remainingTime <= 0) return
+    const t = setInterval(() => {
+      setRemainingTime((p) => {
+        if (p <= 1) { setLoginDelay(0); setError(''); return 0 }
+        return p - 1
+      })
+    }, 1000)
+    return () => clearInterval(t)
   }, [remainingTime])
 
-  // Compte à rebours pour le délai de connexion
+  // Check biometric availability on mount
   useEffect(() => {
-    if (remainingTime > 0) {
-      const timer = setInterval(() => {
-        setRemainingTime(prev => {
-          if (prev <= 1) {
-            setLoginDelay(0)
-            setError('')
-            return 0
-          }
-          return prev - 1
-        })
-      }, 1000)
-      
-      return () => clearInterval(timer)
+    biometric.checkStatus().then((status) => {
+      // On Android, override availability from the native BiometricPrompt bridge
+      if (hasAndroidBiometric()) {
+        status.available = androidBiometricAvailable()
+        if (status.available && status.biometric_type === 'none') {
+          status.biometric_type = 'fingerprint'
+        }
+      }
+      setBioStatus(status)
+    })
+  }, [])
+
+  // Pre-fill username if biometric is enrolled
+  useEffect(() => {
+    if (bioStatus?.enrolled && bioStatus.enrolled_username && !username) {
+      setUsername(bioStatus.enrolled_username)
     }
-  }, [remainingTime])
+  }, [bioStatus])
+
+  const handleBiometricLogin = useCallback(async () => {
+    const trimmed = username.trim()
+    if (!trimmed) {
+      setError("Entrez votre nom d'utilisateur avant d'utiliser la biométrie.")
+      return
+    }
+    setError('')
+    setInfo('')
+    setBiometricLoading(true)
+    try {
+      let res
+      // On Android with Keystore: retrieve key from TEE/StrongBox (triggers BiometricPrompt)
+      // then pass it to the Rust backend directly — no file-based key storage needed.
+      if (hasAndroidKeystore()) {
+        const account = `user_bio_${trimmed.toLowerCase()}`
+        const keyB64 = await androidKeystoreRetrieve(account)
+        res = await biometric.loginWithKey(trimmed, keyB64)
+      } else {
+        // On Android without Keystore (fallback): show BiometricPrompt then use Rust backend
+        if (hasAndroidBiometric()) {
+          await androidAuthenticate('Connectez-vous à FluXlock')
+        }
+        res = await biometric.login(trimmed)
+      }
+      if (res.success && res.token) {
+        if (res.email) localStorage.setItem('userEmail', res.email)
+        setAuth(
+          { id: res.user_id?.toString() || '1', username: res.message || trimmed, email: res.email || '' },
+          res.token,
+          res.token,
+        )
+        navigate('/')
+      } else {
+        setError(res.message || 'Échec de la connexion biométrique')
+      }
+    } catch (err: any) {
+      const msg = err?.toString() || ''
+      setError(msg || 'Échec de la connexion biométrique')
+      // Refresh status to get updated failed_attempts / requires_password
+      biometric.checkStatus().then(setBioStatus)
+    } finally {
+      setBiometricLoading(false)
+    }
+  }, [username, navigate, setAuth])
+
+  // Auto-trigger biometric if enrolled + allowed + username matches (ONCE only)
+  useEffect(() => {
+    if (
+      !biometricTriggered.current &&
+      bioStatus?.available &&
+      bioStatus?.enrolled &&
+      !bioStatus?.requires_password &&
+      bioStatus?.enrolled_username &&
+      username.trim().toLowerCase() === bioStatus.enrolled_username.toLowerCase() &&
+      document.visibilityState === 'visible'
+    ) {
+      biometricTriggered.current = true
+      handleBiometricLogin()
+    }
+  }, [bioStatus, username])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
+    setInfo('')
     setIsLoading(true)
-
     try {
-      // Tentative de connexion directe - le backend testera le mot de passe
-      const response = await tauriAPI.login(formData.username, formData.password)
-      
-      if (response.success && response.token) {
-        // Connexion réussie
-        if (response.email) {
-          localStorage.setItem('userEmail', response.email)
-        }
-        
-        const user = {
-          id: response.user_id?.toString() || '1',
-          username: formData.username,
-          email: response.email || formData.username + '@local.app'
-        }
-        
-        setAuth(user, response.token, response.token)
+      const res = await auth.login(username, password)
+      if (res.success && res.token) {
+        if (res.email) localStorage.setItem('userEmail', res.email)
+        setAuth(
+          { id: res.user_id?.toString() || '1', username, email: res.email || `${username}@local.app` },
+          res.token,
+          res.token,
+        )
         navigate('/')
       } else {
-        // Échec de connexion - vérifier le délai d'attente
-        const delay = await invoke<number>('check_login_delay', { 
-          username: formData.username 
-        })
-        
+        const delay = await auth.checkLoginDelay(username).catch(() => 0)
         if (delay > 0) {
           setLoginDelay(delay)
           setRemainingTime(delay)
-          setError(`⏱️ ${response.message || 'Identifiants incorrects'}. Temps d'attente: ${formatTime(delay)}`)
+          setError(`Trop de tentatives. Attente : ${formatTime(delay)}`)
         } else {
-          setError(response.message || 'Identifiants incorrects')
+          setError(res.message || 'Identifiants incorrects')
         }
       }
     } catch (err: any) {
-      setError(err.message || 'Erreur de connexion')
+      const msg = typeof err === 'string' ? err : (err?.message || 'Erreur de connexion')
+      setError(msg)
     } finally {
       setIsLoading(false)
     }
   }
 
-  return (
-    <div 
-      className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden"
-      style={{ background: 'linear-gradient(135deg, #0a0e1a 0%, #121826 50%, #0f1420 100%)' }}
-    >
-      {/* Animated background effects */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full filter blur-3xl animate-pulse"></div>
-        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full filter blur-3xl animate-pulse" style={{ animationDelay: '1s' }}></div>
-      </div>
+  const locked = loginDelay > 0 && remainingTime > 0
 
-      <div className="relative z-10 max-w-md w-full">
-        {/* Header avec effet de glow */}
-        <div className="text-center mb-8 animate-fadeIn">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl mb-6 relative"
-               style={{
-                 background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-                 boxShadow: '0 8px 32px rgba(59, 130, 246, 0.4), 0 0 60px rgba(59, 130, 246, 0.2)'
-               }}>
-            <Shield className="w-10 h-10 text-white" style={{ filter: 'drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3))' }} />
-            <div className="absolute inset-0 rounded-2xl animate-pulse"
-                 style={{ boxShadow: '0 0 40px rgba(59, 130, 246, 0.6)' }}></div>
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--bg-void)',
+      padding: 'var(--space-6)',
+    }}>
+      <div className="animate-fade-in" style={{ width: '100%', maxWidth: 400 }}>
+        {/* Brand */}
+        <div style={{ textAlign: 'center', marginBottom: 'var(--space-10)' }}>
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 56,
+            height: 56,
+            borderRadius: 'var(--radius-xl)',
+            background: 'var(--accent)',
+            boxShadow: 'var(--shadow-glow)',
+            marginBottom: 'var(--space-5)',
+          }}>
+            <Lock size={24} style={{ color: 'var(--text-inverse)' }} />
           </div>
-          
-          <h1 className="text-4xl font-bold mb-3"
-              style={{
-                background: 'linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                textShadow: '0 0 30px rgba(59, 130, 246, 0.3)'
-              }}>
-            SecureVault
+          <h1 style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 'var(--text-3xl)',
+            color: 'var(--text-primary)',
+            letterSpacing: 'var(--tracking-tight)',
+          }}>
+            FluXlock
           </h1>
-          <p className="text-gray-400 flex items-center justify-center gap-2">
-            <Sparkles className="w-4 h-4" />
+          <p style={{
+            fontSize: 'var(--text-sm)',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-body)',
+            marginTop: 'var(--space-1)',
+          }}>
             Connexion sécurisée à votre coffre-fort
           </p>
         </div>
 
-        {/* Card avec glassmorphism */}
-        <div 
-          className="p-8 rounded-2xl backdrop-blur-xl animate-fadeIn"
-          style={{
-            background: 'rgba(26, 34, 52, 0.8)',
-            border: '1px solid rgba(148, 163, 184, 0.1)',
-            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3), 0 0 60px rgba(59, 130, 246, 0.05)'
-          }}
-        >
-          <form onSubmit={handleSubmit} className="space-y-5">
-            {/* Username */}
-            <div>
-              <label className="block text-sm font-semibold mb-2" style={{ color: '#e2e8f0' }}>
-                Nom d'utilisateur
-              </label>
-              <div className="relative group">
-                <User className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 transition-colors"
-                      style={{ color: '#64748b' }} />
-                <input
-                  type="text"
-                  value={formData.username}
-                  onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  className="w-full pl-12 pr-4 py-3.5 rounded-xl transition-all duration-300 focus:outline-none font-medium"
-                  style={{
-                    background: '#121826',
-                    border: '1px solid rgba(148, 163, 184, 0.1)',
-                    color: '#e2e8f0'
-                  }}
-                  onFocus={(e) => {
-                    e.target.style.borderColor = '#3b82f6'
-                    e.target.style.boxShadow = '0 0 0 3px rgba(59, 130, 246, 0.1), 0 0 20px rgba(59, 130, 246, 0.1)'
-                  }}
-                  onBlur={(e) => {
-                    e.target.style.borderColor = 'rgba(148, 163, 184, 0.1)'
-                    e.target.style.boxShadow = 'none'
-                  }}
-                  placeholder="Entrez votre nom d'utilisateur"
-                  required
-                  autoFocus
-                  disabled={remainingTime > 0}
-                />
+        {/* Card */}
+        <div style={{
+          background: 'var(--bg-surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-xl)',
+          padding: 'var(--space-8)',
+        }}>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+            {!dbReady ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-6)' }}>
+                <Loader2 size={28} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite' }} />
+                <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)', margin: 0 }}>Initialisation du coffre-fort…</p>
               </div>
-            </div>
+            ) : (
+            <>
+            <Input
+              label="Nom d'utilisateur"
+              icon={User}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Entrez votre nom d'utilisateur"
+              required
+              autoFocus
+              disabled={locked}
+            />
 
-            {/* Password */}
-            <div>
-              <label className="block text-sm font-semibold mb-2" style={{ color: '#e2e8f0' }}>
-                Mot de passe
-              </label>
-              <div className="relative group">
-                <Lock className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 transition-colors"
-                      style={{ color: '#64748b' }} />
-                <input
-                  type="password"
-                  value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full pl-12 pr-4 py-3.5 rounded-xl transition-all duration-300 focus:outline-none font-medium"
-                  style={{
-                    background: '#121826',
-                    border: '1px solid rgba(148, 163, 184, 0.1)',
-                    color: '#e2e8f0'
-                  }}
-                  onFocus={(e) => {
-                    e.target.style.borderColor = '#3b82f6'
-                    e.target.style.boxShadow = '0 0 0 3px rgba(59, 130, 246, 0.1), 0 0 20px rgba(59, 130, 246, 0.1)'
-                  }}
-                  onBlur={(e) => {
-                    e.target.style.borderColor = 'rgba(148, 163, 184, 0.1)'
-                    e.target.style.boxShadow = 'none'
-                  }}
-                  placeholder="••••••••••••"
-                  required
-                  disabled={remainingTime > 0}
-                />
-              </div>
-            </div>
+            {/* Password field — always shown, user always has the option to type password */}
+            <Input
+              label="Mot de passe"
+              type="password"
+              icon={Lock}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••••••"
+              required
+              disabled={locked}
+            />
 
-            {/* Délai d'attente après trop de tentatives */}
-            {loginDelay > 0 && remainingTime > 0 && (
-              <div className="animate-fadeIn bg-orange-50 dark:bg-orange-900/20 p-6 rounded-xl border-2 border-orange-500 text-center">
-                <div className="text-6xl mb-4">⏱️</div>
-                <p className="text-xl font-bold mb-2" style={{ color: '#fb923c' }}>
+            {/* Rate-limit countdown */}
+            {locked && (
+              <div style={{
+                padding: 'var(--space-5)',
+                borderRadius: 'var(--radius-lg)',
+                background: 'var(--warning-muted)',
+                border: '1px solid var(--warning)',
+                textAlign: 'center',
+              }}>
+                <p style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--warning)', fontFamily: 'var(--font-body)' }}>
                   Trop de tentatives échouées
                 </p>
-                <div className="text-5xl font-mono font-bold my-4" style={{ color: '#f97316' }}>
+                <p style={{
+                  fontSize: 'var(--text-2xl)',
+                  fontFamily: 'var(--font-mono)',
+                  fontWeight: 700,
+                  color: 'var(--warning)',
+                  margin: 'var(--space-3) 0',
+                }}>
                   {formatTime(remainingTime)}
-                </div>
-                <p className="text-sm text-gray-400">
-                  Veuillez patienter avant de réessayer
                 </p>
-                <div className="mt-4 w-full bg-gray-700 rounded-full h-2 overflow-hidden">
-                  <div 
-                    className="bg-orange-500 h-full transition-all duration-1000 ease-linear"
-                    style={{ width: `${(remainingTime / loginDelay) * 100}%` }}
-                  ></div>
+                <div style={{ height: 3, borderRadius: 'var(--radius-full)', background: 'var(--bg-hover)', overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%',
+                    width: `${(remainingTime / loginDelay) * 100}%`,
+                    background: 'var(--warning)',
+                    transition: 'width 1s linear',
+                  }} />
                 </div>
               </div>
             )}
 
-            {/* Error message */}
-            {error && (
-              <div className="p-3 rounded-lg flex items-center gap-2 text-sm"
-                   style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', color: '#fca5a5' }}>
-                <AlertTriangle className="w-4 h-4" />
+            {/* Error */}
+            {error && !locked && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                padding: 'var(--space-3)',
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--danger-muted)',
+                border: '1px solid var(--danger)',
+                fontSize: 'var(--text-sm)',
+                color: 'var(--danger)',
+                fontFamily: 'var(--font-body)',
+              }}>
+                <AlertTriangle size={16} />
                 {error}
               </div>
             )}
 
-            {/* Submit button */}
-            <button
+            {/* Info (password reason from biometric gate) */}
+            {info && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                padding: 'var(--space-3)',
+                borderRadius: 'var(--radius-md)',
+                background: 'color-mix(in srgb, var(--accent) 10%, transparent)',
+                border: '1px solid var(--accent)',
+                fontSize: 'var(--text-sm)',
+                color: 'var(--accent-text)',
+                fontFamily: 'var(--font-body)',
+              }}>
+                <Info size={16} />
+                {info}
+              </div>
+            )}
+
+            <Button
               type="submit"
-              disabled={isLoading || (loginDelay > 0 && remainingTime > 0)}
-              className="w-full py-3.5 px-6 rounded-xl font-bold transition-all duration-300 flex items-center justify-center gap-2 text-base"
-              style={{
-                background: (isLoading || (loginDelay > 0 && remainingTime > 0)) ? '#475569' : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-                color: '#ffffff',
-                boxShadow: (isLoading || (loginDelay > 0 && remainingTime > 0)) ? 'none' : '0 4px 16px rgba(59, 130, 246, 0.3)',
-                opacity: (loginDelay > 0 && remainingTime > 0) ? 0.5 : 1,
-                cursor: (loginDelay > 0 && remainingTime > 0) ? 'not-allowed' : 'pointer'
-              }}
-              onMouseOver={(e) => !(isLoading || (loginDelay > 0 && remainingTime > 0)) && (e.currentTarget.style.transform = 'translateY(-2px)')}
-              onMouseOut={(e) => !(isLoading || (loginDelay > 0 && remainingTime > 0)) && (e.currentTarget.style.transform = 'translateY(0)')}
+              fullWidth
+              size="lg"
+              loading={isLoading}
+              disabled={locked || !dbReady}
+              icon={LogIn}
             >
-              {isLoading ? (
-                <>
-                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  Connexion...
-                </>
-              ) : (
-                <>
-                  Se connecter
-                  <LogIn className="w-5 h-5" />
-                </>
-              )}
-            </button>
+              Se connecter
+            </Button>
+            </>
+            )}
           </form>
 
-          {/* Forgot password link */}
-          <div className="mt-4 text-center">
-            <Link 
-              to="/reset-vault" 
-              className="text-sm font-medium transition-colors inline-flex items-center gap-1"
-              style={{ color: '#ef4444' }}
-              onMouseEnter={(e) => e.currentTarget.style.color = '#dc2626'}
-              onMouseLeave={(e) => e.currentTarget.style.color = '#ef4444'}
-            >
-              <AlertTriangle className="w-4 h-4" />
+          {/* Biometric login — only shown if enrolled for this username */}
+          {showBiometricSection && (
+            <div style={{ marginTop: 'var(--space-4)' }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
+                marginBottom: 'var(--space-3)',
+              }}>
+                <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>ou</span>
+                <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+              </div>
+
+              {bioStatus?.requires_password && (
+                <p style={{
+                  fontSize: 'var(--text-xs)',
+                  color: 'var(--text-muted)',
+                  fontFamily: 'var(--font-body)',
+                  textAlign: 'center',
+                  marginBottom: 'var(--space-2)',
+                }}>
+                  {bioStatus.password_reason || 'Mot de passe requis'}
+                </p>
+              )}
+
+              <button
+                onClick={handleBiometricLogin}
+                disabled={!canUseBiometric || biometricLoading || locked}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 'var(--space-3)',
+                  padding: 'var(--space-3) var(--space-4)',
+                  borderRadius: 'var(--radius-lg)',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-hover)',
+                  color: 'var(--text-primary)',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 'var(--text-sm)',
+                  fontWeight: 500,
+                  cursor: !canUseBiometric || biometricLoading || locked ? 'not-allowed' : 'pointer',
+                  opacity: !canUseBiometric || biometricLoading || locked ? 0.4 : 1,
+                  transition: 'all var(--transition-fast)',
+                }}
+              >
+                <Fingerprint size={20} style={{ color: canUseBiometric ? 'var(--accent)' : 'var(--text-muted)' }} />
+                {biometricLoading
+                  ? 'Authentification...'
+                  : bioStatus?.biometric_type === 'touchid'
+                    ? `Vault · Touch ID${bioStatus?.failed_attempts ? ` (${bioStatus.failed_attempts}/3)` : ''}`
+                    : bioStatus?.biometric_type === 'faceid'
+                      ? `Vault · Face ID${bioStatus?.failed_attempts ? ` (${bioStatus.failed_attempts}/3)` : ''}`
+                      : 'Déverrouiller avec biométrie'}
+              </button>
+            </div>
+          )}
+
+          {/* Links */}
+          <div style={{ marginTop: 'var(--space-5)', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            <Link to="/reset-vault" style={{
+              fontSize: 'var(--text-xs)',
+              color: 'var(--danger)',
+              fontFamily: 'var(--font-body)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 'var(--space-1)',
+              textDecoration: 'none',
+            }}>
+              <AlertTriangle size={12} />
               Mot de passe oublié ? Réinitialiser le coffre-fort
             </Link>
-          </div>
-
-          {/* Sign up link */}
-          <div className="mt-4 text-center">
-            <p className="text-sm" style={{ color: '#94a3b8' }}>
+            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
               Pas encore de compte ?{' '}
-              <Link 
-                to="/register" 
-                className="font-semibold transition-colors"
-                style={{ color: '#3b82f6' }}
-                onMouseEnter={(e) => e.currentTarget.style.color = '#60a5fa'}
-                onMouseLeave={(e) => e.currentTarget.style.color = '#3b82f6'}
-              >
+              <Link to="/register" style={{ color: 'var(--accent-text)', fontWeight: 500, textDecoration: 'none' }}>
                 Créer un compte
               </Link>
             </p>

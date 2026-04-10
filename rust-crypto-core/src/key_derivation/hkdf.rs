@@ -1,13 +1,14 @@
 //! HKDF (HMAC-based Key Derivation Function)
 //! 
 //! Utilisé pour dériver plusieurs clés depuis un secret maître.
+//! Utilise SHA3-256 pour cohérence avec la pile PQC-native (HMAC-SHA3-256 vault header).
 
 use hkdf::Hkdf;
-use sha2::Sha256;
+use sha3::Sha3_256;
 use crate::errors::{CryptoError, Result};
 use crate::secure_memory::SecretBytes;
 
-/// Dérive une clé en utilisant HKDF-SHA256
+/// Dérive une clé en utilisant HKDF-SHA3-256
 ///
 /// # Arguments
 /// * `input_key_material` - Matériel de clé d'entrée (IKM)
@@ -30,7 +31,7 @@ pub fn derive_key_hkdf(
     info: &[u8],
     output_length: usize,
 ) -> Result<SecretBytes> {
-    let hk = Hkdf::<Sha256>::new(salt, input_key_material);
+    let hk = Hkdf::<Sha3_256>::new(salt, input_key_material);
     
     let mut output = vec![0u8; output_length];
     hk.expand(info, &mut output)

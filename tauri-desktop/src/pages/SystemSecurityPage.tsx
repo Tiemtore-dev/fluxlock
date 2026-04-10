@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/tauri'
-import { Shield, AlertTriangle, Lock, Unlock, RefreshCw, Mail, HardDrive, Activity } from 'lucide-react'
-import DashboardLayout from '../components/DashboardLayout'
+import { invoke } from '@tauri-apps/api/core'
+import { Shield, AlertTriangle, Lock, Unlock, RefreshCw, Activity, HardDrive } from 'lucide-react'
+import { AppShell } from '../design-system/layouts'
+import { Button, Input, Spinner, Badge } from '../design-system/atoms'
+import { Modal } from '../design-system/molecules'
+import { useToast } from '../design-system/organisms'
 
 interface SecurityState {
   is_locked: boolean
@@ -24,282 +27,112 @@ interface FilesystemStats {
   monitoring_enabled: boolean
 }
 
-export default function SystemSecurityPage() {
-  const [securityState, setSecurityState] = useState<SecurityState | null>(null)
-  const [filesystemStats, setFilesystemStats] = useState<FilesystemStats | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [otpCode, setOtpCode] = useState('')
-  const [showOtpDialog, setShowOtpDialog] = useState(false)
-  const [showPasswordDialog, setShowPasswordDialog] = useState(false)
-  const [passwordInput, setPasswordInput] = useState('')
+/* helpers */
+const threatColor = (l: string) =>
+  l === 'critical' || l === 'high' ? 'var(--danger)' : l === 'medium' ? 'var(--warning)' : 'var(--success)'
+const threatBadge = (l: string): 'danger' | 'warning' | 'success' =>
+  l === 'critical' || l === 'high' ? 'danger' : l === 'medium' ? 'warning' : 'success'
 
-  const loadSecurityState = async () => {
+export default function SystemSecurityPage() {
+  const { toast } = useToast()
+  const [sec, setSec] = useState<SecurityState | null>(null)
+  const [fs, setFs] = useState<FilesystemStats | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [showPwDialog, setShowPwDialog] = useState(false)
+  const [pwInput, setPwInput] = useState('')
+
+  const load = async () => {
     try {
       const state = await invoke<SecurityState>('get_security_status')
-      console.log('🔍 DEBUG: État sécurité chargé:', state)
-      console.log('🔍 DEBUG: is_readonly =', state.is_readonly)
-      console.log('🔍 DEBUG: threat_level =', state.threat_level)
-      setSecurityState(state)
-      
-      const fsStats = await invoke<FilesystemStats>('get_filesystem_stats')
-      setFilesystemStats(fsStats)
-    } catch (err) {
-      console.error('Erreur chargement état sécurité:', err)
-    } finally {
-      setLoading(false)
-    }
+      setSec(state)
+      const stats = await invoke<FilesystemStats>('get_filesystem_stats')
+      setFs(stats)
+    } catch { /* ignore load errors */ }
+    finally { setLoading(false) }
   }
 
-  useEffect(() => {
-    loadSecurityState()
-    const interval = setInterval(loadSecurityState, 5000) // Refresh toutes les 5s
-    return () => clearInterval(interval)
-  }, [])
-
-  const handleRequestOtp = async () => {
-    const userEmail = localStorage.getItem('userEmail')
-    if (!userEmail) {
-      alert('Email utilisateur introuvable')
-      return
-    }
-
-    try {
-      const result = await invoke<string>('request_otp_code', { userEmail })
-      alert(result)
-      setShowOtpDialog(true)
-    } catch (err: any) {
-      alert('Erreur: ' + err.toString())
-    }
-  }
-
-  const handleVerifyOtp = async () => {
-    const userEmail = localStorage.getItem('userEmail')
-    if (!userEmail) {
-      alert('Email utilisateur introuvable')
-      return
-    }
-
-    try {
-      const valid = await invoke<boolean>('verify_otp_code', { 
-        userEmail, 
-        code: otpCode 
-      })
-      
-      if (valid) {
-        alert('✅ Code OTP vérifié avec succès!')
-        setShowOtpDialog(false)
-        setOtpCode('')
-      } else {
-        alert('❌ Code OTP invalide ou expiré')
-      }
-    } catch (err: any) {
-      alert('Erreur: ' + err.toString())
-    }
-  }
-
-  const handleDisableReadonly = async () => {
-    console.log('🔐 DEBUG: handleDisableReadonly appelé')
-    
-    // Ouvrir le dialogue custom au lieu de prompt()
-    setShowPasswordDialog(true)
-  }
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t) }, [])
 
   const confirmDisableReadonly = async () => {
-    console.log('🔐 DEBUG: confirmDisableReadonly appelé avec password:', passwordInput ? 'oui' : 'non')
-    
-    if (!passwordInput) {
-      alert('⚠️ Veuillez entrer un mot de passe')
-      return
-    }
-
+    if (!pwInput) return
     try {
-      console.log('📡 DEBUG: Appel disable_readonly_mode...')
-      const result = await invoke<string>('disable_readonly_mode', { 
-        password: passwordInput 
-      })
-      console.log('✅ DEBUG: Résultat:', result)
-      
-      // Fermer le dialogue et réinitialiser
-      setShowPasswordDialog(false)
-      setPasswordInput('')
-      
-      // Recharger l'état pour mettre à jour l'indicateur
-      console.log('🔄 DEBUG: Rechargement état sécurité...')
-      await loadSecurityState()
-      console.log('✅ DEBUG: État rechargé')
-      
-      alert('✅ ' + result)
-    } catch (err: any) {
-      console.error('❌ DEBUG: Erreur disable_readonly_mode:', err)
-      alert('❌ Erreur: ' + err.toString())
-    }
+      const result = await invoke<string>('disable_readonly_mode', { password: pwInput })
+      setShowPwDialog(false); setPwInput(''); await load()
+      toast(result, 'success')
+    } catch (e: any) { toast('Erreur : ' + e.toString(), 'error') }
   }
 
-  const handleResetCounters = async () => {
-    if (!confirm('Réinitialiser tous les compteurs de sécurité ?')) return
-
+  const toggleMonitoring = async (enable: boolean) => {
+    if (!confirm(`${enable ? 'Activer' : 'Désactiver'} la surveillance ?`)) return
     try {
-      const result = await invoke<string>('reset_security_counters')
-      alert(result)
-      await loadSecurityState()
-    } catch (err: any) {
-      alert('Erreur: ' + err.toString())
-    }
-  }
-  
-  const handleDisableFilesystemReadonly = async () => {
-    if (!confirm('Désactiver le mode lecture seule du système ?')) return
-
-    try {
-      const result = await invoke<string>('disable_filesystem_readonly')
-      alert(result)
-      await loadSecurityState()
-    } catch (err: any) {
-      alert('Erreur: ' + err.toString())
-    }
+      const r = await invoke<string>(enable ? 'enable_filesystem_monitoring' : 'disable_filesystem_monitoring')
+      toast(r, 'success'); await load()
+    } catch (e: any) { toast('Erreur : ' + e.toString(), 'error') }
   }
 
-  const handleToggleMonitoring = async (enable: boolean) => {
-    const action = enable ? 'activer' : 'désactiver'
-    if (!confirm(`Voulez-vous vraiment ${action} la surveillance des fichiers ?`)) return
+  /* reusable style objects */
+  const card: React.CSSProperties = { background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-6)' }
+  const statBox = (color: string): React.CSSProperties => ({ background: `color-mix(in srgb, ${color} 10%, transparent)`, borderRadius: 'var(--radius-md)', padding: 'var(--space-4)' })
 
-    try {
-      const command = enable ? 'enable_filesystem_monitoring' : 'disable_filesystem_monitoring'
-      const result = await invoke<string>(command)
-      alert(`✅ ${result}`)
-      await loadSecurityState()
-    } catch (err: any) {
-      alert('❌ Erreur: ' + err.toString())
-    }
-  }
-
-  const getThreatLevelColor = (level: string) => {
-    switch (level) {
-      case 'none': return 'text-green-600 bg-green-100 dark:bg-green-900/30 dark:text-green-200'
-      case 'low': return 'text-blue-600 bg-blue-100 dark:bg-blue-900/30 dark:text-blue-200'
-      case 'medium': return 'text-yellow-600 bg-yellow-100 dark:bg-yellow-900/30 dark:text-yellow-200'
-      case 'high': return 'text-orange-600 bg-orange-100 dark:bg-orange-900/30 dark:text-orange-200'
-      case 'critical': return 'text-red-600 bg-red-100 dark:bg-red-900/30 dark:text-red-200'
-      default: return 'text-gray-600 bg-gray-100'
-    }
-  }
-
-  if (loading) {
-    return (
-      <DashboardLayout>
-        <div className="flex items-center justify-center h-64">
-          <RefreshCw className="w-8 h-8 animate-spin text-gray-400" />
-        </div>
-      </DashboardLayout>
-    )
-  }
+  if (loading) return <AppShell><div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-16)' }}><Spinner size={32} /></div></AppShell>
 
   return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        {/* En-tête */}
-        <div className="flex items-center justify-between">
+    <AppShell>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <h1 className="text-3xl font-bold text-gray-900 dark:text-white flex items-center gap-3">
-              <Shield className="w-8 h-8 text-blue-600" />
-              Sécurité Système
+            <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', margin: 0 }}>
+              <Shield size={28} style={{ color: 'var(--accent)' }} /> Sécurité Système
             </h1>
-            <p className="text-gray-600 dark:text-gray-400 mt-2">
-              Protection anti-brute force et détection ransomware
-            </p>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>Anti-brute force et détection ransomware</p>
           </div>
-          <button
-            onClick={loadSecurityState}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
-          >
-            <RefreshCw className="w-5 h-5" />
-            Actualiser
-          </button>
+          <Button icon={RefreshCw} onClick={load}>Actualiser</Button>
         </div>
 
-        {/* État global */}
-        {securityState && (
+        {sec && (
           <>
-            {/* Cartes de statut */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {/* Niveau de menace */}
-              <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-6">
-                <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">
-                  Niveau de Menace
-                </h3>
-                <div className="flex items-center gap-3">
-                  <AlertTriangle className={`w-8 h-8 ${
-                    securityState.threat_level === 'critical' ? 'text-red-600' :
-                    securityState.threat_level === 'high' ? 'text-orange-600' :
-                    securityState.threat_level === 'medium' ? 'text-yellow-600' :
-                    'text-green-600'
-                  }`} />
-                  <div>
-                    <span className={`px-3 py-1 rounded-full text-sm font-semibold ${getThreatLevelColor(securityState.threat_level)}`}>
-                      {securityState.threat_level.toUpperCase()}
-                    </span>
-                  </div>
+            {/* Status cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 'var(--space-4)' }}>
+              {/* Threat level */}
+              <div style={card}>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-wide)', marginBottom: 'var(--space-2)' }}>Niveau de menace</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                  <AlertTriangle size={28} style={{ color: threatColor(sec.threat_level) }} />
+                  <Badge variant={threatBadge(sec.threat_level)} size="sm">{sec.threat_level.toUpperCase()}</Badge>
                 </div>
               </div>
-
-              {/* Mode lecture seule */}
-              <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-6">
-                <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">
-                  Mode Lecture Seule
-                </h3>
-                <div className="flex items-center gap-3">
-                  {securityState.is_readonly ? (
-                    <>
-                      <Lock className="w-8 h-8 text-red-600" />
-                      <div>
-                        <span className="text-red-600 font-semibold">ACTIVÉ</span>
-                        <p className="text-xs text-gray-500">Protection active</p>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <Unlock className="w-8 h-8 text-green-600" />
-                      <div>
-                        <span className="text-green-600 font-semibold">DÉSACTIVÉ</span>
-                        <p className="text-xs text-gray-500">Accès normal</p>
-                      </div>
-                    </>
-                  )}
+              {/* Readonly */}
+              <div style={card}>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-wide)', marginBottom: 'var(--space-2)' }}>Mode lecture seule</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                  {sec.is_readonly ? <Lock size={28} style={{ color: 'var(--danger)' }} /> : <Unlock size={28} style={{ color: 'var(--success)' }} />}
+                  <span style={{ fontWeight: 600, color: sec.is_readonly ? 'var(--danger)' : 'var(--success)', fontSize: 'var(--text-sm)' }}>
+                    {sec.is_readonly ? 'ACTIVÉ' : 'DÉSACTIVÉ'}
+                  </span>
                 </div>
               </div>
-
-              {/* Verrouillage système */}
-              <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-6">
-                <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">
-                  Verrouillage
-                </h3>
-                <div className="flex items-center gap-3">
-                  <Shield className={`w-8 h-8 ${securityState.is_locked ? 'text-red-600' : 'text-green-600'}`} />
-                  <div>
-                    <span className={`font-semibold ${securityState.is_locked ? 'text-red-600' : 'text-green-600'}`}>
-                      {securityState.is_locked ? 'VERROUILLÉ' : 'DÉVERROUILLÉ'}
-                    </span>
-                    <p className="text-xs text-gray-500">État du système</p>
-                  </div>
+              {/* Lock state */}
+              <div style={card}>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-wide)', marginBottom: 'var(--space-2)' }}>Verrouillage</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                  <Shield size={28} style={{ color: sec.is_locked ? 'var(--danger)' : 'var(--success)' }} />
+                  <span style={{ fontWeight: 600, color: sec.is_locked ? 'var(--danger)' : 'var(--success)', fontSize: 'var(--text-sm)' }}>
+                    {sec.is_locked ? 'VERROUILLÉ' : 'DÉVERROUILLÉ'}
+                  </span>
                 </div>
               </div>
             </div>
 
-            {/* Alertes actives */}
-            {securityState.active_threats.length > 0 && (
-              <div className="bg-red-50 dark:bg-red-900/20 border-l-4 border-red-500 p-6 rounded-lg">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
-                  <div className="flex-1">
-                    <h3 className="text-lg font-bold text-red-800 dark:text-red-200 mb-3">
-                      🚨 Menaces Actives Détectées
-                    </h3>
-                    <ul className="space-y-2">
-                      {securityState.active_threats.map((threat, idx) => (
-                        <li key={idx} className="text-red-700 dark:text-red-300">
-                          • {threat}
-                        </li>
-                      ))}
+            {/* Active threats */}
+            {sec.active_threats.length > 0 && (
+              <div style={{ background: 'var(--danger-muted)', borderLeft: '4px solid var(--danger)', borderRadius: 'var(--radius-md)', padding: 'var(--space-5)' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
+                  <AlertTriangle size={20} style={{ color: 'var(--danger)', flexShrink: 0, marginTop: 2 }} />
+                  <div>
+                    <h3 style={{ fontWeight: 700, color: 'var(--danger)', marginBottom: 'var(--space-2)' }}>Menaces actives détectées</h3>
+                    <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>
+                      {sec.active_threats.map((t, i) => <li key={i} style={{ marginBottom: 'var(--space-1)' }}>{t}</li>)}
                     </ul>
                   </div>
                 </div>
@@ -307,157 +140,96 @@ export default function SystemSecurityPage() {
             )}
 
             {/* Actions */}
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-6">
-              <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-4">
-                Actions de Sécurité
-              </h2>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Toggle surveillance fichiers */}
-                <div className="border-2 border-blue-200 dark:border-blue-700 rounded-lg p-4 bg-blue-50 dark:bg-blue-900/20">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <Activity className="w-5 h-5 text-blue-600" />
-                      <h3 className="font-semibold text-gray-900 dark:text-white">
-                        Surveillance Fichiers
-                      </h3>
+            <div style={card}>
+              <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', marginBottom: 'var(--space-4)' }}>Actions de sécurité</h2>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 'var(--space-4)' }}>
+                {/* File monitoring toggle */}
+                <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 'var(--space-4)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                      <Activity size={18} style={{ color: 'var(--accent)' }} />
+                      <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>Surveillance fichiers</span>
                     </div>
-                    <button
-                      onClick={() => handleToggleMonitoring(!filesystemStats?.monitoring_enabled)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                        filesystemStats?.monitoring_enabled
-                          ? 'bg-green-600'
-                          : 'bg-gray-300 dark:bg-gray-600'
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                          filesystemStats?.monitoring_enabled ? 'translate-x-6' : 'translate-x-1'
-                        }`}
-                      />
+                    <button onClick={() => toggleMonitoring(!fs?.monitoring_enabled)} style={{
+                      position: 'relative', width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+                      background: fs?.monitoring_enabled ? 'var(--accent)' : 'var(--bg-hover)', transition: 'background var(--transition-fast)',
+                    }}>
+                      <span style={{
+                        position: 'absolute', top: 2, left: fs?.monitoring_enabled ? 22 : 2,
+                        width: 20, height: 20, borderRadius: '50%', background: 'white', transition: 'left var(--transition-fast)',
+                      }} />
                     </button>
                   </div>
-                  <p className="text-xs text-gray-600 dark:text-gray-400">
-                    {filesystemStats?.monitoring_enabled
-                      ? '🟢 Surveillance active - Détection ransomware en temps réel'
-                      : '🔴 Surveillance désactivée - Aucune protection active'}
+                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                    {fs?.monitoring_enabled ? 'Détection ransomware active' : 'Surveillance désactivée'}
                   </p>
                 </div>
-
-                {/* Désactiver mode lecture seule */}
-                <button
-                  onClick={(e) => {
-                    console.log('🖱️ CLICK DÉTECTÉ sur le bouton readonly');
-                    console.log('🔍 securityState?.is_readonly =', securityState?.is_readonly);
-                    console.log('🔍 bouton disabled =', !securityState?.is_readonly);
-                    e.preventDefault();
-                    handleDisableReadonly();
-                  }}
-                  disabled={!securityState?.is_readonly}
-                  className="px-4 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 flex items-center gap-2 justify-center transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-                  title={securityState?.is_readonly ? 'Cliquez pour désactiver le mode lecture seule' : 'Mode lecture seule inactif'}
-                >
-                  <Unlock className="w-5 h-5" />
-                  🔓 Désactiver Mode Lecture Seule
-                  {securityState?.is_readonly && <span className="text-xs font-bold">(✅ ACTIF)</span>}
-                  {!securityState?.is_readonly && <span className="text-xs opacity-70">(Inactif)</span>}
-                </button>
+                {/* Disable readonly */}
+                <Button variant="danger" icon={Unlock} onClick={() => setShowPwDialog(true)} disabled={!sec.is_readonly} fullWidth>
+                  Désactiver lecture seule
+                </Button>
               </div>
             </div>
 
-            {/* Informations */}
-            <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-6">
-              <h3 className="font-bold text-blue-900 dark:text-blue-100 mb-3">
-                ℹ️ Fonctionnalités de Protection
-              </h3>
-              <ul className="space-y-2 text-blue-800 dark:text-blue-200 text-sm">
-                <li>• <strong>Anti-Brute Force:</strong> Verrouillage progressif après tentatives échouées (30s, 5min, 30min)</li>
-                <li>• <strong>OTP Email:</strong> Code de vérification envoyé après 5 tentatives (expire en 30s)</li>
-                <li>• <strong>Détection Ransomware:</strong> Surveillance continue du système de fichiers (Documents, Bureau, etc.)</li>
-                <li>• <strong>Protection Temps Réel:</strong> Détection extensions suspectes (.encrypted, .locked, .wannacry, etc.)</li>
-                <li>• <strong>Analyse Comportementale:</strong> Détection chiffrement massif (&gt;30 fichiers en 30s)</li>
-                <li>• <strong>Mode Lecture Seule:</strong> Blocage automatique de toutes modifications si menace détectée</li>
-                <li>• <strong>Alertes Temps Réel:</strong> Notification immédiate des menaces système</li>
-              </ul>
-            </div>
-            
-            {/* Statistiques système en temps réel */}
-            {filesystemStats && (
-              <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-6">
-                <div className="flex items-center gap-3 mb-4">
-                  <Activity className="w-6 h-6 text-purple-600" />
-                  <h2 className="text-xl font-bold text-gray-900 dark:text-white">
-                    Surveillance Système Temps Réel
-                  </h2>
+            {/* Filesystem stats */}
+            {fs && (
+              <div style={card}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
+                  <HardDrive size={20} style={{ color: 'var(--accent)' }} />
+                  <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Surveillance temps réel</h2>
                 </div>
-                
-                {/* Niveau de menace système */}
-                <div className="mb-4 p-4 rounded-lg bg-gray-50 dark:bg-gray-700">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-gray-700 dark:text-gray-300">
-                      Niveau de Menace Système:
-                    </span>
-                    <span className={`px-3 py-1 rounded-full font-bold ${getThreatLevelColor(filesystemStats.threat_level.toLowerCase())}`}>
-                      {filesystemStats.threat_level}
-                    </span>
-                  </div>
+
+                {/* Threat level bar */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 'var(--space-3)', background: 'var(--bg-elevated)', borderRadius: 'var(--radius-md)', marginBottom: 'var(--space-4)' }}>
+                  <span style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 'var(--text-sm)' }}>Menace système</span>
+                  <Badge variant={threatBadge(fs.threat_level.toLowerCase())}>{fs.threat_level}</Badge>
                 </div>
-                
-                {/* Statistiques d'activité */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-                  <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg">
-                    <div className="text-2xl font-bold text-blue-600">{filesystemStats.total_events.toLocaleString()}</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">Événements Total</div>
+
+                {/* Event counters */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+                  {[
+                    { label: 'Événements', value: fs.total_events, color: 'var(--info)' },
+                    { label: 'Modifications', value: fs.modifications, color: 'var(--success)' },
+                    { label: 'Créations', value: fs.creations, color: '#a78bfa' },
+                    { label: 'Suppressions', value: fs.deletions, color: 'var(--danger)' },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} style={statBox(color)}>
+                      <p style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, color, margin: 0 }}>{value.toLocaleString()}</p>
+                      <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>{label}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Suspicious counters */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+                  <div style={statBox('var(--warning)')}>
+                    <p style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, color: 'var(--warning)', margin: 0 }}>{fs.suspicious_extensions}</p>
+                    <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Extensions suspectes</p>
                   </div>
-                  <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-lg">
-                    <div className="text-2xl font-bold text-green-600">{filesystemStats.modifications.toLocaleString()}</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">Modifications</div>
-                  </div>
-                  <div className="bg-purple-50 dark:bg-purple-900/20 p-3 rounded-lg">
-                    <div className="text-2xl font-bold text-purple-600">{filesystemStats.creations.toLocaleString()}</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">Créations</div>
-                  </div>
-                  <div className="bg-red-50 dark:bg-red-900/20 p-3 rounded-lg">
-                    <div className="text-2xl font-bold text-red-600">{filesystemStats.deletions.toLocaleString()}</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">Suppressions</div>
+                  <div style={statBox('var(--warning)')}>
+                    <p style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, color: 'var(--warning)', margin: 0 }}>{fs.rapid_changes}</p>
+                    <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Modifications rapides</p>
                   </div>
                 </div>
-                
-                {/* Menaces détectées */}
-                <div className="grid grid-cols-2 gap-4 mb-4">
-                  <div className="bg-orange-50 dark:bg-orange-900/20 p-3 rounded-lg">
-                    <div className="text-2xl font-bold text-orange-600">{filesystemStats.suspicious_extensions}</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">Extensions Suspectes</div>
-                  </div>
-                  <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-lg">
-                    <div className="text-2xl font-bold text-yellow-600">{filesystemStats.rapid_changes}</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400">Modifications Rapides</div>
-                  </div>
-                </div>
-                
-                {/* Répertoires surveillés */}
-                <div className="mb-4">
-                  <h3 className="font-semibold text-gray-700 dark:text-gray-300 mb-2">
-                    📁 Répertoires Surveillés ({filesystemStats.monitored_paths.length})
+
+                {/* Monitored paths */}
+                <div style={{ marginBottom: 'var(--space-4)' }}>
+                  <h3 style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', marginBottom: 'var(--space-2)' }}>
+                    Répertoires surveillés ({fs.monitored_paths.length})
                   </h3>
-                  <div className="bg-gray-50 dark:bg-gray-700 p-3 rounded max-h-40 overflow-y-auto">
-                    <ul className="text-xs text-gray-600 dark:text-gray-400 space-y-1">
-                      {filesystemStats.monitored_paths.map((path, idx) => (
-                        <li key={idx} className="font-mono">• {path}</li>
-                      ))}
-                    </ul>
+                  <div style={{ background: 'var(--bg-elevated)', borderRadius: 'var(--radius-md)', padding: 'var(--space-3)', maxHeight: 160, overflowY: 'auto' }}>
+                    {fs.monitored_paths.map((p, i) => (
+                      <p key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: '2px 0' }}>{p}</p>
+                    ))}
                   </div>
                 </div>
-                
-                {/* Menaces actives système */}
-                {filesystemStats.active_threats.length > 0 && (
-                  <div className="bg-red-50 dark:bg-red-900/20 border-l-4 border-red-500 p-4 rounded">
-                    <h3 className="font-bold text-red-800 dark:text-red-200 mb-2">
-                      ⚠️ Menaces Système Actives
-                    </h3>
-                    <ul className="space-y-1">
-                      {filesystemStats.active_threats.map((threat, idx) => (
-                        <li key={idx} className="text-sm text-red-700 dark:text-red-300">• {threat}</li>
-                      ))}
+
+                {/* FS active threats */}
+                {fs.active_threats.length > 0 && (
+                  <div style={{ background: 'var(--danger-muted)', borderLeft: '4px solid var(--danger)', borderRadius: 'var(--radius-md)', padding: 'var(--space-4)' }}>
+                    <h3 style={{ fontWeight: 700, color: 'var(--danger)', fontSize: 'var(--text-sm)', marginBottom: 'var(--space-2)' }}>Menaces système actives</h3>
+                    <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+                      {fs.active_threats.map((t, i) => <li key={i}>{t}</li>)}
                     </ul>
                   </div>
                 )}
@@ -465,87 +237,19 @@ export default function SystemSecurityPage() {
             )}
           </>
         )}
-
-        {/* Dialog OTP */}
-        {showOtpDialog && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-4">
-                Vérification OTP
-              </h3>
-              <p className="text-gray-600 dark:text-gray-400 mb-4">
-                Un code de 6 chiffres a été envoyé à votre adresse email. 
-                Saisissez-le dans les 30 secondes.
-              </p>
-              <input
-                type="text"
-                value={otpCode}
-                onChange={(e) => setOtpCode(e.target.value)}
-                placeholder="000000"
-                maxLength={6}
-                className="w-full px-4 py-3 text-center text-2xl font-mono tracking-widest border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white mb-4"
-              />
-              <div className="flex gap-2">
-                <button
-                  onClick={handleVerifyOtp}
-                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                >
-                  Vérifier
-                </button>
-                <button
-                  onClick={() => {
-                    setShowOtpDialog(false)
-                    setOtpCode('')
-                  }}
-                  className="px-4 py-2 bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-white rounded-lg hover:bg-gray-400 dark:hover:bg-gray-500"
-                >
-                  Annuler
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Dialog Password pour désactiver readonly */}
-        {showPasswordDialog && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-4">
-                🔐 Désactivation Mode Lecture Seule
-              </h3>
-              <p className="text-gray-600 dark:text-gray-400 mb-4">
-                Entrez votre mot de passe pour désactiver le mode lecture seule.
-              </p>
-              <input
-                type="password"
-                value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && confirmDisableReadonly()}
-                placeholder="Mot de passe"
-                autoFocus
-                className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white mb-4"
-              />
-              <div className="flex gap-2">
-                <button
-                  onClick={confirmDisableReadonly}
-                  className="flex-1 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700"
-                >
-                  Confirmer
-                </button>
-                <button
-                  onClick={() => {
-                    setShowPasswordDialog(false)
-                    setPasswordInput('')
-                  }}
-                  className="px-4 py-2 bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-white rounded-lg hover:bg-gray-400 dark:hover:bg-gray-500"
-                >
-                  Annuler
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
-    </DashboardLayout>
+
+      {/* Password dialog for disabling readonly */}
+      <Modal open={showPwDialog} onClose={() => { setShowPwDialog(false); setPwInput('') }} title="Désactiver le mode lecture seule">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>Entrez votre mot de passe pour confirmer.</p>
+          <Input type="password" value={pwInput} onChange={(e) => setPwInput(e.target.value)} onKeyDown={(e: React.KeyboardEvent) => e.key === 'Enter' && confirmDisableReadonly()} placeholder="Mot de passe" autoFocus />
+          <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+            <Button fullWidth onClick={confirmDisableReadonly}>Confirmer</Button>
+            <Button fullWidth variant="secondary" onClick={() => { setShowPwDialog(false); setPwInput('') }}>Annuler</Button>
+          </div>
+        </div>
+      </Modal>
+    </AppShell>
   )
 }

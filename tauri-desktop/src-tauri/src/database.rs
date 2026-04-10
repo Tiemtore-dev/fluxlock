@@ -2,10 +2,6 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::FromRow;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use flate2::write::GzEncoder;
-use flate2::read::GzDecoder;
-use flate2::Compression;
-use std::io::{Read, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct User {
@@ -21,68 +17,6 @@ pub struct User {
     pub account_locked: bool,  // Pour blocage lors de menaces
     pub locked_until: Option<String>,  // Date de fin de blocage
     pub created_at: String,
-}
-
-// Structures ML (ajoutées)
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct MLUserProfile {
-    pub id: Option<i64>,
-    pub user_id: i64,
-    pub profile_data: String,  // JSON
-    pub last_updated: String,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct MLModel {
-    pub id: Option<i64>,
-    pub model_name: String,
-    pub model_data: Vec<u8>,  // Pickle bytes
-    pub hyperparameters: Option<String>,  // JSON
-    pub training_date: String,
-    pub accuracy_score: Option<f64>,
-    pub n_samples_trained: Option<i64>,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct MLTrainingLog {
-    pub id: Option<i64>,
-    pub user_id: i64,
-    pub action_type: String,
-    pub resource_type: String,
-    pub resource_id: Option<i64>,
-    pub timestamp: String,
-    pub metadata: Option<String>,  // JSON
-    pub risk_score: f64,
-    pub is_anomaly: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct CompressedLog {
-    pub id: Option<i64>,
-    pub user_id: Option<i64>,
-    pub compression_format: String,
-    pub compressed_data: Vec<u8>,
-    pub original_size_bytes: i64,
-    pub compressed_size_bytes: i64,
-    pub compression_ratio: f64,
-    pub log_count: i64,
-    pub start_date: String,
-    pub end_date: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, FromRow)]
-pub struct CompressionStats {
-    pub user_id: Option<i64>,
-    pub archive_count: i64,
-    pub total_logs_archived: i64,
-    pub total_original_bytes: i64,
-    pub total_compressed_bytes: i64,
-    pub avg_compression_ratio: f64,
-    pub oldest_log: String,
-    pub newest_log: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -107,6 +41,7 @@ pub struct SecureFile {
     pub file_path: String, // Path to encrypted file
     pub file_size: i64,
     pub mime_type: Option<String>,
+    pub integrity_hash: Option<String>, // BLAKE3 hash of original data
     pub created_at: String,
 }
 
@@ -221,6 +156,7 @@ impl Database {
                 file_path TEXT NOT NULL,
                 file_size INTEGER NOT NULL,
                 mime_type TEXT,
+                integrity_hash TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
@@ -228,6 +164,12 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        // Migration: add integrity_hash column for existing databases
+        // SQLite doesn't support ADD COLUMN IF NOT EXISTS, so we catch the error
+        let _ = sqlx::query("ALTER TABLE secure_files ADD COLUMN integrity_hash TEXT")
+            .execute(&self.pool)
+            .await; // Ignore error if column already exists
 
         // Create secure_keys table
         sqlx::query(
@@ -489,11 +431,12 @@ impl Database {
 
     // Secure file operations
     pub async fn create_secure_file(&self, user_id: i64, filename: &str, file_path: &str,
-                                     file_size: i64, mime_type: Option<&str>) -> Result<i64, sqlx::Error> {
+                                     file_size: i64, mime_type: Option<&str>,
+                                     integrity_hash: Option<&str>) -> Result<i64, sqlx::Error> {
         let result = sqlx::query(
             r#"
-            INSERT INTO secure_files (user_id, filename, file_path, file_size, mime_type)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO secure_files (user_id, filename, file_path, file_size, mime_type, integrity_hash)
+            VALUES (?, ?, ?, ?, ?, ?)
             "#
         )
         .bind(user_id)
@@ -501,6 +444,7 @@ impl Database {
         .bind(file_path)
         .bind(file_size)
         .bind(mime_type)
+        .bind(integrity_hash)
         .execute(&self.pool)
         .await?;
 
@@ -622,17 +566,6 @@ impl Database {
         Ok(result.last_insert_rowid())
     }
 
-    pub async fn get_file_share_by_token(&self, token: &str) -> Result<Option<FileShare>, sqlx::Error> {
-        let share = sqlx::query_as::<_, FileShare>(
-            "SELECT * FROM file_shares WHERE share_token = ?"
-        )
-        .bind(token)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(share)
-    }
-
     pub async fn get_user_shares(&self, user_id: i64) -> Result<Vec<FileShare>, sqlx::Error> {
         let shares = sqlx::query_as::<_, FileShare>(
             "SELECT * FROM file_shares WHERE owner_id = ? ORDER BY created_at DESC"
@@ -642,17 +575,6 @@ impl Database {
         .await?;
 
         Ok(shares)
-    }
-
-    pub async fn increment_share_access(&self, share_id: i64) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "UPDATE file_shares SET accessed = 1, access_count = access_count + 1 WHERE id = ?"
-        )
-        .bind(share_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
     }
 
     pub async fn delete_file_share(&self, share_id: i64, owner_id: i64) -> Result<bool, sqlx::Error> {
@@ -844,356 +766,5 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?;
         Ok(result.map(|(seconds,)| seconds))
-    }
-
-    // ========================================
-    // MÉTHODES ML - PROFILS UTILISATEUR
-    // ========================================
-    
-    pub async fn save_ml_profile(&self, user_id: i64, profile_data: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"
-            INSERT INTO ml_user_profiles (user_id, profile_data, last_updated, version)
-            VALUES (?, ?, datetime('now'), '1.0')
-            ON CONFLICT(user_id) DO UPDATE SET
-                profile_data = excluded.profile_data,
-                last_updated = datetime('now')
-            "#
-        )
-        .bind(user_id)
-        .bind(profile_data)
-        .execute(&self.pool)
-        .await?;
-        
-        println!("✅ Profil ML sauvegardé pour user {}", user_id);
-        Ok(())
-    }
-    
-    pub async fn load_ml_profile(&self, user_id: i64) -> Result<Option<MLUserProfile>, sqlx::Error> {
-        let profile = sqlx::query_as::<_, MLUserProfile>(
-            "SELECT * FROM ml_user_profiles WHERE user_id = ?"
-        )
-        .bind(user_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        
-        Ok(profile)
-    }
-    
-    pub async fn load_all_ml_profiles(&self) -> Result<Vec<MLUserProfile>, sqlx::Error> {
-        let profiles = sqlx::query_as::<_, MLUserProfile>(
-            "SELECT * FROM ml_user_profiles ORDER BY last_updated DESC"
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        
-        println!("📊 {} profils ML chargés", profiles.len());
-        Ok(profiles)
-    }
-    
-    // ========================================
-    // MÉTHODES ML - MODÈLES
-    // ========================================
-    
-    pub async fn save_ml_model(
-        &self,
-        model_name: &str,
-        model_data: &[u8],
-        hyperparameters: Option<&str>,
-        n_samples: i64,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"
-            INSERT INTO ml_models (model_name, model_data, hyperparameters, training_date, n_samples_trained, version)
-            VALUES (?, ?, ?, datetime('now'), ?, '1.0')
-            ON CONFLICT(model_name) DO UPDATE SET
-                model_data = excluded.model_data,
-                hyperparameters = excluded.hyperparameters,
-                training_date = datetime('now'),
-                n_samples_trained = excluded.n_samples_trained
-            "#
-        )
-        .bind(model_name)
-        .bind(model_data)
-        .bind(hyperparameters)
-        .bind(n_samples)
-        .execute(&self.pool)
-        .await?;
-        
-        println!("✅ Modèle ML '{}' sauvegardé ({} échantillons)", model_name, n_samples);
-        Ok(())
-    }
-    
-    pub async fn load_ml_model(&self, model_name: &str) -> Result<Option<MLModel>, sqlx::Error> {
-        let model = sqlx::query_as::<_, MLModel>(
-            "SELECT * FROM ml_models WHERE model_name = ? ORDER BY training_date DESC LIMIT 1"
-        )
-        .bind(model_name)
-        .fetch_optional(&self.pool)
-        .await?;
-        
-        Ok(model)
-    }
-    
-    // ========================================
-    // MÉTHODES ML - LOGS DE TRAINING
-    // ========================================
-    
-    pub async fn add_training_log(
-        &self,
-        user_id: i64,
-        action_type: &str,
-        resource_type: &str,
-        resource_id: Option<i64>,
-        metadata: Option<&str>,
-        risk_score: f64,
-        is_anomaly: bool,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"
-            INSERT INTO ml_training_logs 
-            (user_id, action_type, resource_type, resource_id, timestamp, metadata, risk_score, is_anomaly)
-            VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?)
-            "#
-        )
-        .bind(user_id)
-        .bind(action_type)
-        .bind(resource_type)
-        .bind(resource_id)
-        .bind(metadata)
-        .bind(risk_score)
-        .bind(is_anomaly)
-        .execute(&self.pool)
-        .await?;
-        
-        Ok(())
-    }
-    
-    pub async fn get_training_logs(
-        &self,
-        user_id: Option<i64>,
-        days: i32,
-    ) -> Result<Vec<MLTrainingLog>, sqlx::Error> {
-        let logs = if let Some(uid) = user_id {
-            sqlx::query_as::<_, MLTrainingLog>(
-                r#"
-                SELECT * FROM ml_training_logs
-                WHERE user_id = ? AND timestamp > datetime('now', ? || ' days')
-                ORDER BY timestamp DESC
-                "#
-            )
-            .bind(uid)
-            .bind(format!("-{}", days))
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as::<_, MLTrainingLog>(
-                r#"
-                SELECT * FROM ml_training_logs
-                WHERE timestamp > datetime('now', ? || ' days')
-                ORDER BY timestamp DESC
-                "#
-            )
-            .bind(format!("-{}", days))
-            .fetch_all(&self.pool)
-            .await?
-        };
-        
-        Ok(logs)
-    }
-    
-    pub async fn count_training_logs(&self, user_id: Option<i64>, days: i32) -> Result<i64, sqlx::Error> {
-        let count: (i64,) = if let Some(uid) = user_id {
-            sqlx::query_as(
-                "SELECT COUNT(*) FROM ml_training_logs WHERE user_id = ? AND timestamp > datetime('now', ? || ' days')"
-            )
-            .bind(uid)
-            .bind(format!("-{}", days))
-            .fetch_one(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as(
-                "SELECT COUNT(*) FROM ml_training_logs WHERE timestamp > datetime('now', ? || ' days')"
-            )
-            .bind(format!("-{}", days))
-            .fetch_one(&self.pool)
-            .await?
-        };
-        
-        Ok(count.0)
-    }
-    
-    // ========================================
-    // MÉTHODES COMPRESSION
-    // ========================================
-    
-    pub async fn compress_old_logs(
-        &self,
-        user_id: Option<i64>,
-        days: i32,
-        compression_level: u32,
-        delete_after: bool,
-    ) -> Result<CompressedLog, String> {
-        // Récupérer logs à compresser
-        let logs: Vec<MLTrainingLog> = if let Some(uid) = user_id {
-            sqlx::query_as(
-                r#"
-                SELECT * FROM ml_training_logs
-                WHERE user_id = ? AND timestamp < datetime('now', ? || ' days')
-                ORDER BY timestamp
-                "#
-            )
-            .bind(uid)
-            .bind((-days).to_string())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| format!("Erreur récupération logs: {}", e))?
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT * FROM ml_training_logs
-                WHERE timestamp < datetime('now', ? || ' days')
-                ORDER BY timestamp
-                "#
-            )
-            .bind((-days).to_string())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| format!("Erreur récupération logs: {}", e))?
-        };
-        
-        if logs.is_empty() {
-            return Err("Aucun log à compresser".to_string());
-        }
-        
-        // Sérialiser
-        let json_data = serde_json::to_string(&logs)
-            .map_err(|e| format!("Erreur sérialisation: {}", e))?;
-        
-        let original_size = json_data.len() as i64;
-        
-        // Compresser gzip
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(compression_level));
-        encoder.write_all(json_data.as_bytes())
-            .map_err(|e| format!("Erreur compression: {}", e))?;
-        let compressed_data = encoder.finish()
-            .map_err(|e| format!("Erreur finalisation: {}", e))?;
-        
-        let compressed_size = compressed_data.len() as i64;
-        let ratio = compressed_size as f64 / original_size as f64;
-        
-        let start_date = logs.first().unwrap().timestamp.clone();
-        let end_date = logs.last().unwrap().timestamp.clone();
-        
-        // Sauvegarder archive
-        let result = sqlx::query(
-            r#"
-            INSERT INTO compressed_logs 
-            (user_id, compression_format, compressed_data, original_size_bytes, compressed_size_bytes, 
-             compression_ratio, log_count, start_date, end_date, created_at)
-            VALUES (?, 'gzip', ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            "#
-        )
-        .bind(user_id)
-        .bind(&compressed_data)
-        .bind(original_size)
-        .bind(compressed_size)
-        .bind(ratio)
-        .bind(logs.len() as i64)
-        .bind(&start_date)
-        .bind(&end_date)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| format!("Erreur sauvegarde archive: {}", e))?;
-        
-        let archive_id = result.last_insert_rowid();
-        
-        // Supprimer logs si demandé
-        if delete_after {
-            let ids: Vec<i64> = logs.iter().filter_map(|l| l.id).collect();
-            
-            for id in ids {
-                sqlx::query("DELETE FROM ml_training_logs WHERE id = ?")
-                    .bind(id)
-                    .execute(&self.pool)
-                    .await
-                    .ok();
-            }
-            
-            println!("🗑️  {} logs supprimés après compression", logs.len());
-        }
-        
-        println!(
-            "✅ {} logs compressés : {} bytes → {} bytes ({:.1}%)",
-            logs.len(), original_size, compressed_size, ratio * 100.0
-        );
-        
-        Ok(CompressedLog {
-            id: Some(archive_id),
-            user_id,
-            compression_format: "gzip".to_string(),
-            compressed_data,
-            original_size_bytes: original_size,
-            compressed_size_bytes: compressed_size,
-            compression_ratio: ratio,
-            log_count: logs.len() as i64,
-            start_date,
-            end_date,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        })
-    }
-    
-    pub async fn decompress_logs(&self, archive_id: i64) -> Result<Vec<MLTrainingLog>, String> {
-        let archive: CompressedLog = sqlx::query_as(
-            "SELECT * FROM compressed_logs WHERE id = ?"
-        )
-        .bind(archive_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| format!("Archive non trouvée: {}", e))?;
-        
-        // Décompresser
-        let mut decoder = GzDecoder::new(&archive.compressed_data[..]);
-        let mut json_data = String::new();
-        decoder.read_to_string(&mut json_data)
-            .map_err(|e| format!("Erreur décompression: {}", e))?;
-        
-        // Désérialiser
-        let logs: Vec<MLTrainingLog> = serde_json::from_str(&json_data)
-            .map_err(|e| format!("Erreur désérialisation: {}", e))?;
-        
-        println!("✅ {} logs décompressés depuis archive {}", logs.len(), archive_id);
-        
-        Ok(logs)
-    }
-    
-    pub async fn get_compression_stats(&self, user_id: Option<i64>) -> Result<Option<CompressionStats>, sqlx::Error> {
-        let stats: Option<CompressionStats> = if let Some(uid) = user_id {
-            sqlx::query_as(
-                "SELECT * FROM compression_stats WHERE user_id = ?"
-            )
-            .bind(uid)
-            .fetch_optional(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT 
-                    NULL as user_id,
-                    SUM(archive_count) as archive_count,
-                    SUM(total_logs_archived) as total_logs_archived,
-                    SUM(total_original_bytes) as total_original_bytes,
-                    SUM(total_compressed_bytes) as total_compressed_bytes,
-                    AVG(avg_compression_ratio) as avg_compression_ratio,
-                    MIN(oldest_log) as oldest_log,
-                    MAX(newest_log) as newest_log
-                FROM compression_stats
-                "#
-            )
-            .fetch_optional(&self.pool)
-            .await?
-        };
-        
-        Ok(stats)
     }
 }

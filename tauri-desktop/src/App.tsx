@@ -1,7 +1,10 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect } from 'react'
-import { invoke } from '@tauri-apps/api/tauri'
+import { invoke } from '@tauri-apps/api/core'
 import { useAuthStore } from './stores/authStore'
+import { type AutoLockStatus } from './lib/vault-service'
+import { ToastProvider } from './design-system/organisms'
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import ResetVaultPage from './pages/ResetVaultPage'
@@ -13,59 +16,81 @@ import SecurityPage from './pages/SecurityPage'
 import SystemSecurityPage from './pages/SystemSecurityPage'
 import SettingsPage from './pages/SettingsPage'
 import SharesPage from './pages/SharesPage'
+import BackupRestorePage from './pages/BackupRestorePage'
+import TransferPage from './pages/TransferPage'
 
-function App() {
-  const { isAuthenticated } = useAuthStore()
+function AppRoutes() {
+  const { isAuthenticated, clearAuth, setDbReady } = useAuthStore()
+  useKeyboardShortcuts()
 
-  // Initialiser le thème et la base de données au démarrage
   useEffect(() => {
-    // Appliquer le thème sauvegardé immédiatement
-    const savedTheme = localStorage.getItem('theme')
-    if (savedTheme === 'dark') {
-      document.documentElement.classList.add('dark')
-    } else if (savedTheme === 'light') {
-      document.documentElement.classList.remove('dark')
-    } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      document.documentElement.classList.add('dark')
-    }
+    const saved = localStorage.getItem('theme')
+    if (saved === 'dark') document.documentElement.classList.add('dark')
+    else if (saved === 'light') document.documentElement.classList.remove('dark')
+    else if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.classList.add('dark')
 
-    // Initialiser la base de données
-    const initDb = async () => {
-      try {
-        console.log('🔄 Initializing database...')
-        const result = await invoke<string>('init_local_db')
-        console.log('✅ Database initialized:', result)
-      } catch (error) {
-        console.error('❌ Error initializing database:', error)
-        // Afficher l'erreur à l'utilisateur si critique
-      }
-    }
-    initDb()
+    invoke<string>('init_local_db')
+      .then(() => setDbReady(true))
+      .catch((e) => {
+        console.error('[App] init_local_db failed:', e)
+        // Still mark dbReady so login page can show the actual error
+        setDbReady(true)
+      })
   }, [])
 
+  // Validate backend session is still alive when frontend thinks user is authenticated
+  useEffect(() => {
+    if (!isAuthenticated) return
+
+    // Validate session with a command that requires auth
+    // If it fails, the backend session expired (app restart, etc.) → force re-login
+    invoke<AutoLockStatus>('check_auto_lock')
+      .then((status) => {
+        // If auto-lock says we're locked, force re-login to unlock the enclave
+        if (status?.locked) {
+          clearAuth()
+        }
+      })
+      .catch(() => {
+        // Backend session not active → force re-login (enclave unlock required)
+        clearAuth()
+      })
+  }, [isAuthenticated])
+
+  return (
+    <Routes>
+      {!isAuthenticated ? (
+        <>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+          <Route path="/reset-vault" element={<ResetVaultPage />} />
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </>
+      ) : (
+        <>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/passwords" element={<PasswordsPage />} />
+          <Route path="/files" element={<FilesPage />} />
+          <Route path="/keys" element={<KeysPage />} />
+          <Route path="/security" element={<SecurityPage />} />
+          <Route path="/system-security" element={<SystemSecurityPage />} />
+          <Route path="/shares" element={<SharesPage />} />
+          <Route path="/backup" element={<BackupRestorePage />} />
+          <Route path="/transfer" element={<TransferPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </>
+      )}
+    </Routes>
+  )
+}
+
+function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        {!isAuthenticated ? (
-          <>
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/reset-vault" element={<ResetVaultPage />} />
-            <Route path="*" element={<Navigate to="/login" replace />} />
-          </>
-        ) : (
-          <>
-            <Route path="/" element={<DashboardPage />} />
-            <Route path="/passwords" element={<PasswordsPage />} />
-            <Route path="/files" element={<FilesPage />} />
-            <Route path="/keys" element={<KeysPage />} />
-            <Route path="/security" element={<SecurityPage />} />
-            <Route path="/system-security" element={<SystemSecurityPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </>
-        )}
-      </Routes>
+      <ToastProvider>
+        <AppRoutes />
+      </ToastProvider>
     </BrowserRouter>
   )
 }

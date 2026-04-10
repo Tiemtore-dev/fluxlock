@@ -1,280 +1,281 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { AlertTriangle, Shield, ArrowLeft, Trash2 } from 'lucide-react'
-import { invoke } from '@tauri-apps/api/tauri'
+import { AlertTriangle, Shield, ArrowLeft, Trash2, Lock, ShieldOff, Database, Key, FileWarning, History } from 'lucide-react'
+import { invoke } from '@tauri-apps/api/core'
+import { Button, Input, Spinner } from '../design-system/atoms'
+
+const deletedItems = [
+  { icon: Key, label: 'Tous vos mots de passe enregistrés' },
+  { icon: FileWarning, label: 'Tous vos fichiers chiffrés' },
+  { icon: Lock, label: 'Toutes vos clés cryptographiques' },
+  { icon: Shield, label: 'Votre compte et vos paramètres' },
+  { icon: History, label: "L'historique de sécurité complet" },
+  { icon: Database, label: 'La base de données intégrale' },
+]
 
 export default function ResetVaultPage() {
   const navigate = useNavigate()
   const [step, setStep] = useState<'warning' | 'confirmation'>('warning')
   const [confirmText, setConfirmText] = useState('')
+  const [password, setPassword] = useState('')
   const [isResetting, setIsResetting] = useState(false)
   const [error, setError] = useState('')
 
   const handleReset = async () => {
-    if (confirmText !== 'SUPPRIMER TOUT') {
-      setError('Veuillez saisir exactement "SUPPRIMER TOUT" pour confirmer')
-      return
-    }
-
-    setIsResetting(true)
-    setError('')
-
+    if (confirmText !== 'SUPPRIMER TOUT') { setError('Veuillez saisir exactement "SUPPRIMER TOUT"'); return }
+    if (!password) { setError('Veuillez saisir votre mot de passe'); return }
+    setIsResetting(true); setError('')
     try {
-      await invoke('reset_vault_completely')
-      
-      // Effacer les données locales
-      localStorage.clear()
-      sessionStorage.clear()
-      
-      // Message de succès et redirection
-      alert('✅ Coffre-fort complètement réinitialisé. Toutes les données ont été supprimées.')
+      await invoke('reset_vault_completely', { password })
+      localStorage.clear(); sessionStorage.clear()
       navigate('/register')
-    } catch (err: any) {
-      setError('Erreur: ' + err.toString())
-    } finally {
-      setIsResetting(false)
-    }
+    } catch (e: any) { setError('Erreur : ' + e.toString()) }
+    finally { setIsResetting(false) }
   }
 
   return (
-    <div 
-      className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden"
-      style={{ background: 'linear-gradient(135deg, #1a0a0a 0%, #3a1010 50%, #1f0505 100%)' }}
-    >
-      {/* Animated background effects */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-red-500/10 rounded-full filter blur-3xl animate-pulse"></div>
-        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-orange-500/10 rounded-full filter blur-3xl animate-pulse" style={{ animationDelay: '1s' }}></div>
-      </div>
-
-      <div className="relative z-10 max-w-2xl w-full">
-        {/* Header */}
-        <div className="text-center mb-8 animate-fadeIn">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl mb-6 relative"
-               style={{
-                 background: 'linear-gradient(135deg, #dc2626 0%, #991b1b 100%)',
-                 boxShadow: '0 8px 32px rgba(220, 38, 38, 0.4), 0 0 60px rgba(220, 38, 38, 0.2)'
-               }}>
-            <AlertTriangle className="w-10 h-10 text-white" style={{ filter: 'drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3))' }} />
-            <div className="absolute inset-0 rounded-2xl animate-pulse"
-                 style={{ boxShadow: '0 0 40px rgba(220, 38, 38, 0.6)' }}></div>
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--bg-void)',
+      padding: 'var(--space-6)',
+    }}>
+      <div className="animate-fade-in" style={{ width: '100%', maxWidth: 520 }}>
+        {/* Brand header */}
+        <div style={{ textAlign: 'center', marginBottom: 'var(--space-8)' }}>
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 64,
+            height: 64,
+            borderRadius: 'var(--radius-xl)',
+            background: 'var(--danger)',
+            boxShadow: '0 0 30px rgba(239,68,68,.3)',
+            marginBottom: 'var(--space-4)',
+          }}>
+            <ShieldOff size={32} style={{ color: 'white' }} />
           </div>
-          
-          <h1 className="text-4xl font-bold mb-3"
-              style={{
-                background: 'linear-gradient(135deg, #dc2626 0%, #f87171 100%)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                textShadow: '0 0 30px rgba(220, 38, 38, 0.3)'
-              }}>
-            Réinitialisation du Coffre-Fort
+          <h1 style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 'var(--text-2xl)',
+            color: 'var(--text-primary)',
+            letterSpacing: 'var(--tracking-tight)',
+            margin: 0,
+          }}>
+            Réinitialisation du coffre-fort
           </h1>
-          <p className="text-gray-400 flex items-center justify-center gap-2">
-            <AlertTriangle className="w-4 h-4" />
-            Action irréversible - Toutes les données seront supprimées
+          <p style={{
+            fontSize: 'var(--text-sm)',
+            color: 'var(--danger)',
+            fontFamily: 'var(--font-body)',
+            marginTop: 'var(--space-2)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 'var(--space-2)',
+            fontWeight: 500,
+          }}>
+            <AlertTriangle size={14} /> Action irréversible et définitive
           </p>
         </div>
 
         {/* Card */}
-        <div 
-          className="p-8 rounded-2xl backdrop-blur-xl animate-fadeIn"
-          style={{
-            background: 'rgba(26, 10, 10, 0.8)',
-            border: '1px solid rgba(220, 38, 38, 0.2)',
-            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3), 0 0 60px rgba(220, 38, 38, 0.05)'
-          }}
-        >
+        <div style={{
+          background: 'var(--bg-surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-xl)',
+          padding: 'var(--space-8)',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Subtle danger accent line at top */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 3,
+            background: 'linear-gradient(90deg, var(--danger), transparent)',
+          }} />
+
           {step === 'warning' && (
-            <div className="space-y-6">
-              {/* Warning Section */}
-              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-6">
-                <div className="flex items-start gap-4">
-                  <AlertTriangle className="w-8 h-8 text-red-500 flex-shrink-0 mt-1" />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+              {/* Danger callout */}
+              <div style={{
+                background: 'var(--danger-muted)',
+                borderRadius: 'var(--radius-lg)',
+                padding: 'var(--space-5)',
+              }}>
+                <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-start' }}>
+                  <AlertTriangle size={22} style={{ color: 'var(--danger)', flexShrink: 0, marginTop: 2 }} />
                   <div>
-                    <h2 className="text-xl font-bold text-red-400 mb-3">
-                      ⚠️ ATTENTION - ACTION DANGEREUSE
+                    <h2 style={{ fontWeight: 700, color: 'var(--danger)', margin: '0 0 var(--space-2) 0', fontSize: 'var(--text-base)' }}>
+                      Suppression totale et irréversible
                     </h2>
-                    <p className="text-red-300 mb-4">
-                      Cette action supprimera <strong>définitivement et irréversiblement</strong> :
+                    <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', margin: 0, lineHeight: 1.6 }}>
+                      Cette opération détruira <strong style={{ color: 'var(--text-primary)' }}>l'intégralité de vos données</strong>.
+                      Aucune récupération ne sera possible après confirmation.
                     </p>
-                    <ul className="space-y-2 text-red-200">
-                      <li className="flex items-center gap-2">
-                        <Trash2 className="w-4 h-4" />
-                        <span>Tous vos mots de passe enregistrés</span>
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <Trash2 className="w-4 h-4" />
-                        <span>Tous vos fichiers chiffrés</span>
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <Trash2 className="w-4 h-4" />
-                        <span>Toutes vos clés cryptographiques</span>
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <Trash2 className="w-4 h-4" />
-                        <span>Votre compte utilisateur et paramètres</span>
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <Trash2 className="w-4 h-4" />
-                        <span>L'historique des événements de sécurité</span>
-                      </li>
-                      <li className="flex items-center gap-2">
-                        <Trash2 className="w-4 h-4" />
-                        <span>La base de données complète du coffre-fort</span>
-                      </li>
-                    </ul>
                   </div>
                 </div>
               </div>
 
-              {/* Info Section */}
-              <div className="bg-orange-500/10 border border-orange-500/30 rounded-lg p-4">
-                <p className="text-orange-300 text-sm">
-                  <strong>💡 Cas d'utilisation :</strong> Utilisez cette fonction uniquement si :
+              {/* Items list */}
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+                gap: 'var(--space-3)',
+              }}>
+                {deletedItems.map((item) => {
+                  const Icon = item.icon
+                  return (
+                    <div key={item.label} style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 'var(--space-3)',
+                      padding: 'var(--space-3)',
+                      borderRadius: 'var(--radius-md)',
+                      background: 'var(--bg-elevated)',
+                      border: '1px solid var(--border)',
+                    }}>
+                      <Icon size={16} style={{ color: 'var(--danger)', flexShrink: 0 }} />
+                      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)' }}>
+                        {item.label}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Use cases */}
+              <div style={{
+                background: 'color-mix(in srgb, var(--warning) 8%, transparent)',
+                border: '1px solid color-mix(in srgb, var(--warning) 30%, transparent)',
+                borderRadius: 'var(--radius-lg)',
+                padding: 'var(--space-4)',
+              }}>
+                <p style={{ fontWeight: 600, color: 'var(--warning)', fontSize: 'var(--text-sm)', margin: '0 0 var(--space-2) 0' }}>
+                  Cas d'utilisation
                 </p>
-                <ul className="mt-2 space-y-1 text-orange-200 text-sm">
-                  <li>• Vous avez oublié votre mot de passe maître</li>
-                  <li>• Vous souhaitez repartir de zéro avec un nouveau coffre</li>
-                  <li>• Vous vendez/donnez votre ordinateur et voulez effacer toute trace</li>
+                <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', lineHeight: 1.8 }}>
+                  <li>Mot de passe maître oublié définitivement</li>
+                  <li>Repartir à zéro avec un nouveau coffre-fort</li>
+                  <li>Effacer toute trace avant cession de l'appareil</li>
                 </ul>
               </div>
 
-              {/* Buttons */}
-              <div className="flex gap-4">
-                <Link
-                  to="/login"
-                  className="flex-1 py-3 px-4 rounded-lg font-semibold transition-all flex items-center justify-center gap-2"
-                  style={{
-                    background: 'rgba(100, 100, 100, 0.3)',
-                    border: '1px solid rgba(148, 163, 184, 0.2)',
-                    color: '#94a3b8'
-                  }}
-                >
-                  <ArrowLeft className="w-4 h-4" />
-                  Retour à la connexion
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                <Link to="/login" style={{ flex: 1, textDecoration: 'none' }}>
+                  <Button variant="secondary" icon={ArrowLeft} fullWidth>Retour</Button>
                 </Link>
-                
-                <button
-                  onClick={() => setStep('confirmation')}
-                  className="flex-1 py-3 px-4 rounded-lg font-semibold transition-all hover:scale-105 flex items-center justify-center gap-2"
-                  style={{
-                    background: 'linear-gradient(135deg, #dc2626 0%, #991b1b 100%)',
-                    color: 'white',
-                    boxShadow: '0 4px 20px rgba(220, 38, 38, 0.4)'
-                  }}
-                >
-                  <AlertTriangle className="w-4 h-4" />
-                  Je comprends, continuer
-                </button>
+                <div style={{ flex: 1 }}>
+                  <Button variant="danger" icon={AlertTriangle} onClick={() => setStep('confirmation')} fullWidth>
+                    Je comprends, continuer
+                  </Button>
+                </div>
               </div>
             </div>
           )}
 
           {step === 'confirmation' && (
-            <div className="space-y-6">
-              {/* Confirmation Section */}
-              <div>
-                <h2 className="text-2xl font-bold text-white mb-4">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+              <div style={{ textAlign: 'center' }}>
+                <h2 style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: 'var(--text-xl)', margin: '0 0 var(--space-2) 0' }}>
                   Confirmation finale
                 </h2>
-                <p className="text-gray-300 mb-6">
-                  Pour confirmer la suppression définitive de toutes vos données, 
-                  veuillez saisir exactement le texte suivant :
+                <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)', margin: 0 }}>
+                  Pour confirmer, saisissez exactement le texte ci-dessous
                 </p>
-                
-                <div className="bg-gray-900/50 border border-gray-700 rounded-lg p-4 mb-4">
-                  <p className="text-center text-xl font-bold text-red-400 font-mono">
-                    SUPPRIMER TOUT
-                  </p>
-                </div>
-
-                <input
-                  type="text"
-                  value={confirmText}
-                  onChange={(e) => {
-                    setConfirmText(e.target.value)
-                    setError('')
-                  }}
-                  placeholder="Saisissez ici..."
-                  className="w-full px-4 py-3 rounded-lg text-center font-mono text-lg"
-                  style={{
-                    background: 'rgba(0, 0, 0, 0.3)',
-                    border: '1px solid rgba(220, 38, 38, 0.3)',
-                    color: 'white'
-                  }}
-                  autoFocus
-                />
               </div>
 
-              {error && (
-                <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-3">
-                  <p className="text-red-300 text-sm text-center">{error}</p>
-                </div>
-              )}
-
-              {/* Buttons */}
-              <div className="flex gap-4">
-                <button
-                  onClick={() => {
-                    setStep('warning')
-                    setConfirmText('')
-                    setError('')
-                  }}
-                  className="flex-1 py-3 px-4 rounded-lg font-semibold transition-all"
-                  style={{
-                    background: 'rgba(100, 100, 100, 0.3)',
-                    border: '1px solid rgba(148, 163, 184, 0.2)',
-                    color: '#94a3b8'
-                  }}
-                  disabled={isResetting}
-                >
-                  Retour
-                </button>
-                
-                <button
-                  onClick={handleReset}
-                  disabled={isResetting || confirmText !== 'SUPPRIMER TOUT'}
-                  className="flex-1 py-3 px-4 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                  style={{
-                    background: 'linear-gradient(135deg, #dc2626 0%, #7f1d1d 100%)',
-                    border: '1px solid rgba(220, 38, 38, 0.3)',
-                    color: 'white',
-                    boxShadow: confirmText === 'SUPPRIMER TOUT' ? '0 4px 16px rgba(220, 38, 38, 0.4)' : 'none'
-                  }}
-                >
-                  {isResetting ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                      Suppression en cours...
-                    </>
-                  ) : (
-                    <>
-                      <Trash2 className="w-4 h-4" />
-                      Supprimer définitivement
-                    </>
-                  )}
-                </button>
+              {/* Code to type */}
+              <div style={{
+                background: 'var(--bg-elevated)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-lg)',
+                padding: 'var(--space-4)',
+                textAlign: 'center',
+              }}>
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 'var(--text-xl)',
+                  fontWeight: 700,
+                  color: 'var(--danger)',
+                  letterSpacing: 'var(--tracking-wide)',
+                }}>
+                  SUPPRIMER TOUT
+                </span>
               </div>
 
-              <p className="text-xs text-center text-gray-500">
-                Cette action ne peut pas être annulée. Toutes vos données seront perdues à jamais.
+              <Input
+                value={confirmText}
+                onChange={(e) => { setConfirmText(e.target.value); setError('') }}
+                placeholder="Saisissez ici…"
+                autoFocus
+                error={error || undefined}
+              />
+
+              {/* CFG-003: Mot de passe requis pour confirmer la réinitialisation */}
+              <Input
+                type="password"
+                value={password}
+                onChange={(e) => { setPassword(e.target.value); setError('') }}
+                placeholder="Votre mot de passe maître"
+              />
+
+              {/* Progress indicator — visual feedback */}
+              <div style={{
+                height: 3,
+                borderRadius: 'var(--radius-full)',
+                background: 'var(--bg-hover)',
+                overflow: 'hidden',
+              }}>
+                <div style={{
+                  height: '100%',
+                  width: `${Math.min((confirmText.length / 14) * 100, 100)}%`,
+                  background: confirmText === 'SUPPRIMER TOUT' ? 'var(--danger)' : 'var(--accent)',
+                  transition: 'width 0.2s ease, background 0.2s ease',
+                }} />
+              </div>
+
+              <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                <div style={{ flex: 1 }}>
+                  <Button variant="secondary" fullWidth onClick={() => { setStep('warning'); setConfirmText(''); setError('') }} disabled={isResetting}>
+                    Retour
+                  </Button>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Button variant="danger" icon={isResetting ? undefined : Trash2} fullWidth onClick={handleReset} disabled={isResetting || confirmText !== 'SUPPRIMER TOUT' || !password}>
+                    {isResetting ? <><Spinner size={16} /> Suppression…</> : 'Supprimer'}
+                  </Button>
+                </div>
+              </div>
+
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textAlign: 'center', margin: 0 }}>
+                Cette action est définitive. Aucune récupération possible.
               </p>
             </div>
           )}
         </div>
 
-        {/* Back link */}
-        {step === 'warning' && (
-          <div className="mt-6 text-center">
-            <Link 
-              to="/login" 
-              className="text-sm text-gray-400 hover:text-gray-300 transition-colors inline-flex items-center gap-2"
-            >
-              <Shield className="w-4 h-4" />
-              J'ai retrouvé mon mot de passe, retour à la connexion
-            </Link>
-          </div>
-        )}
+        {/* Footer link */}
+        <div style={{ textAlign: 'center', marginTop: 'var(--space-5)' }}>
+          <Link to="/login" style={{
+            color: 'var(--text-muted)',
+            fontSize: 'var(--text-sm)',
+            textDecoration: 'none',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 'var(--space-2)',
+            fontFamily: 'var(--font-body)',
+          }}>
+            <Shield size={14} /> Retour à la connexion
+          </Link>
+        </div>
       </div>
     </div>
   )

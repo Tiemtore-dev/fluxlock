@@ -1,185 +1,89 @@
 import { useQuery } from '@tanstack/react-query'
-import DashboardLayout from '../components/DashboardLayout'
-import { Shield, Key, Files, AlertTriangle } from 'lucide-react'
-import { tauriAPI } from '../lib/tauri-api'
+import { KeyRound, Files, Shield, AlertTriangle } from 'lucide-react'
+import { passwords, files, security } from '../lib/vault-service'
+import { AppShell } from '../design-system/layouts'
+import { StatCard, EmptyState } from '../design-system/molecules'
+import { Badge } from '../design-system/atoms'
 
 export default function DashboardPage() {
-  const { data: passwords = [] } = useQuery({
-    queryKey: ['passwords'],
-    queryFn: tauriAPI.getPasswords
-  })
+  const { data: pwList = [] } = useQuery({ queryKey: ['passwords'], queryFn: passwords.list })
+  const { data: fileList = [] } = useQuery({ queryKey: ['secureFiles'], queryFn: files.list })
+  const { data: events = [] } = useQuery({ queryKey: ['security-events'], queryFn: security.getEvents })
 
-  const { data: files = [] } = useQuery({
-    queryKey: ['secureFiles'],
-    queryFn: tauriAPI.getSecureFiles
-  })
-
-  const { data: securityEvents = [] } = useQuery({
-    queryKey: ['security-events'],
-    queryFn: tauriAPI.getSecurityEvents
-  })
-
-  const stats = [
-    {
-      name: 'Mots de passe',
-      value: passwords?.length || 0,
-      icon: Key,
-      color: 'bg-blue-500',
-    },
-    {
-      name: 'Fichiers chiffrés',
-      value: files?.length || 0,
-      icon: Files,
-      color: 'bg-green-500',
-    },
-    {
-      name: 'Niveau de sécurité',
-      value: 'Élevé',
-      icon: Shield,
-      color: 'bg-purple-500',
-    },
-    {
-      name: 'Alertes',
-      value: securityEvents?.filter((e: any) => e.severity === 'high').length || 0,
-      icon: AlertTriangle,
-      color: 'bg-orange-500',
-    },
-  ]
+  const highAlerts = events.filter((e) => e.severity === 'high').length
 
   return (
-    <DashboardLayout>
-      <div className="space-y-8">
+    <AppShell>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+        {/* Header */}
         <div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
+          <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)' }}>
             Tableau de bord
           </h1>
-          <p className="text-gray-600 dark:text-gray-400 mt-2">
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-1)' }}>
             Vue d'ensemble de votre coffre-fort sécurisé
           </p>
         </div>
 
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {stats.map((stat) => {
-            const Icon = stat.icon
-            return (
-              <div key={stat.name} className="card">
-                <div className="flex items-center">
-                  <div className={`${stat.color} p-3 rounded-lg`}>
-                    <Icon className="w-6 h-6 text-white" />
-                  </div>
-                  <div className="ml-4">
-                    <p className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                      {stat.name}
-                    </p>
-                    <p className="text-2xl font-bold text-gray-900 dark:text-white">
-                      {stat.value}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )
-          })}
+        {/* Stats */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 'var(--space-4)' }}>
+          <StatCard icon={KeyRound} label="Mots de passe" value={pwList.length} />
+          <StatCard icon={Files} label="Fichiers chiffrés" value={fileList.length} accentColor="var(--info)" />
+          <StatCard icon={Shield} label="Sécurité" value="Élevé" accentColor="var(--success)" />
+          <StatCard icon={AlertTriangle} label="Alertes" value={highAlerts} accentColor="var(--warning)" />
         </div>
 
         {/* Recent Activity */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white">
+        <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-6)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-5)' }}>
+            <h2 style={{ fontSize: 'var(--text-lg)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>
               Activités récentes
             </h2>
-            {securityEvents && securityEvents.length > 0 && (
-              <span className="text-sm text-gray-500 dark:text-gray-400">
-                {securityEvents.length} événement{securityEvents.length > 1 ? 's' : ''}
+            {events.length > 0 && (
+              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
+                {events.length} événement{events.length > 1 ? 's' : ''}
               </span>
             )}
           </div>
-          
-          {/* Conteneur scrollable avec hauteur maximale */}
-          <div className="max-h-96 overflow-y-auto space-y-4 pr-2">
-            {securityEvents && securityEvents.length > 0 ? (
-              securityEvents.slice(0, 10).map((event: any, index: number) => (
-                <div
-                  key={index}
-                  className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
-                >
-                  <div className="flex items-center flex-1">
-                    <div className={`w-2 h-2 rounded-full mr-3 ${
-                      event.severity === 'high' ? 'bg-red-500' :
-                      event.severity === 'medium' ? 'bg-orange-500' :
-                      'bg-green-500'
-                    }`}></div>
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-gray-900 dark:text-white">
-                        {event.event_type || 'Événement'}
+
+          {events.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', maxHeight: 380, overflowY: 'auto' }}>
+              {events.slice(0, 10).map((ev, i) => (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: 'var(--space-3) var(--space-4)',
+                  borderRadius: 'var(--radius-md)', background: 'var(--bg-elevated)',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)', flex: 1 }}>
+                    <div style={{
+                      width: 6, height: 6, borderRadius: 'var(--radius-full)', marginTop: 7, flexShrink: 0,
+                      background: ev.severity === 'high' ? 'var(--danger)' : ev.severity === 'medium' ? 'var(--warning)' : 'var(--success)',
+                    }} />
+                    <div>
+                      <p style={{ fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>
+                        {ev.event_type || 'Événement'}
                       </p>
-                      {event.description && (
-                        <p className="text-xs text-gray-600 dark:text-gray-400 mt-0.5">
-                          {event.description}
+                      {ev.description && (
+                        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginTop: 2 }}>
+                          {ev.description}
                         </p>
                       )}
-                      <div className="flex items-center gap-3 mt-1">
-                        <p className="text-xs text-gray-500 dark:text-gray-400">
-                          {new Date(event.timestamp || event.created_at).toLocaleString('fr-FR', {
-                            day: '2-digit',
-                            month: '2-digit',
-                            year: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })}
-                        </p>
-                        {event.ip_address && (
-                          <p className="text-xs text-gray-500 dark:text-gray-400">
-                            IP: {event.ip_address}
-                          </p>
-                        )}
-                      </div>
+                      <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', fontFamily: 'var(--font-body)', marginTop: 2 }}>
+                        {new Date(ev.timestamp).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      </p>
                     </div>
                   </div>
-                  <span className={`
-                    text-xs font-medium px-2.5 py-1 rounded-full whitespace-nowrap ml-3
-                    ${event.severity === 'high' ? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300' : 
-                      event.severity === 'medium' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' :
-                      'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'}
-                  `}>
-                    {event.severity === 'high' ? 'Élevé' :
-                     event.severity === 'medium' ? 'Moyen' : 
-                     'Faible'}
-                  </span>
+                  <Badge variant={ev.severity === 'high' ? 'danger' : ev.severity === 'medium' ? 'warning' : 'success'} size="sm">
+                    {ev.severity === 'high' ? 'Élevé' : ev.severity === 'medium' ? 'Moyen' : 'Faible'}
+                  </Badge>
                 </div>
-              ))
-            ) : (
-              <div className="text-center py-12">
-                <Shield className="w-12 h-12 text-gray-300 dark:text-gray-600 mx-auto mb-3" />
-                <p className="text-gray-500 dark:text-gray-400 text-sm">
-                  Aucune activité récente
-                </p>
-                <p className="text-gray-400 dark:text-gray-500 text-xs mt-1">
-                  Les événements de sécurité apparaîtront ici
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Security Tips */}
-        <div className="card bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800">
-          <div className="flex items-start">
-            <Shield className="w-6 h-6 text-primary-600 mr-3 flex-shrink-0 mt-1" />
-            <div>
-              <h3 className="text-lg font-semibold text-primary-900 dark:text-primary-300 mb-2">
-                Conseils de sécurité
-              </h3>
-              <ul className="space-y-2 text-sm text-primary-800 dark:text-primary-400">
-                <li>• Utilisez des mots de passe uniques pour chaque compte</li>
-                <li>• Activez l'authentification à deux facteurs (2FA)</li>
-                <li>• Ne partagez jamais votre mot de passe maître</li>
-                <li>• Mettez régulièrement à jour vos mots de passe</li>
-              </ul>
+              ))}
             </div>
-          </div>
+          ) : (
+            <EmptyState icon={Shield} title="Aucune activité récente" description="Les événements de sécurité apparaîtront ici" />
+          )}
         </div>
       </div>
-    </DashboardLayout>
+    </AppShell>
   )
 }

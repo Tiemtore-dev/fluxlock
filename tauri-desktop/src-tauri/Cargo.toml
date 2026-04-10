@@ -1,20 +1,22 @@
 [package]
-name = "securevault"
+name = "fluxlock"
 version = "2.0.0"
 description = "SecureVault - Gestionnaire de mots de passe sécurisé avec backend intégré"
 authors = ["SecureVault Team"]
 license = "MIT"
 repository = ""
 edition = "2021"
+default-run = "fluxlock"
 
 [build-dependencies]
-tauri-build = { version = "1.5", features = [] }
+tauri-build = { version = "2", features = [] }
+cc = "1.0"
 
 [dependencies]
-tauri = { version = "1.5", features = [ "clipboard-write-text", "dialog-open", "dialog-save", "fs-all", "path-all", "shell-open", "updater"] }
+tauri = { version = "2", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 uuid = { version = "1.0", features = ["v4"] }
@@ -31,9 +33,6 @@ base64 = "0.22"  # For encoding
 # Secure storage in system keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service)
 keyring = "2.0"
 
-# Python ML integration
-pyo3 = { version = "0.20", features = ["abi3-py39"] }
-
 # 2FA/TOTP Authentication
 totp-rs = { version = "5.5", features = ["qr", "otpauth"] }
 qrcode = "0.14"
@@ -48,23 +47,73 @@ flate2 = "1.0"  # gzip
 # Environment variables
 dotenv = "0.15"
 
-# File system monitoring for ransomware detection
-notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+# Stack growth for Android JavaBridge thread (small default stack ~512KB)
+stacker = "0.1"
+
+# Security enhancements
+once_cell = "1.21.3"  # Thread-safe lazy static
+secrecy = "0.10.3"    # Secure memory handling for secrets
+zeroize = "1.8.2"     # Zero memory on drop
+dirs = "5.0"          # Standard directory paths
+subtle = "2.5"        # Constant-time comparison
+argon2 = "0.5"        # Password hashing (pour derive_from_password)
+libc = "0.2"          # mlock/munlock for secret memory pages
+hmac = "0.12"          # V-01: HMAC pour device wrapping key derivation
+sha2 = "0.10"          # V-01: SHA-256 pour HMAC
+
+# ═══ Vault Secure Transfer ═══
+spake2 = "0.4"                          # PAKE pour wormhole handshake
+chacha20poly1305 = "0.10"               # Chiffrement session transfer
+mdns-sd = "0.11"                        # mDNS/DNS-SD discovery local
+rmp-serde = "1.1"                       # MessagePack wire format
+tokio-rustls = "0.25"                   # TLS pour toutes les connexions P2P
+rustls-native-certs = "0.7"             # Certificats natifs
+pem = "3.0"                             # Parsing certificats PEM
+rcgen = "0.12"                           # Génération certificats auto-signés éphémères
+
+# Network discovery dependencies
 crossbeam-channel = "0.5"
-dirs = "5.0"  # Pour obtenir les répertoires utilisateur
+hostname = "0.3"  # Pour obtenir le nom de la machine
+if-addrs = "0.13"  # Pour lister les interfaces réseau (IPv6 link-local)
+socket2 = "0.5"    # SO_REUSEADDR/SO_REUSEPORT pour le beacon UDP de découverte
 
 # CLI dependencies
 clap = { version = "4.4", features = ["derive"] }
 rpassword = "7.3"
 
+# Tauri plugins
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-clipboard-manager = "2"
+
+# File system monitoring for ransomware detection
+[target.'cfg(target_os = "macos")'.dependencies]
+notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify = { version = "6.1", default-features = true }
+
+[lib]
+name = "fluxlock_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [[bin]]
-name = "securevault"
+name = "fluxlock"
 path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3.8"
 
 [features]
-# This feature is used for production builds or when `devPath` points to the filesystem
-# DO NOT REMOVE!!
-custom-protocol = ["tauri/custom-protocol"]
+# Tauri v2 - no custom-protocol needed
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+
+# ═══ Windows Hello biometric authentication ═══
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Security_Credentials_UI",
+    "Foundation",
+] }

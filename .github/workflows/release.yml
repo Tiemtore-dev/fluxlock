@@ -1,0 +1,148 @@
+name: Release FluXlock
+
+on:
+  push:
+    tags:
+      - "v*" # Déclenché sur les tags comme v2.0.0, v2.0.1, etc.
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest"
+            args: "--target aarch64-apple-darwin"
+          - platform: "macos-latest"
+            args: "--target x86_64-apple-darwin"
+          - platform: "ubuntu-22.04"
+            args: ""
+          - platform: "windows-latest"
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install frontend dependencies
+        working-directory: ./tauri-desktop
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ./tauri-desktop
+        run: npm run build
+
+      - name: Import signing key
+        env:
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: |
+          echo "Clé de signature configurée"
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        with:
+          projectPath: "./tauri-desktop"
+          tagName: ${{ github.ref_name }}
+          releaseName: "FluXlock ${{ github.ref_name }}"
+          releaseBody: "Voir les changements dans le CHANGELOG.md"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  create-manifest:
+    needs: release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        uses: robinraju/release-downloader@v1.8
+        with:
+          tag: ${{ github.ref_name }}
+          fileName: "*"
+          out-file-path: "downloads"
+
+      - name: Create update manifest
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          REPO="Tiemtore-dev/fluxlock"
+          BASE_URL="https://github.com/${REPO}/releases/download/${GITHUB_REF_NAME}"
+
+          # Fonction pour extraire la signature
+          get_signature() {
+            local sig_file=$1
+            if [ -f "$sig_file" ]; then
+              cat "$sig_file"
+            else
+              echo "Signature non trouvée: $sig_file" >&2
+              echo ""
+            fi
+          }
+
+          # Créer le manifest JSON
+          cat > latest.json << EOF
+          {
+            "version": "v${VERSION}",
+            "notes": "Mise à jour FluXlock v${VERSION}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "$(get_signature downloads/*.app.tar.gz.sig)",
+                "url": "${BASE_URL}/FluXlock.app.tar.gz"
+              },
+              "darwin-x86_64": {
+                "signature": "$(get_signature downloads/*_x64.app.tar.gz.sig)",
+                "url": "${BASE_URL}/FluXlock_x64.app.tar.gz"
+              },
+              "linux-x86_64": {
+                "signature": "$(get_signature downloads/*.AppImage.tar.gz.sig)",
+                "url": "${BASE_URL}/fluxlock_${VERSION}_amd64.AppImage.tar.gz"
+              },
+              "windows-x86_64": {
+                "signature": "$(get_signature downloads/*.msi.zip.sig)",
+                "url": "${BASE_URL}/FluXlock_${VERSION}_x64_en-US.msi.zip"
+              }
+            }
+          }
+          EOF
+
+          echo "Manifest créé:"
+          cat latest.json
+
+      - name: Upload manifest to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: latest.json
+          asset_name: latest.json
+          tag: ${{ github.ref_name }}
+          overwrite: true

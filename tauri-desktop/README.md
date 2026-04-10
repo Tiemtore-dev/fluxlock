@@ -1,248 +1,92 @@
-# SecureVault Desktop - Frontend Tauri
+# SecureVault Desktop — Frontend Tauri
 
-Application desktop cross-platform pour SecureVault, construite avec Tauri + React + TypeScript.
+Application desktop cross-platform construite avec **Tauri 1.5** + **React 18** + **TypeScript**.
 
-## 🚀 Démarrage rapide
-
-### Prérequis
-
-- Node.js 18+ et npm
-- Rust 1.70+
-- Pour macOS : Xcode Command Line Tools
-- Pour Linux : `build-essential`, `libwebkit2gtk-4.0-dev`, `libssl-dev`, `libgtk-3-dev`
-- Pour Windows : Visual Studio Build Tools
-
-### Installation
+## Démarrage
 
 ```bash
 # Installer les dépendances
 npm install
 
-# Installer Tauri CLI
-npm install --save-dev @tauri-apps/cli
+# Mode développement (hot-reload)
+npm run tauri dev
+
+# Build production
+npm run tauri build
 ```
 
-### Développement
-
-```bash
-# Lancer le backend d'abord
-cd ../go-api-server
-go run cmd/server/main.go
-
-# Dans un autre terminal, lancer le frontend
-cd ../tauri-desktop
-npm run tauri:dev
-```
-
-L'application se lancera automatiquement en mode développement avec hot-reload.
-
-### Build pour production
-
-```bash
-# Build pour la plateforme actuelle
-npm run tauri:build
-```
-
-Les installateurs seront générés dans `src-tauri/target/release/bundle/`:
-
-- **macOS** : `.app` (application) et `.dmg` (installateur)
-- **Windows** : `.exe` (portable) et `.msi` (installateur)
-- **Linux** : `.deb`, `.AppImage`, `.rpm`
-
-## 📁 Structure du projet
+## Structure
 
 ```
-tauri-desktop/
-├── src/                      # Code React/TypeScript
-│   ├── components/           # Composants réutilisables
-│   │   └── DashboardLayout.tsx
-│   ├── pages/                # Pages de l'application
-│   │   ├── LoginPage.tsx
-│   │   ├── RegisterPage.tsx
-│   │   ├── DashboardPage.tsx
-│   │   ├── PasswordsPage.tsx
-│   │   ├── FilesPage.tsx
-│   │   ├── KeysPage.tsx
-│   │   ├── SecurityPage.tsx
-│   │   └── SettingsPage.tsx
-│   ├── stores/               # État global Zustand
-│   │   └── authStore.ts
-│   ├── lib/                  # Utilitaires
-│   │   └── api.ts            # Client API
-│   ├── App.tsx               # Composant racine
-│   ├── main.tsx              # Point d'entrée
-│   └── index.css             # Styles globaux
-├── src-tauri/                # Code Rust Tauri
-│   ├── src/
-│   │   └── main.rs           # Backend Tauri
-│   ├── icons/                # Icônes de l'application
-│   ├── Cargo.toml            # Dépendances Rust
-│   ├── build.rs              # Script de build
-│   └── tauri.conf.json       # Configuration Tauri
-├── index.html                # HTML principal
-├── vite.config.ts            # Configuration Vite
-├── tailwind.config.js        # Configuration Tailwind
-└── package.json              # Dépendances Node
+src/                          # Frontend React/TypeScript
+├── pages/                    # Pages de l'application
+│   ├── LoginPage.tsx         # Connexion
+│   ├── RegisterPage.tsx      # Inscription
+│   ├── DashboardPage.tsx     # Tableau de bord
+│   ├── PasswordsPage.tsx     # Gestion mots de passe
+│   ├── FilesPage.tsx         # Fichiers chiffrés
+│   ├── KeysPage.tsx          # Clés cryptographiques
+│   ├── SecurityPage.tsx      # Événements de sécurité
+│   ├── SystemSecurityPage.tsx # Sécurité système
+│   ├── SharesPage.tsx        # Partages de fichiers
+│   ├── SettingsPage.tsx      # Paramètres
+│   ├── BackupRestorePage.tsx # Backup/restauration
+│   └── ResetVaultPage.tsx    # Réinitialisation
+├── components/
+│   └── DashboardLayout.tsx   # Layout avec sidebar
+├── hooks/
+│   └── useAutoLock.ts        # Verrouillage auto par inactivité
+├── stores/
+│   └── authStore.ts          # État d'authentification (Zustand)
+├── lib/
+│   ├── tauri-api.ts          # Client IPC Tauri (50+ commandes)
+│   └── api.ts                # Utilitaires API
+├── App.tsx                   # Routes React Router
+└── main.tsx                  # Point d'entrée
 
+src-tauri/                    # Backend Rust
+├── src/
+│   ├── main.rs               # Commandes Tauri + logique métier
+│   ├── crypto.rs              # Interface chiffrement (AES-256-GCM, Argon2id)
+│   ├── database.rs            # SQLite via sqlx
+│   ├── secure_storage.rs      # Keychain OS
+│   ├── secure_key.rs          # Clés protégées (ZeroizeOnDrop)
+│   ├── totp.rs                # 2FA TOTP SHA-256
+│   ├── security_monitor.rs    # Détection menaces
+│   ├── threat_reactor.rs      # Réponse automatique
+│   ├── filesystem_monitor.rs  # Surveillance fichiers
+│   ├── ml_bridge.rs           # Bridge Python ML  
+│   ├── hidden_storage.rs      # Chemins de stockage
+│   ├── config.rs              # Configuration .env
+│   ├── path_validator.rs      # Anti path-traversal
+│   └── backup_manager.rs      # Backup/restauration
+├── Cargo.toml
+└── tauri.conf.json
 ```
 
-## 🎨 Technologies utilisées
+## Technologies
 
-### Frontend
+| Couche | Technologie |
+|--------|-------------|
+| UI | React 18, TypeScript, Vite |
+| Styling | CSS (index.css) |
+| Routing | React Router v6 |
+| État | Zustand |
+| Desktop | Tauri 1.5 |
+| Backend | Rust |
+| Base de données | SQLite (sqlx) |
+| Crypto | rust-crypto-core (AES-256-GCM, Argon2id, BLAKE3) |
 
-- **React 18** - Bibliothèque UI
-- **TypeScript** - Typage statique
-- **Vite** - Build tool rapide
-- **TailwindCSS** - Framework CSS utility-first
-- **React Router** - Routing
-- **Zustand** - Gestion d'état
-- **TanStack Query** - Gestion des données asynchrones
-- **Axios** - Client HTTP
-- **Lucide React** - Icônes
+## Commandes IPC disponibles
 
-### Desktop
+L'API frontend communique avec le backend via `invoke()` (IPC Tauri) :
 
-- **Tauri 1.5** - Framework desktop
-- **Rust** - Backend natif
-
-## 🔒 Fonctionnalités
-
-### Authentification
-
-- [x] Inscription
-- [x] Connexion
-- [x] JWT avec refresh token
-- [ ] Authentification biométrique (Touch ID / Windows Hello)
-
-### Gestion des mots de passe
-
-- [x] Liste des mots de passe
-- [x] Recherche
-- [x] Afficher/masquer les mots de passe
-- [x] Copier dans le presse-papiers
-- [ ] Ajouter un mot de passe
-- [ ] Modifier un mot de passe
-- [x] Supprimer un mot de passe
-- [ ] Générateur de mots de passe forts
-- [ ] Catégorisation
-
-### Gestion des fichiers
-
-- [ ] Upload de fichiers chiffrés
-- [ ] Téléchargement de fichiers
-- [ ] Suppression de fichiers
-- [ ] Prévisualisation
-
-### Sécurité
-
-- [ ] Tableau de bord sécurité
-- [ ] Analyse comportementale en temps réel
-- [ ] Détection d'anomalies
-- [ ] Alertes ransomware
-- [ ] Historique d'audit
-
-### Paramètres
-
-- [ ] Thème (clair/sombre)
-- [ ] Langue
-- [ ] Timeout de session
-- [ ] Sauvegarde/restauration
-
-## 🔐 Sécurité
-
-- Communication HTTPS avec l'API
-- Stockage sécurisé des tokens avec Tauri
-- CSP (Content Security Policy) configuré
-- Pas de Node.js runtime en production (sécurité Tauri)
-- Chiffrement côté client avant envoi à l'API
-
-## 📦 Distribution
-
-### macOS
-
-```bash
-npm run tauri:build
-```
-
-Le fichier `.dmg` sera dans `src-tauri/target/release/bundle/dmg/`.
-
-Pour signer l'application (nécessite Apple Developer Account):
-
-```bash
-export APPLE_CERTIFICATE=...
-export APPLE_CERTIFICATE_PASSWORD=...
-export APPLE_ID=...
-export APPLE_PASSWORD=...
-npm run tauri:build
-```
-
-### Windows
-
-```bash
-npm run tauri:build
-```
-
-Les fichiers `.exe` et `.msi` seront dans `src-tauri/target/release/bundle/`.
-
-Pour signer (nécessite un certificat code signing):
-
-```bash
-# Configurer le certificat dans tauri.conf.json
-```
-
-### Linux
-
-```bash
-npm run tauri:build
-```
-
-Les formats `.deb`, `.AppImage`, et `.rpm` seront générés.
-
-## 🐛 Debugging
-
-```bash
-# Logs du frontend
-npm run dev
-
-# Logs de Tauri
-npm run tauri:dev
-
-# Ouvrir les DevTools
-Cmd/Ctrl + Shift + I (en mode dev)
-```
-
-## 🌐 API
-
-L'application communique avec l'API Go sur `http://localhost:8080/api/v1`.
-
-Configurer l'URL dans `.env`:
-
-```
-VITE_API_URL=http://localhost:8080/api/v1
-```
-
-## 📱 Features Tauri utilisées
-
-- **Dialog** - Sélection de fichiers
-- **FS** - Accès au système de fichiers
-- **Path** - Gestion des chemins
-- **Shell** - Ouverture de liens externes
-
-## 🎯 Roadmap
-
-- [ ] Authentification biométrique
-- [ ] Synchronisation cloud optionnelle
-- [ ] Mode hors ligne
-- [ ] Export/Import de données
-- [ ] Extensions de navigateur (intégration)
-- [ ] Notifications système
-- [ ] Raccourcis clavier globaux
-- [ ] Multi-comptes
-
-## 📄 Licence
-
-MIT
-
----
-
-**Note** : Cette application nécessite que les services backend (Go API et Python ML) soient en cours d'exécution.
+- **Auth** : `local_register`, `local_login`, `local_logout`
+- **Auto-lock** : `notify_activity`, `set_auto_lock_timeout`, `check_auto_lock`
+- **Passwords** : `create_password`, `get_passwords`, `decrypt_password`, `update_password`, `delete_password`
+- **Files** : `create_secure_file`, `create_secure_file_from_path`, `decrypt_file`, `decrypt_file_to_path`
+- **Keys** : `create_secure_key`, `import_secure_key`, `decrypt_key`
+- **Shares** : `share_file`, `get_user_shares`, `revoke_share`
+- **Security** : `get_security_events`, `analyze_and_react`, `get_security_status`
+- **2FA** : `setup_2fa`, `verify_and_enable_2fa`, `verify_2fa_login`
+- **Backup** : `create_backup`, `restore_backup`, `search_backups`

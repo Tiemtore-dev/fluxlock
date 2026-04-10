@@ -19,7 +19,7 @@ export default defineConfig({
   },
   
   // Variables d'environnement avec le préfixe VITE_
-  envPrefix: ['VITE_', 'TAURI_'],
+  envPrefix: ['VITE_'], // VULN-022: removed TAURI_ to avoid leaking TAURI_SIGNING_PRIVATE_KEY etc.
   
   resolve: {
     alias: {

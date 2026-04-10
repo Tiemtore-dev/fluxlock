@@ -1,268 +1,1008 @@
-import { useState, useEffect } from 'react'
-import { 
-  Settings, 
-  Moon, 
-  Sun, 
-  Bell, 
-  Shield, 
-  Database,
-  Trash2,
-  Download,
-  Save,
-  AlertCircle
-} from 'lucide-react'
-import DashboardLayout from '../components/DashboardLayout'
+import { useState, useEffect, useRef } from 'react'
+import { Settings, Moon, Sun, Bell, Shield, Save, Fingerprint, Info, AlertTriangle, Lock, RefreshCw, Smartphone, Trash2, Copy, Check, Link, Wifi, Globe, ShieldCheck, FileText, Server } from 'lucide-react'
+import { AppShell } from '../design-system/layouts'
+import { Button, Input } from '../design-system/atoms'
+import { useToast } from '../design-system/organisms'
+import { biometric, auth, transfer, isolationMode, signedLogging, enclave, type BiometricStatus, type SyncSettings, type SyncDeviceInfo, type EnclaveStatus } from '../lib/vault-service'
+import { useAuthStore } from '../stores/authStore'
+import { hasAndroidBiometric, androidBiometricAvailable, hasAndroidKeystore, androidKeystoreStore, androidKeystoreDelete } from '../lib/android-biometric'
 
 export default function SettingsPage() {
+  const { toast } = useToast()
+  const user = useAuthStore((s) => s.user)
+
   const [isDark, setIsDark] = useState(
-    localStorage.getItem('theme') === 'dark' || 
+    localStorage.getItem('theme') === 'dark' ||
     (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)
   )
   const [notifications, setNotifications] = useState(
     localStorage.getItem('notifications') === 'true' || !localStorage.getItem('notifications')
   )
   const [autoLock, setAutoLock] = useState(
-    localStorage.getItem('autoLock') === 'true' || !localStorage.getItem('autoLock')
+    sessionStorage.getItem('autoLock') === 'true' || !sessionStorage.getItem('autoLock')
   )
   const [lockTimeout, setLockTimeout] = useState(
-    parseInt(localStorage.getItem('lockTimeout') || '15')
+    Math.min(Math.max(parseInt(sessionStorage.getItem('lockTimeout') || '15'), 1), 60)
   )
-  const [showSuccess, setShowSuccess] = useState(false)
+  const [bioStatus, setBioStatus] = useState<BiometricStatus | null>(null)
+  const [bioLoading, setBioLoading] = useState(false)
 
-  // Charger les préférences au démarrage
+  // Biometric activation flow states
+  const [bioStep, setBioStep] = useState<'idle' | 'info' | 'confirm'>('idle')
+  const [bioConsent, setBioConsent] = useState(false)
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [confirmError, setConfirmError] = useState('')
+
+  // Sync state
+  const [syncSettings, setSyncSettings] = useState<SyncSettings | null>(null)
+  const [syncLoading, setSyncLoading] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  // Pairing flow state
+  type PairingStep = 'idle' | 'starting' | 'waiting' | 'joining' | 'success' | 'error'
+  const [pairingStep, setPairingStep] = useState<PairingStep>('idle')
+  const [pairingCode, setPairingCode] = useState('')
+  const [joinCode, setJoinCode] = useState('')
+  const [pairingId, setPairingId] = useState('')
+  const [crossNetwork, setCrossNetwork] = useState(false)
+  const [pairedDeviceName, setPairedDeviceName] = useState('')
+  const [pairingError, setPairingError] = useState('')
+  const pairingPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Isolation mode, signed logging, enclave status
+  const [isolationEnabled, setIsolationEnabled] = useState(false)
+  const [signedLoggingEnabled, setSignedLoggingEnabled] = useState(false)
+  const [enclaveStatus, setEnclaveStatus] = useState<EnclaveStatus | null>(null)
+
   useEffect(() => {
-    const savedTheme = localStorage.getItem('theme')
-    if (savedTheme === 'dark') {
-      document.documentElement.classList.add('dark')
-      setIsDark(true)
-    } else if (savedTheme === 'light') {
-      document.documentElement.classList.remove('dark')
-      setIsDark(false)
-    }
+    const saved = localStorage.getItem('theme')
+    if (saved === 'dark') { document.documentElement.classList.add('dark'); setIsDark(true) }
+    else if (saved === 'light') { document.documentElement.classList.remove('dark'); setIsDark(false) }
   }, [])
 
-  // Toggle dark mode
-  const toggleDarkMode = () => {
-    const newTheme = !isDark
-    setIsDark(newTheme)
-    if (newTheme) {
-      document.documentElement.classList.add('dark')
-      localStorage.setItem('theme', 'dark')
-    } else {
-      document.documentElement.classList.remove('dark')
-      localStorage.setItem('theme', 'light')
-    }
+  // Load sync settings (with retry)
+  const loadSyncSettings = () => {
+    setSyncError(null)
+    transfer.getSyncSettings()
+      .then(setSyncSettings)
+      .catch((err) => {
+        setSyncError(err?.toString() || 'Erreur chargement synchronisation')
+      })
   }
 
-  // Sauvegarder les paramètres
-  const handleSaveSettings = () => {
-    localStorage.setItem('notifications', notifications.toString())
-    localStorage.setItem('autoLock', autoLock.toString())
-    localStorage.setItem('lockTimeout', lockTimeout.toString())
-    setShowSuccess(true)
-    setTimeout(() => setShowSuccess(false), 3000)
-  }
+  useEffect(() => {
+    loadSyncSettings()
+    // Retry once after 2s in case trust store isn't unlocked yet
+    const retryTimer = setTimeout(loadSyncSettings, 2000)
+    return () => clearTimeout(retryTimer)
+  }, [])
 
-  // Exporter la base de données
-  const handleExport = async () => {
-    try {
-      // Implémenter l'export via Tauri
-      alert("Fonctionnalité d'export en cours de développement")
-    } catch (error) {
-      console.error('Erreur export:', error)
-    }
-  }
+  // Load isolation, signed logging, enclave status
+  useEffect(() => {
+    isolationMode.get().then(setIsolationEnabled)
+    signedLogging.getStatus().then(setSignedLoggingEnabled)
+    enclave.getStatus().then(setEnclaveStatus).catch(() => {})
+  }, [])
 
-  // Nettoyer le cache
-  const handleClearCache = async () => {
-    if (confirm('Êtes-vous sûr de vouloir nettoyer le cache ?')) {
-      try {
-        // Implémenter le nettoyage via Tauri
-        alert('Cache nettoyé avec succès')
-      } catch (error) {
-        console.error('Erreur nettoyage:', error)
+  // Check biometric availability
+  useEffect(() => {
+    biometric.checkStatus().then((status) => {
+      console.log('[Settings] biometric status:', JSON.stringify(status))
+      if (hasAndroidBiometric()) {
+        status.available = androidBiometricAvailable()
+        if (status.available && status.biometric_type === 'none') {
+          status.biometric_type = 'fingerprint'
+        }
       }
+      setBioStatus(status)
+    })
+  }, [])
+
+  const startBiometricActivation = () => {
+    setBioStep('info')
+    setBioConsent(false)
+    setConfirmPassword('')
+    setConfirmError('')
+  }
+
+  const cancelActivation = () => {
+    setBioStep('idle')
+    setBioConsent(false)
+    setConfirmPassword('')
+    setConfirmError('')
+  }
+
+  const proceedToConfirm = () => {
+    if (!bioConsent) return
+    setBioStep('confirm')
+    setConfirmError('')
+  }
+
+  const confirmAndEnable = async () => {
+    if (!confirmPassword.trim()) {
+      setConfirmError('Veuillez entrer votre mot de passe maître.')
+      return
+    }
+    setBioLoading(true)
+    setConfirmError('')
+    try {
+      // Verify master password first
+      const loginRes = await auth.login(
+        user?.username || bioStatus?.enrolled_username || '',
+        confirmPassword
+      )
+      if (!loginRes.success) {
+        setConfirmError('Mot de passe incorrect.')
+        setBioLoading(false)
+        return
+      }
+      // Now enable biometric (will prompt Touch ID / Face ID)
+      const enableResult = await biometric.enable()
+
+      // On Android: Rust returns JSON with key_b64 — store it in Android Keystore (TEE/StrongBox)
+      if (hasAndroidKeystore()) {
+        try {
+          const parsed = JSON.parse(enableResult)
+          if (parsed.key_b64) {
+            const account = `user_bio_${(user?.username || '').toLowerCase()}`
+            await androidKeystoreStore(account, parsed.key_b64)
+          }
+        } catch {
+          // Not JSON = desktop platform, key already stored in OS keychain
+        }
+      }
+
+      const updated = await biometric.checkStatus()
+      setBioStatus(updated)
+      setBioStep('idle')
+      setConfirmPassword('')
+      toast('Biométrie activée avec succès', 'success')
+    } catch (err: any) {
+      setConfirmError(err?.toString() || 'Erreur lors de l\'activation')
+    } finally {
+      setBioLoading(false)
     }
   }
+
+  const disableBiometric = async () => {
+    setBioLoading(true)
+    try {
+      // On Android: also delete the key from Android Keystore (TEE/StrongBox)
+      if (hasAndroidKeystore()) {
+        const account = `user_bio_${(user?.username || '').toLowerCase()}`
+        androidKeystoreDelete(account)
+      }
+      await biometric.disable()
+      const updated = await biometric.checkStatus()
+      setBioStatus(updated)
+      toast('Biométrie désactivée', 'success')
+    } catch (err: any) {
+      toast(err?.toString() || 'Erreur biométrie', 'error')
+    } finally {
+      setBioLoading(false)
+    }
+  }
+
+  const handleEmergencyLock = async () => {
+    try {
+      await biometric.emergencyLock()
+      const updated = await biometric.checkStatus()
+      setBioStatus(updated)
+      toast('Verrouillage d\'urgence activé — mot de passe requis', 'warning')
+    } catch (err: any) {
+      toast(err?.toString() || 'Erreur', 'error')
+    }
+  }
+
+  const toggleSync = async () => {
+    setSyncLoading(true)
+    try {
+      const newVal = !syncSettings?.enabled
+      await transfer.setSyncEnabled(newVal)
+      const updated = await transfer.getSyncSettings()
+      setSyncSettings(updated)
+      toast(newVal ? 'Synchronisation activée' : 'Synchronisation désactivée', 'success')
+    } catch (err: any) {
+      toast(err?.toString() || 'Erreur sync', 'error')
+    } finally {
+      setSyncLoading(false)
+    }
+  }
+
+  // ── Pairing: start (initiator side) ──
+  const startPairing = async () => {
+    setPairingStep('starting')
+    setPairingError('')
+    try {
+      const result = await transfer.startSyncPairing(crossNetwork)
+      setPairingCode(result.wormhole_code)
+      setPairingId(result.pairing_id)
+      setPairingStep('waiting')
+
+      // Poll for completion (background task will update the transfer state)
+      pairingPollRef.current = setInterval(async () => {
+        try {
+          const status = await transfer.getStatus(result.pairing_id)
+          if (status?.state === 'Completed') {
+            clearInterval(pairingPollRef.current!)
+            pairingPollRef.current = null
+            setPairedDeviceName(status.peer_name || 'Appareil')
+            setPairingStep('success')
+            const updated = await transfer.getSyncSettings()
+            setSyncSettings(updated)
+            toast('Appairage réussi !', 'success')
+          } else if (typeof status?.state === 'object' && 'Failed' in status.state) {
+            clearInterval(pairingPollRef.current!)
+            pairingPollRef.current = null
+            const reason = (status.state as any).Failed?.reason || 'Erreur inconnue'
+            setPairingError(reason)
+            setPairingStep('error')
+          }
+        } catch { /* ignore polling errors */ }
+      }, 2000)
+    } catch (err: any) {
+      setPairingError(err?.toString() || 'Erreur lors du démarrage de l\'appairage')
+      setPairingStep('error')
+    }
+  }
+
+  // ── Pairing: join (joiner side) ──
+  const joinPairing = async () => {
+    if (!joinCode.trim()) {
+      toast('Entrez le code wormhole', 'error')
+      return
+    }
+    setPairingStep('joining')
+    setPairingError('')
+    try {
+      const result = await transfer.joinSyncPairing(joinCode.trim())
+      if (result.success) {
+        setPairedDeviceName(result.device_name)
+        setPairingStep('success')
+        const updated = await transfer.getSyncSettings()
+        setSyncSettings(updated)
+        toast(`Appairé avec "${result.device_name}"`, 'success')
+      } else {
+        setPairingError('L\'autre appareil a refusé l\'appairage')
+        setPairingStep('error')
+      }
+    } catch (err: any) {
+      setPairingError(err?.toString() || 'Erreur de connexion')
+      setPairingStep('error')
+    }
+  }
+
+  const cancelPairing = () => {
+    if (pairingPollRef.current) {
+      clearInterval(pairingPollRef.current)
+      pairingPollRef.current = null
+    }
+    if (pairingId) {
+      transfer.cancel(pairingId).catch(() => {})
+    }
+    setPairingStep('idle')
+    setPairingCode('')
+    setJoinCode('')
+    setPairingId('')
+    setPairingError('')
+    setPairedDeviceName('')
+  }
+
+  const removeSyncDevice = async (vk: string) => {
+    setSyncLoading(true)
+    try {
+      await transfer.removeSyncDevice(vk)
+      const updated = await transfer.getSyncSettings()
+      setSyncSettings(updated)
+      toast('Appareil supprimé', 'success')
+    } catch (err: any) {
+      toast(err?.toString() || 'Erreur suppression', 'error')
+    } finally {
+      setSyncLoading(false)
+    }
+  }
+
+  const copyPairingCode = async () => {
+    if (pairingCode) {
+      await navigator.clipboard.writeText(pairingCode)
+      setCopied(true)
+      toast('Code copié', 'success')
+      setTimeout(() => setCopied(false), 2000)
+    }
+  }
+
+  const toggleDarkMode = () => {
+    const next = !isDark; setIsDark(next)
+    document.documentElement.classList.toggle('dark', next)
+    localStorage.setItem('theme', next ? 'dark' : 'light')
+  }
+
+  const save = () => {
+    localStorage.setItem('notifications', notifications.toString())
+    sessionStorage.setItem('autoLock', autoLock.toString())
+    sessionStorage.setItem('lockTimeout', Math.min(Math.max(lockTimeout, 1), 60).toString())
+    toast('Paramètres enregistrés', 'success')
+  }
+
+  /* shared styles */
+  const card: React.CSSProperties = { background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', marginBottom: 'var(--space-5)' }
+  const cardHeader: React.CSSProperties = { padding: 'var(--space-5)', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }
+  const cardBody: React.CSSProperties = { padding: 'var(--space-5)' }
+  const row: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between' }
+
+  const Toggle = ({ on, onToggle }: { on: boolean; onToggle: () => void }) => (
+    <button onClick={onToggle} style={{
+      position: 'relative', width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+      background: on ? 'var(--accent)' : 'var(--bg-hover)', transition: 'background var(--transition-fast)',
+    }}>
+      <span style={{
+        position: 'absolute', top: 2, left: on ? 22 : 2,
+        width: 20, height: 20, borderRadius: '50%', background: 'white', transition: 'left var(--transition-fast)',
+      }} />
+    </button>
+  )
 
   return (
-    <DashboardLayout>
-      <div className="p-6 max-w-4xl">
-        {/* En-tête */}
-        <div className="mb-6">
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white flex items-center gap-3">
-            <Settings className="w-8 h-8" />
-            Paramètres
+    <AppShell>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+        {/* Header */}
+        <div>
+          <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', margin: 0 }}>
+            <Settings size={28} style={{ color: 'var(--accent)' }} /> Paramètres
           </h1>
-          <p className="text-gray-600 dark:text-gray-400 mt-2">
-            Configuration de l'application SecureVault
-          </p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>Configuration de FluXlock</p>
         </div>
 
-        {/* Message de succès */}
-        {showSuccess && (
-          <div className="mb-6 p-4 bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200 rounded-lg flex items-center gap-2">
-            <AlertCircle className="w-5 h-5" />
-            Paramètres enregistrés avec succès !
-          </div>
-        )}
-
         {/* Apparence */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm mb-6">
-          <div className="p-6 border-b border-gray-200 dark:border-gray-700">
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-              {isDark ? <Moon className="w-6 h-6" /> : <Sun className="w-6 h-6" />}
-              Apparence
-            </h2>
+        <div style={card}>
+          <div style={cardHeader}>
+            {isDark ? <Moon size={20} style={{ color: 'var(--accent)' }} /> : <Sun size={20} style={{ color: 'var(--accent)' }} />}
+            <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Apparence</h2>
           </div>
-          <div className="p-6">
-            <div className="flex items-center justify-between">
+          <div style={cardBody}>
+            <div style={row}>
               <div>
-                <p className="font-medium text-gray-900 dark:text-white">Mode sombre</p>
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  Activer le thème sombre pour réduire la fatigue oculaire
-                </p>
+                <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Mode sombre</p>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Réduire la fatigue oculaire</p>
               </div>
-              <button
-                onClick={toggleDarkMode}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  isDark ? 'bg-blue-600' : 'bg-gray-200'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    isDark ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
+              <Toggle on={isDark} onToggle={toggleDarkMode} />
             </div>
           </div>
         </div>
 
         {/* Notifications */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm mb-6">
-          <div className="p-6 border-b border-gray-200 dark:border-gray-700">
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-              <Bell className="w-6 h-6" />
-              Notifications
-            </h2>
+        <div style={card}>
+          <div style={cardHeader}>
+            <Bell size={20} style={{ color: 'var(--accent)' }} />
+            <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Notifications</h2>
           </div>
-          <div className="p-6">
-            <div className="flex items-center justify-between">
+          <div style={cardBody}>
+            <div style={row}>
               <div>
-                <p className="font-medium text-gray-900 dark:text-white">Activer les notifications</p>
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  Recevoir des alertes pour les événements de sécurité
-                </p>
+                <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer les notifications</p>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Alertes événements de sécurité</p>
               </div>
-              <button
-                onClick={() => setNotifications(!notifications)}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  notifications ? 'bg-blue-600' : 'bg-gray-200'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    notifications ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
+              <Toggle on={notifications} onToggle={() => setNotifications(!notifications)} />
             </div>
           </div>
         </div>
 
         {/* Sécurité */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm mb-6">
-          <div className="p-6 border-b border-gray-200 dark:border-gray-700">
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-              <Shield className="w-6 h-6" />
-              Sécurité
-            </h2>
+        <div style={card}>
+          <div style={cardHeader}>
+            <Shield size={20} style={{ color: 'var(--accent)' }} />
+            <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Sécurité</h2>
           </div>
-          <div className="p-6 space-y-6">
-            {/* Verrouillage automatique */}
-            <div className="flex items-center justify-between">
+          <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+            {/* Biometric — always visible */}
+            {bioStep === 'idle' && (
+              <>
+                <div style={row}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                    <Fingerprint size={18} style={{ color: bioStatus?.available ? 'var(--accent)' : 'var(--text-muted)' }} />
+                    <div>
+                      <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+                        {bioStatus?.biometric_type === 'touchid' ? 'Touch ID'
+                          : bioStatus?.biometric_type === 'faceid' ? 'Face ID'
+                          : bioStatus?.biometric_type === 'fingerprint' ? 'Empreinte digitale'
+                          : 'Biométrie'}
+                      </p>
+                      <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
+                        {!bioStatus
+                          ? 'Vérification en cours…'
+                          : bioStatus.available && bioStatus.enrolled
+                          ? `Activé pour ${bioStatus.enrolled_username || 'cet utilisateur'}`
+                          : bioStatus.available
+                          ? 'Déverrouillage rapide par empreinte'
+                          : 'Non disponible sur cette plateforme'}
+                      </p>
+                    </div>
+                  </div>
+                  {bioStatus?.available ? (
+                    bioStatus.enrolled ? (
+                      <Toggle on={true} onToggle={bioLoading ? () => {} : disableBiometric} />
+                    ) : (
+                      <Toggle on={false} onToggle={bioLoading ? () => {} : startBiometricActivation} />
+                    )
+                  ) : (
+                    <span style={{
+                      fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+                      padding: '4px 10px', borderRadius: 'var(--radius-full)',
+                      background: 'var(--bg-hover)',
+                    }}>
+                      {!bioStatus ? '…' : 'Indisponible'}
+                    </span>
+                  )}
+                </div>
+                {/* Platform-specific unavailability explanation */}
+                {bioStatus && !bioStatus.available && (
+                  <div style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 'var(--space-2)',
+                    padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                    background: 'color-mix(in srgb, var(--warning) 8%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--warning) 25%, transparent)',
+                    fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+                    lineHeight: 1.5,
+                  }}>
+                    <Info size={14} style={{ color: 'var(--warning)', flexShrink: 0, marginTop: 2 }} />
+                    <div>
+                      {bioStatus.biometric_type === 'none' && (
+                        <span>
+                          Aucun capteur biométrique détecté. <strong>macOS :</strong> vérifiez que Touch ID est configuré dans
+                          Réglages Système &gt; Touch ID. <strong>Windows :</strong> Windows Hello sera supporté dans une prochaine version.
+                          <strong> Linux :</strong> la biométrie n'est pas encore disponible.
+                        </span>
+                      )}
+                      {(bioStatus as any)._error && (
+                        <span style={{ display: 'block', marginTop: 'var(--space-1)', fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>
+                          Diagnostic : {(bioStatus as any)._error}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {/* Emergency lock button when enrolled */}
+                {bioStatus?.available && bioStatus.enrolled && (
+                  <button
+                    onClick={handleEmergencyLock}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                      padding: 'var(--space-2) var(--space-3)',
+                      borderRadius: 'var(--radius-md)',
+                      border: '1px solid var(--danger)',
+                      background: 'var(--danger-muted)',
+                      color: 'var(--danger)',
+                      fontSize: 'var(--text-xs)',
+                      fontFamily: 'var(--font-body)',
+                      cursor: 'pointer',
+                      marginTop: 'var(--space-2)',
+                    }}
+                  >
+                    <AlertTriangle size={14} />
+                    Verrouillage d'urgence
+                  </button>
+                )}
+              </>
+            )}
+
+            {/* Biometric activation — Step 1: Information screen */}
+            {bioStatus?.available && bioStep === 'info' && (
+              <div style={{
+                padding: 'var(--space-5)',
+                borderRadius: 'var(--radius-lg)',
+                background: 'color-mix(in srgb, var(--accent) 8%, transparent)',
+                border: '1px solid var(--accent)',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
+                  <Info size={18} style={{ color: 'var(--accent)' }} />
+                  <h3 style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0, fontSize: 'var(--text-base)' }}>
+                    Activation de la biométrie
+                  </h3>
+                </div>
+
+                <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', lineHeight: 1.6 }}>
+                  <p style={{ margin: '0 0 var(--space-3) 0', fontStyle: 'italic', color: 'var(--text-muted)' }}>
+                    « Ton empreinte n'est pas la combinaison du coffre. Elle ouvre juste le tiroir qui contient la clé. »
+                  </p>
+                  <p style={{ margin: '0 0 var(--space-3) 0' }}>
+                    <strong>Ce que la biométrie fait :</strong> elle vous permet de déverrouiller rapidement FluXlock
+                    sans retaper votre mot de passe à chaque fois, tant que la session est récente.
+                  </p>
+                  <p style={{ margin: '0 0 var(--space-3) 0' }}>
+                    <strong>Ce que la biométrie ne fait PAS :</strong> elle ne remplace jamais votre mot de passe maître.
+                    Au premier lancement, après un redémarrage, ou après une longue inactivité, le mot de passe sera toujours demandé.
+                  </p>
+                  <p style={{ margin: '0 0 var(--space-4) 0' }}>
+                    En cas de doute ou de danger, utilisez le <strong>verrouillage d'urgence</strong> pour désactiver
+                    instantanément la biométrie jusqu'à la prochaine saisie du mot de passe.
+                  </p>
+                </div>
+
+                {/* Consent checkbox */}
+                <label style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)',
+                  cursor: 'pointer', padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                  background: 'var(--bg-surface)', border: '1px solid var(--border)',
+                  marginBottom: 'var(--space-4)',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={bioConsent}
+                    onChange={(e) => setBioConsent(e.target.checked)}
+                    style={{ marginTop: 2, accentColor: 'var(--accent)' }}
+                  />
+                  <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>
+                    J'ai lu et compris les implications de l'activation de la biométrie.
+                  </span>
+                </label>
+
+                <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end' }}>
+                  <Button variant="ghost" onClick={cancelActivation}>Annuler</Button>
+                  <Button onClick={proceedToConfirm} disabled={!bioConsent}>Continuer</Button>
+                </div>
+              </div>
+            )}
+
+            {/* Biometric activation — Step 2: Password confirmation */}
+            {bioStatus?.available && bioStep === 'confirm' && (
+              <div style={{
+                padding: 'var(--space-5)',
+                borderRadius: 'var(--radius-lg)',
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border)',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
+                  <Lock size={18} style={{ color: 'var(--accent)' }} />
+                  <h3 style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0, fontSize: 'var(--text-base)' }}>
+                    Confirmez votre identité
+                  </h3>
+                </div>
+                <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', margin: '0 0 var(--space-4) 0' }}>
+                  Entrez votre mot de passe maître pour activer la biométrie. Votre empreinte sera ensuite demandée.
+                </p>
+
+                <Input
+                  label="Mot de passe maître"
+                  type="password"
+                  icon={Lock}
+                  value={confirmPassword}
+                  onChange={(e) => { setConfirmPassword(e.target.value); setConfirmError('') }}
+                  placeholder="••••••••••••"
+                  autoFocus
+                />
+
+                {confirmError && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                    padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                    background: 'var(--danger-muted)', border: '1px solid var(--danger)',
+                    fontSize: 'var(--text-sm)', color: 'var(--danger)',
+                    fontFamily: 'var(--font-body)', marginTop: 'var(--space-3)',
+                  }}>
+                    <AlertTriangle size={14} />
+                    {confirmError}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end', marginTop: 'var(--space-4)' }}>
+                  <Button variant="ghost" onClick={cancelActivation}>Annuler</Button>
+                  <Button onClick={confirmAndEnable} loading={bioLoading} icon={Fingerprint}>
+                    Activer la biométrie
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div style={row}>
               <div>
-                <p className="font-medium text-gray-900 dark:text-white">Verrouillage automatique</p>
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  Verrouiller l'application après une période d'inactivité
+                <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Verrouillage automatique</p>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Verrouiller après une période d'inactivité</p>
+              </div>
+              <Toggle on={autoLock} onToggle={() => setAutoLock(!autoLock)} />
+            </div>
+            {autoLock && (
+              <Input
+                label="Délai de verrouillage (minutes)"
+                type="number"
+                value={lockTimeout.toString()}
+                onChange={(e) => setLockTimeout(parseInt(e.target.value) || 15)}
+              />
+            )}
+          </div>
+        </div>
+
+        {/* Synchronisation — always visible */}
+        <div style={card}>
+          <div style={cardHeader}>
+            <RefreshCw size={20} style={{ color: 'var(--accent)' }} />
+            <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Synchronisation</h2>
+          </div>
+          {syncError && !syncSettings ? (
+            <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-3)' }}>
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', margin: 0, textAlign: 'center' }}>
+                Impossible de charger les paramètres de synchronisation.
+              </p>
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', margin: 0 }}>{syncError}</p>
+              <Button variant="ghost" size="sm" icon={RefreshCw} onClick={loadSyncSettings}>Réessayer</Button>
+            </div>
+          ) : !syncSettings ? (
+            <div style={{ ...cardBody, display: 'flex', justifyContent: 'center', padding: 'var(--space-6)' }}>
+              <RefreshCw size={20} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite' }} />
+            </div>
+          ) : (
+            <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+              {/* Enable/disable sync */}
+              <div style={row}>
+                <div>
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer la synchronisation</p>
+                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
+                    Synchroniser le trust store entre vos appareils (ML-DSA-65 + ML-KEM-768)
+                  </p>
+                </div>
+                <Toggle on={syncSettings.enabled} onToggle={syncLoading ? () => {} : toggleSync} />
+              </div>
+
+              {/* ── Pairing section ── */}
+              {syncSettings.enabled && pairingStep === 'idle' && (
+                <div style={{
+                  padding: 'var(--space-4)', borderRadius: 'var(--radius-lg)',
+                  background: 'color-mix(in srgb, var(--accent) 6%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--accent) 20%, transparent)',
+                  display: 'flex', flexDirection: 'column', gap: 'var(--space-4)',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                    <Link size={16} style={{ color: 'var(--accent)' }} />
+                    <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0, fontSize: 'var(--text-sm)' }}>
+                      Appairer un appareil
+                    </p>
+                  </div>
+                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
+                    L'appairage utilise un code wormhole + handshake post-quantique (SPAKE2 + ML-KEM-768)
+                    pour échanger automatiquement les clés ML-DSA-65 via un canal chiffré.
+                  </p>
+
+                  {/* Cross-network toggle */}
+                  <label style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                    cursor: 'pointer', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={crossNetwork}
+                      onChange={(e) => setCrossNetwork(e.target.checked)}
+                      style={{ accentColor: 'var(--accent)' }}
+                    />
+                    <Globe size={14} />
+                    Réseaux différents (IPv6 cross-network)
+                  </label>
+
+                  <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                    <Button onClick={startPairing} icon={Wifi} style={{ flex: 1 }}>
+                      Générer un code
+                    </Button>
+                  </div>
+
+                  {/* Join section */}
+                  <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--space-3)' }}>
+                    <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: '0 0 var(--space-2) 0' }}>
+                      Ou entrez le code affiché sur l'autre appareil :
+                    </p>
+                    <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                      <input
+                        value={joinCode}
+                        onChange={(e) => setJoinCode(e.target.value)}
+                        placeholder="ex: 42-alpha-beacon-drift"
+                        style={{
+                          flex: 1, padding: 'var(--space-2) var(--space-3)',
+                          borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                          background: 'var(--bg-base)', color: 'var(--text-primary)',
+                          fontFamily: 'var(--font-mono, monospace)', fontSize: 'var(--text-sm)',
+                        }}
+                      />
+                      <Button onClick={joinPairing} disabled={!joinCode.trim()}>
+                        Rejoindre
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Pairing: waiting for joiner (initiator) */}
+              {pairingStep === 'starting' && (
+                <div style={{
+                  padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
+                  background: 'var(--bg-surface)', border: '1px solid var(--accent)',
+                  textAlign: 'center',
+                }}>
+                  <RefreshCw size={24} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite' }} />
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 'var(--space-3) 0 0 0' }}>
+                    Démarrage de l'appairage...
+                  </p>
+                </div>
+              )}
+
+              {pairingStep === 'waiting' && (
+                <div style={{
+                  padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
+                  background: 'var(--bg-surface)', border: '1px solid var(--accent)',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-4)',
+                }}>
+                  <Wifi size={28} style={{ color: 'var(--accent)' }} />
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0, fontSize: 'var(--text-base)' }}>
+                    En attente de l'autre appareil
+                  </p>
+                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0, textAlign: 'center' }}>
+                    Entrez ce code sur l'autre appareil pour l'appairer :
+                  </p>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                    padding: 'var(--space-3) var(--space-4)', borderRadius: 'var(--radius-lg)',
+                    background: 'var(--bg-base)', border: '2px solid var(--accent)',
+                  }}>
+                    <code style={{
+                      fontSize: 'var(--text-lg)', fontWeight: 700, color: 'var(--accent)',
+                      fontFamily: 'var(--font-mono, monospace)', letterSpacing: '0.05em',
+                      wordBreak: 'break-all',
+                    }}>
+                      {pairingCode}
+                    </code>
+                    <button
+                      onClick={copyPairingCode}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        width: 32, height: 32, borderRadius: 'var(--radius-md)',
+                        border: '1px solid var(--border)', background: 'var(--bg-surface)',
+                        cursor: 'pointer', color: 'var(--text-secondary)', flexShrink: 0,
+                      }}
+                      title="Copier le code"
+                    >
+                      {copied ? <Check size={14} style={{ color: 'var(--success, green)' }} /> : <Copy size={14} />}
+                    </button>
+                  </div>
+                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
+                    Le code expire dans 5 minutes.
+                  </p>
+                  <Button variant="ghost" onClick={cancelPairing}>Annuler</Button>
+                </div>
+              )}
+
+              {/* Pairing: joining (joiner side) */}
+              {pairingStep === 'joining' && (
+                <div style={{
+                  padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
+                  background: 'var(--bg-surface)', border: '1px solid var(--accent)',
+                  textAlign: 'center',
+                }}>
+                  <RefreshCw size={24} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite' }} />
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 'var(--space-3) 0 0 0' }}>
+                    Connexion et appairage en cours...
+                  </p>
+                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 'var(--space-2) 0 0 0' }}>
+                    Handshake PQC (SPAKE2 + ML-KEM-768) + échange ML-DSA-65
+                  </p>
+                </div>
+              )}
+
+              {/* Pairing: success */}
+              {pairingStep === 'success' && (
+                <div style={{
+                  padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
+                  background: 'color-mix(in srgb, var(--success, #22c55e) 10%, transparent)',
+                  border: '1px solid var(--success, #22c55e)',
+                  textAlign: 'center',
+                }}>
+                  <Check size={28} style={{ color: 'var(--success, #22c55e)' }} />
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 'var(--space-3) 0 0 0' }}>
+                    Appairage réussi !
+                  </p>
+                  <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', margin: 'var(--space-2) 0 0 0' }}>
+                    Appareil « {pairedDeviceName} » ajouté et synchronisation activée.
+                  </p>
+                  <Button variant="ghost" onClick={cancelPairing} style={{ marginTop: 'var(--space-3)' }}>
+                    Fermer
+                  </Button>
+                </div>
+              )}
+
+              {/* Pairing: error */}
+              {pairingStep === 'error' && (
+                <div style={{
+                  padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
+                  background: 'var(--danger-muted)', border: '1px solid var(--danger)',
+                  textAlign: 'center',
+                }}>
+                  <AlertTriangle size={28} style={{ color: 'var(--danger)' }} />
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 'var(--space-3) 0 0 0' }}>
+                    Échec de l'appairage
+                  </p>
+                  <p style={{ fontSize: 'var(--text-sm)', color: 'var(--danger)', margin: 'var(--space-2) 0 0 0' }}>
+                    {pairingError}
+                  </p>
+                  <Button variant="ghost" onClick={cancelPairing} style={{ marginTop: 'var(--space-3)' }}>
+                    Réessayer
+                  </Button>
+                </div>
+              )}
+
+              {/* Sync devices list */}
+              {syncSettings.enabled && (
+                <div>
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 var(--space-3) 0', fontSize: 'var(--text-sm)' }}>
+                    Appareils autorisés ({syncSettings.devices.length})
+                  </p>
+
+                  {syncSettings.devices.length === 0 && (
+                    <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontStyle: 'italic', margin: 0 }}>
+                      Aucun appareil appairé. Utilisez le bouton ci-dessus pour appairer un appareil.
+                    </p>
+                  )}
+
+                  {syncSettings.devices.map((device) => (
+                    <div
+                      key={device.verifying_key}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                        border: '1px solid var(--border)', marginBottom: 'var(--space-2)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                        <Smartphone size={18} style={{ color: 'var(--accent)' }} />
+                        <div>
+                          <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0, fontSize: 'var(--text-sm)' }}>
+                            {device.name}
+                          </p>
+                          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
+                            Ajouté le {new Date(device.added_at).toLocaleDateString('fr-FR')}
+                            {device.last_sync && ` · Dernière sync: ${new Date(device.last_sync).toLocaleDateString('fr-FR')}`}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => removeSyncDevice(device.verifying_key)}
+                        disabled={syncLoading}
+                        style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          width: 32, height: 32, borderRadius: 'var(--radius-md)',
+                          border: '1px solid var(--danger)', background: 'var(--danger-muted)',
+                          cursor: 'pointer', color: 'var(--danger)',
+                        }}
+                        title="Supprimer"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Mode Isolation */}
+        <div style={card}>
+          <div style={cardHeader}>
+            <ShieldCheck size={20} style={{ color: 'var(--accent)' }} />
+            <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Mode Isolation</h2>
+          </div>
+          <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+            <div style={row}>
+              <div>
+                <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer le mode isolation</p>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
+                  Bloque les transferts réseau et désactive la découverte de pairs
                 </p>
               </div>
-              <button
-                onClick={() => setAutoLock(!autoLock)}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  autoLock ? 'bg-blue-600' : 'bg-gray-200'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    autoLock ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
+              <Toggle on={isolationEnabled} onToggle={async () => {
+                try {
+                  const next = !isolationEnabled
+                  await isolationMode.toggle(next)
+                  setIsolationEnabled(next)
+                  toast(next ? 'Mode isolation activé — transferts bloqués' : 'Mode isolation désactivé', next ? 'warning' : 'success')
+                } catch (err: any) {
+                  toast(err?.toString() || 'Erreur mode isolation', 'error')
+                }
+              }} />
             </div>
-
-            {/* Délai de verrouillage */}
-            {autoLock && (
-              <div>
-                <label className="block font-medium text-gray-900 dark:text-white mb-2">
-                  Délai de verrouillage (minutes)
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="60"
-                  value={lockTimeout}
-                  onChange={(e) => setLockTimeout(parseInt(e.target.value) || 15)}
-                  className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
-                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
-                    focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
+            {isolationEnabled && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                background: 'var(--warning-muted)', border: '1px solid var(--warning)',
+                fontSize: 'var(--text-xs)', color: 'var(--warning)',
+              }}>
+                <AlertTriangle size={14} />
+                Les transferts et la synchronisation sont désactivés en mode isolation.
               </div>
             )}
           </div>
         </div>
 
-        {/* Base de données */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm mb-6">
-          <div className="p-6 border-b border-gray-200 dark:border-gray-700">
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-              <Database className="w-6 h-6" />
-              Base de données
-            </h2>
+        {/* Logs Signés */}
+        <div style={card}>
+          <div style={cardHeader}>
+            <FileText size={20} style={{ color: 'var(--accent)' }} />
+            <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Logs Signés</h2>
           </div>
-          <div className="p-6 space-y-4">
-            <button
-              onClick={handleExport}
-              className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 
-                transition-colors flex items-center justify-center gap-2"
-            >
-              <Download className="w-5 h-5" />
-              Exporter la base de données
-            </button>
-            <button
-              onClick={handleClearCache}
-              className="w-full px-4 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 
-                transition-colors flex items-center justify-center gap-2"
-            >
-              <Trash2 className="w-5 h-5" />
-              Nettoyer le cache
-            </button>
+          <div style={cardBody}>
+            <div style={row}>
+              <div>
+                <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer les logs signés</p>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
+                  Chaque action est signée cryptographiquement (ML-DSA-65) pour garantir l'intégrité de l'audit
+                </p>
+              </div>
+              <Toggle on={signedLoggingEnabled} onToggle={async () => {
+                try {
+                  const next = !signedLoggingEnabled
+                  await signedLogging.toggle(next)
+                  setSignedLoggingEnabled(next)
+                  toast(next ? 'Logs signés activés' : 'Logs signés désactivés', 'success')
+                } catch (err: any) {
+                  toast(err?.toString() || 'Erreur logs signés', 'error')
+                }
+              }} />
+            </div>
           </div>
         </div>
 
-        {/* Bouton de sauvegarde */}
-        <div className="flex justify-end">
-          <button
-            onClick={handleSaveSettings}
-            className="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 
-              transition-colors flex items-center gap-2 font-medium"
-          >
-            <Save className="w-5 h-5" />
-            Enregistrer les paramètres
-          </button>
+        {/* Enclave Sécurisée */}
+        {enclaveStatus && (
+          <div style={card}>
+            <div style={cardHeader}>
+              <Server size={20} style={{ color: 'var(--accent)' }} />
+              <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Enclave Sécurisée</h2>
+            </div>
+            <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>Plateforme</span>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{enclaveStatus.platform}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>Type d'enclave</span>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 500, textAlign: 'right', maxWidth: '60%' }}>{enclaveStatus.enclave_type}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>Protection matérielle</span>
+                  <span style={{
+                    color: enclaveStatus.hardware_backed ? 'var(--success)' : 'var(--warning)',
+                    fontWeight: 500,
+                  }}>
+                    {enclaveStatus.hardware_backed ? 'Oui (Secure Enclave)' : 'Non (logiciel)'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>Sync iCloud désactivée</span>
+                  <span style={{
+                    color: enclaveStatus.sync_disabled ? 'var(--success)' : 'var(--warning)',
+                    fontWeight: 500,
+                  }}>
+                    {enclaveStatus.sync_disabled ? 'Oui' : 'Non garanti'}
+                  </span>
+                </div>
+              </div>
+              {enclaveStatus.notes && (
+                <div style={{
+                  padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                  background: 'color-mix(in srgb, var(--accent) 6%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--accent) 15%, transparent)',
+                  fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)',
+                  lineHeight: 1.5,
+                }}>
+                  {enclaveStatus.notes}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Save */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Button icon={Save} onClick={save}>Enregistrer les paramètres</Button>
         </div>
       </div>
-    </DashboardLayout>
+    </AppShell>
   )
 }

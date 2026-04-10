@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSFaceIDUsageDescription</key>
+    <string>FluXlock utilise Touch ID pour déverrouiller rapidement votre coffre-fort sécurisé.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>FluXlock a besoin d'accéder au réseau local pour découvrir les appareils à proximité et effectuer des transferts sécurisés de mots de passe.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_fluxlock-transfer._tcp</string>
+        <string>_fluxlock-recv._tcp</string>
+    </array>
+</dict>
+</plist>

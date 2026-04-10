@@ -2,7 +2,7 @@
 
 use x25519_dalek::{PublicKey, EphemeralSecret};
 use rand::rngs::OsRng;
-use crate::errors::{CryptoError, Result};
+use crate::errors::Result;
 use crate::secure_memory::SecretBytes;
 
 /// Génère une paire de clés X25519

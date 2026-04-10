@@ -78,12 +78,8 @@ pub enum CryptoError {
     HsmError(String),
 }
 
-/// Conversion depuis ring::error::Unspecified
-impl From<ring::error::Unspecified> for CryptoError {
-    fn from(_: ring::error::Unspecified) -> Self {
-        CryptoError::Generic("Ring cryptography operation failed".to_string())
-    }
-}
+// Note: aes_gcm::Error est le même type que chacha20poly1305::Error (aead::Error).
+// La conversion est couverte par impl From<chacha20poly1305::Error> ci-dessous.
 
 /// Conversion depuis argon2::Error
 impl From<argon2::Error> for CryptoError {

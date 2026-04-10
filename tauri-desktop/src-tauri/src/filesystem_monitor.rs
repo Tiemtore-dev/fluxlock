@@ -1,16 +1,26 @@
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::thread;
-use serde::{Deserialize, Serialize};
+
 use crate::security_monitor::get_security_monitor;
+use once_cell::sync::Lazy;
+
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            eprintln!($($arg)*);
+        }
+    }
+}
 
 // ========== STRUCTURES DE DONNÉES ==========
 
 /// Activité suspecte détectée sur un fichier
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SuspiciousActivity {
     pub file_path: String,
@@ -20,6 +30,7 @@ pub struct SuspiciousActivity {
 }
 
 /// Types d'activités suspectes
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActivityType {
     MassEncryption,        // Chiffrement massif de fichiers
@@ -30,6 +41,7 @@ pub enum ActivityType {
     UnauthorizedAccess,    // Accès à zones sensibles
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThreatSeverity {
     Low,
@@ -55,6 +67,7 @@ pub struct MonitoringStats {
 }
 
 /// Structure interne pour suivre l'activité d'un fichier
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct FileActivity {
     path: String,
@@ -74,6 +87,10 @@ pub struct FilesystemMonitor {
     // Canaux de communication
     event_sender: Option<Sender<Event>>,
     event_receiver: Option<Receiver<Event>>,
+    
+    // F03 — Watcher stocké pour un arrêt propre (au lieu de mem::forget)
+    #[allow(dead_code)]
+    _watcher: Option<RecommendedWatcher>,
     
     // Configuration
     monitored_paths: Vec<PathBuf>,
@@ -135,6 +152,7 @@ impl FilesystemMonitor {
             monitoring_enabled: Arc::new(Mutex::new(true)),  // Activé par défaut
             event_sender: Some(sender),
             event_receiver: Some(receiver),
+            _watcher: None,
             monitored_paths: Vec::new(),
             suspicious_extensions: RANSOMWARE_EXTENSIONS.iter()
                 .map(|s| s.to_string())
@@ -144,21 +162,23 @@ impl FilesystemMonitor {
     
     /// Démarre la surveillance des répertoires critiques du système
     pub fn start_monitoring(&mut self) -> Result<(), String> {
-        println!("🔍 Démarrage de la surveillance du système de fichiers...");
+        debug_log!("🔍 Démarrage de la surveillance du système de fichiers...");
         
         // Déterminer les répertoires à surveiller selon l'OS
         self.monitored_paths = Self::get_critical_paths();
         
         // Mettre à jour les stats
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.monitored_paths = self.monitored_paths.iter()
                 .map(|p| p.display().to_string())
                 .collect();
         }
         
         // Créer le watcher
-        let sender = self.event_sender.clone().unwrap();
+        let sender = self.event_sender.clone()
+            .ok_or("Event sender non initialisé")?;
         let mut watcher: RecommendedWatcher = Watcher::new(
             move |res: Result<Event, notify::Error>| {
                 if let Ok(event) = res {
@@ -173,8 +193,8 @@ impl FilesystemMonitor {
         for path in &self.monitored_paths {
             if path.exists() {
                 match watcher.watch(path, RecursiveMode::Recursive) {
-                    Ok(_) => println!("  ✅ Surveillance: {}", path.display()),
-                    Err(e) => println!("  ⚠️  Impossible de surveiller {}: {}", path.display(), e),
+                    Ok(_) => debug_log!("  ✅ Surveillance: {}", path.display()),
+                    Err(e) => debug_log!("  ⚠️  Impossible de surveiller {}: {}", path.display(), e),
                 }
             }
         }
@@ -182,15 +202,16 @@ impl FilesystemMonitor {
         // Démarrer le thread de traitement des événements
         self.start_event_processor();
         
-        // Garder le watcher en vie (leak intentionnelle pour surveillance permanente)
-        std::mem::forget(watcher);
+        // F03 — Stocker le watcher pour un arrêt propre (au lieu de mem::forget)
+        self._watcher = Some(watcher);
         
-        println!("✅ Surveillance active sur {} répertoires", self.monitored_paths.len());
+        debug_log!("✅ Surveillance active sur {} répertoires", self.monitored_paths.len());
         Ok(())
     }
     
     /// Retourne les chemins critiques à surveiller selon l'OS
     fn get_critical_paths() -> Vec<PathBuf> {
+        #[allow(unused_mut)]
         let mut paths = Vec::new();
         
         #[cfg(target_os = "macos")]
@@ -245,7 +266,11 @@ impl FilesystemMonitor {
     
     /// Démarre le thread de traitement des événements
     fn start_event_processor(&self) {
-        let receiver = self.event_receiver.as_ref().unwrap().clone();
+        let Some(receiver) = self.event_receiver.as_ref() else {
+            debug_log!("Event receiver non initialisé");
+            return;
+        };
+        let receiver = receiver.clone();
         let stats = Arc::clone(&self.stats);
         let file_activities = Arc::clone(&self.file_activities);
         let suspicious_activities = Arc::clone(&self.suspicious_activities);
@@ -254,13 +279,14 @@ impl FilesystemMonitor {
         let suspicious_extensions = self.suspicious_extensions.clone();
         
         thread::spawn(move || {
-            println!("🔄 Thread de surveillance démarré");
+            debug_log!("🔄 Thread de surveillance démarré");
             
             loop {
                 match receiver.recv_timeout(Duration::from_secs(1)) {
                     Ok(event) => {
                         // Vérifier si la surveillance est activée
-                        if !*monitoring_enabled.lock().unwrap() {
+                        if !*monitoring_enabled.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) {
                             continue;
                         }
                         
@@ -293,7 +319,7 @@ impl FilesystemMonitor {
     ) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs();
         
         // Extraire les chemins affectés
@@ -307,14 +333,15 @@ impl FilesystemMonitor {
         
         // Mettre à jour les statistiques
         {
-            let mut stats = stats.lock().unwrap();
+            let mut stats = stats.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.total_events += 1;
             
             match event.kind {
-                EventKind::Modify(_) => stats.modifications += 1,
                 EventKind::Create(_) => stats.creations += 1,
                 EventKind::Remove(_) => stats.deletions += 1,
                 EventKind::Modify(notify::event::ModifyKind::Name(_)) => stats.renames += 1,
+                EventKind::Modify(_) => stats.modifications += 1,
                 _ => {}
             }
         }
@@ -336,7 +363,8 @@ impl FilesystemMonitor {
             }
             
             // 2. Suivre l'activité du fichier
-            let mut activities = file_activities.lock().unwrap();
+            let mut activities = file_activities.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let activity = activities.entry(path.clone()).or_insert(FileActivity {
                 path: path.clone(),
                 last_modified: now,
@@ -408,7 +436,8 @@ impl FilesystemMonitor {
         
         // Enregistrer l'activité suspecte
         {
-            let mut activities = suspicious_activities.lock().unwrap();
+            let mut activities = suspicious_activities.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             activities.push(activity.clone());
             
             // Garder seulement les 100 dernières
@@ -419,7 +448,8 @@ impl FilesystemMonitor {
         
         // Mettre à jour les stats
         {
-            let mut stats = stats.lock().unwrap();
+            let mut stats = stats.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             
             match activity_type {
                 ActivityType::SuspiciousExtension => stats.suspicious_extensions += 1,
@@ -445,11 +475,12 @@ impl FilesystemMonitor {
         
         // Activer le mode lecture seule si menace critique
         if severity == ThreatSeverity::Critical {
-            let mut readonly = readonly_mode.lock().unwrap();
+            let mut readonly = readonly_mode.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !*readonly {
                 *readonly = true;
-                println!("🚨 MODE LECTURE SEULE ACTIVÉ - Menace ransomware détectée: {:?}", activity_type);
-                println!("   Fichier: {}", path);
+                debug_log!("🚨 MODE LECTURE SEULE ACTIVÉ - Menace ransomware détectée: {:?}", activity_type);
+                debug_log!("   Fichier: {}", path);
                 
                 // SYNCHRONISER avec security_monitor en créant un runtime Tokio
                 let monitor = get_security_monitor();
@@ -458,7 +489,10 @@ impl FilesystemMonitor {
                 
                 // Utiliser un runtime tokio pour l'appel async
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let Ok(rt) = tokio::runtime::Runtime::new() else {
+                        debug_log!("❌ Erreur création runtime Tokio");
+                        return;
+                    };
                     rt.block_on(async {
                         let _ = monitor.activate_readonly_for_ransomware(
                             &format!("Détection filesystem: {:?} - {}", activity_type_owned, path_owned)
@@ -477,7 +511,8 @@ impl FilesystemMonitor {
         suspicious_activities: &Arc<Mutex<Vec<SuspiciousActivity>>>,
         readonly_mode: &Arc<Mutex<bool>>,
     ) {
-        let activities = file_activities.lock().unwrap();
+        let activities = file_activities.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         
         // Compter les fichiers modifiés récemment (30 dernières secondes)
         let recent_modifications = activities.values()
@@ -501,91 +536,96 @@ impl FilesystemMonitor {
     
     /// Retourne les statistiques actuelles
     pub fn get_stats(&self) -> MonitoringStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
     
     /// Vérifie si le mode lecture seule est actif
+    #[allow(dead_code)]
     pub fn is_readonly(&self) -> bool {
-        *self.readonly_mode.lock().unwrap()
+        *self.readonly_mode.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
     
     /// Désactive le mode lecture seule
     pub fn disable_readonly(&self) {
-        let mut readonly = self.readonly_mode.lock().unwrap();
+        let mut readonly = self.readonly_mode.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *readonly = false;
         
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.threat_level = "NONE".to_string();
         stats.active_threats.clear();
         
-        println!("✅ Mode lecture seule désactivé");
+        debug_log!("✅ Mode lecture seule désactivé");
     }
     
     /// Active la surveillance des fichiers
     pub fn enable_monitoring(&self) {
-        let mut enabled = self.monitoring_enabled.lock().unwrap();
+        let mut enabled = self.monitoring_enabled.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *enabled = true;
         
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.monitoring_enabled = true;
         
-        println!("🔍 Surveillance des fichiers ACTIVÉE");
+        debug_log!("🔍 Surveillance des fichiers ACTIVÉE");
     }
     
     /// Désactive la surveillance des fichiers
     pub fn disable_monitoring(&self) {
-        let mut enabled = self.monitoring_enabled.lock().unwrap();
+        let mut enabled = self.monitoring_enabled.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *enabled = false;
         
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.monitoring_enabled = false;
         
-        println!("⏸️  Surveillance des fichiers DÉSACTIVÉE");
+        debug_log!("⏸️  Surveillance des fichiers DÉSACTIVÉE");
     }
     
     /// Vérifie si la surveillance est active
+    #[allow(dead_code)]
     pub fn is_monitoring_enabled(&self) -> bool {
-        *self.monitoring_enabled.lock().unwrap()
+        *self.monitoring_enabled.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
     
     /// Réinitialise toutes les statistiques
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.suspicious_extensions = 0;
         stats.rapid_changes = 0;
         stats.threat_level = "NONE".to_string();
         stats.active_threats.clear();
         
-        let mut activities = self.file_activities.lock().unwrap();
+        let mut activities = self.file_activities.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         activities.clear();
         
-        let mut suspicious = self.suspicious_activities.lock().unwrap();
+        let mut suspicious = self.suspicious_activities.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         suspicious.clear();
         
-        println!("🔄 Statistiques réinitialisées");
+        debug_log!("🔄 Statistiques réinitialisées");
     }
 }
 
-// ========== SINGLETON GLOBAL ==========
+// ========== SINGLETON GLOBAL (THREAD-SAFE) ==========
 
-static mut FILESYSTEM_MONITOR: Option<Arc<Mutex<FilesystemMonitor>>> = None;
-
-pub fn initialize_filesystem_monitor() {
-    unsafe {
-        if FILESYSTEM_MONITOR.is_none() {
-            let mut monitor = FilesystemMonitor::new();
-            if let Err(e) = monitor.start_monitoring() {
-                eprintln!("❌ Erreur démarrage surveillance: {}", e);
-            }
-            FILESYSTEM_MONITOR = Some(Arc::new(Mutex::new(monitor)));
-        }
+static FILESYSTEM_MONITOR: Lazy<Arc<Mutex<FilesystemMonitor>>> = Lazy::new(|| {
+    let mut monitor = FilesystemMonitor::new();
+    if let Err(e) = monitor.start_monitoring() {
+        eprintln!("❌ Erreur démarrage surveillance: {}", e);
     }
-}
+    Arc::new(Mutex::new(monitor))
+});
 
 pub fn get_filesystem_monitor() -> Arc<Mutex<FilesystemMonitor>> {
-    unsafe {
-        FILESYSTEM_MONITOR.as_ref()
-            .expect("Filesystem monitor non initialisé")
-            .clone()
-    }
+    FILESYSTEM_MONITOR.clone()
 }

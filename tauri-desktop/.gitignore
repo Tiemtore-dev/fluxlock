@@ -26,3 +26,8 @@ Thumbs.db
 # Env
 .env.local
 .env.*.local
+.env.signing
+
+# Tauri signing keys (IMPORTANT - Ne jamais commiter les clés privées)
+*.key
+!src-tauri/icons/*.key

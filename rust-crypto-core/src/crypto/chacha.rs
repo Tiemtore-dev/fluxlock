@@ -8,6 +8,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce as ChaNonce,
 };
 use rand::RngCore;
+use rand::rngs::OsRng;
 use crate::errors::{CryptoError, Result};
 use crate::secure_memory::EncryptedData;
 
@@ -41,7 +42,7 @@ impl ChaCha20Cipher {
     /// Génère un nonce aléatoire
     fn generate_nonce(&self) -> Vec<u8> {
         let mut nonce = vec![0u8; NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce);
+        OsRng.fill_bytes(&mut nonce);
         nonce
     }
 

@@ -1,255 +1,118 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { 
-  Share2, 
-  Search, 
-  Trash2, 
-  Clock, 
-  Mail, 
-  FileText,
-  CheckCircle,
-  XCircle,
-  Calendar,
-  Eye
-} from 'lucide-react'
-import { tauriAPI, FileShare } from '../lib/tauri-api'
-import DashboardLayout from '../components/DashboardLayout'
+import { Share2, Trash2, Clock, Mail, FileText, Eye, Calendar, Copy } from 'lucide-react'
+import { AppShell } from '../design-system/layouts'
+import { Button, Badge, Spinner } from '../design-system/atoms'
+import { SearchBar, EmptyState } from '../design-system/molecules'
+import { useToast } from '../design-system/organisms'
+import { shares as sharesService, type FileShare } from '../lib/vault-service'
+
+const fmt = (d: string) => new Date(d).toLocaleDateString('fr-FR', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+const isExpired = (d: string) => new Date(d) < new Date()
+const remaining = (d: string) => {
+  const diff = new Date(d).getTime() - Date.now()
+  if (diff < 0) return 'Expiré'
+  const days = Math.floor(diff / 864e5)
+  const hours = Math.floor((diff % 864e5) / 36e5)
+  if (days > 0) return `${days} jour${days > 1 ? 's' : ''}`
+  if (hours > 0) return `${hours} heure${hours > 1 ? 's' : ''}`
+  return "Moins d'1 heure"
+}
 
 export default function SharesPage() {
-  const [searchQuery, setSearchQuery] = useState('')
-  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const [search, setSearch] = useState('')
+  const qc = useQueryClient()
 
-  // Récupérer tous les partages
-  const { data: shares = [], isLoading } = useQuery({
+  const { data: allShares = [], isLoading } = useQuery({
     queryKey: ['userShares'],
-    queryFn: async () => {
-      return await tauriAPI.getUserShares()
-    }
+    queryFn: sharesService.list,
   })
 
-  // Mutation pour révoquer un partage
-  const revokeShareMutation = useMutation({
-    mutationFn: (shareId: number) => tauriAPI.revokeShare(shareId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['userShares'] })
-      alert('✅ Partage révoqué avec succès!')
-    },
-    onError: (error) => {
-      console.error('Erreur révocation partage:', error)
-      alert('❌ Erreur lors de la révocation du partage')
-    }
+  const revokeMut = useMutation({
+    mutationFn: (id: number) => sharesService.revoke(id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['userShares'] }); toast('Partage révoqué', 'success') },
+    onError: () => toast('Erreur lors de la révocation', 'error'),
   })
 
-  // Révoquer un partage avec confirmation
-  const handleRevoke = (share: FileShare) => {
-    if (confirm(`Voulez-vous vraiment révoquer le partage avec ${share.recipient_email} ?`)) {
-      revokeShareMutation.mutate(share.id)
-    }
-  }
+  const handleRevoke = (s: FileShare) => { if (confirm(`Révoquer le partage avec ${s.recipient_email} ?`)) revokeMut.mutate(s.id) }
+  const copyLink = async (token: string) => { try { await navigator.clipboard.writeText(`securevault://share/${token}`); toast('Lien copié', 'success') } catch { toast('Erreur copie', 'error') } }
 
-  // Copier le lien de partage
-  const copyShareLink = async (token: string) => {
-    try {
-      const link = `securevault://share/${token}`
-      await navigator.clipboard.writeText(link)
-      alert('✅ Lien de partage copié!')
-    } catch (error) {
-      console.error('Erreur copie:', error)
-      alert('❌ Erreur lors de la copie')
-    }
-  }
-
-  // Filtrer les partages
-  const filteredShares = shares.filter(share => 
-    share.recipient_email.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (share.filename && share.filename.toLowerCase().includes(searchQuery.toLowerCase()))
+  const filtered = allShares.filter(s =>
+    s.recipient_email.toLowerCase().includes(search.toLowerCase()) ||
+    (s.filename && s.filename.toLowerCase().includes(search.toLowerCase()))
   )
 
-  // Vérifier si un partage est expiré
-  const isExpired = (expiresAt: string): boolean => {
-    return new Date(expiresAt) < new Date()
-  }
-
-  // Formater la date
-  const formatDate = (dateString: string): string => {
-    return new Date(dateString).toLocaleDateString('fr-FR', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    })
-  }
-
-  // Calculer le temps restant
-  const getTimeRemaining = (expiresAt: string): string => {
-    const now = new Date()
-    const expires = new Date(expiresAt)
-    const diff = expires.getTime() - now.getTime()
-    
-    if (diff < 0) return 'Expiré'
-    
-    const days = Math.floor(diff / (1000 * 60 * 60 * 24))
-    const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))
-    
-    if (days > 0) return `${days} jour${days > 1 ? 's' : ''}`
-    if (hours > 0) return `${hours} heure${hours > 1 ? 's' : ''}`
-    return 'Moins d\'1 heure'
-  }
+  const card: React.CSSProperties = { background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)' }
+  const meta: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }
 
   return (
-    <DashboardLayout>
-      <div className="p-6 max-w-7xl mx-auto">
+    <AppShell>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div className="flex items-center justify-between mb-8">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <h1 className="text-3xl font-bold text-gray-900 dark:text-white flex items-center gap-3">
-              <Share2 className="w-8 h-8 text-blue-600" />
-              Mes Partages
+            <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', margin: 0 }}>
+              <Share2 size={28} style={{ color: 'var(--accent)' }} /> Mes Partages
             </h1>
-            <p className="text-gray-600 dark:text-gray-400 mt-1">
-              Gérez les fichiers que vous avez partagés
-            </p>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>Gérez les fichiers partagés</p>
           </div>
-          <div className="text-right">
-            <div className="text-2xl font-bold text-gray-900 dark:text-white">
-              {filteredShares.length}
-            </div>
-            <div className="text-sm text-gray-500 dark:text-gray-400">
-              {filteredShares.length === 1 ? 'Partage actif' : 'Partages actifs'}
-            </div>
+          <div style={{ textAlign: 'right' }}>
+            <p style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>{filtered.length}</p>
+            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>{filtered.length === 1 ? 'Partage actif' : 'Partages actifs'}</p>
           </div>
         </div>
 
-        {/* Search Bar */}
-        <div className="mb-6">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-            <input
-              type="text"
-              placeholder="Rechercher par email ou nom de fichier..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-        </div>
+        <SearchBar value={search} onChange={setSearch} placeholder="Rechercher par email ou nom de fichier…" />
 
-        {/* Shares List */}
         {isLoading ? (
-          <div className="text-center py-12">
-            <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            <p className="mt-2 text-gray-600 dark:text-gray-400">Chargement...</p>
-          </div>
-        ) : filteredShares.length === 0 ? (
-          <div className="text-center py-12 bg-gray-50 dark:bg-gray-800 rounded-lg">
-            <Share2 className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
-              {searchQuery ? 'Aucun partage trouvé' : 'Aucun partage actif'}
-            </h3>
-            <p className="text-gray-600 dark:text-gray-400">
-              {searchQuery 
-                ? 'Essayez avec d\'autres termes de recherche' 
-                : 'Partagez un fichier depuis la page Fichiers pour commencer'}
-            </p>
-          </div>
+          <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-12)' }}><Spinner size={32} /></div>
+        ) : filtered.length === 0 ? (
+          <EmptyState icon={Share2} title={search ? 'Aucun partage trouvé' : 'Aucun partage actif'} description={search ? "Essayez d'autres termes" : 'Partagez un fichier depuis la page Fichiers'} />
         ) : (
-          <div className="grid gap-4">
-            {filteredShares.map((share) => {
-              const expired = isExpired(share.expires_at)
-              
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+            {filtered.map(s => {
+              const exp = isExpired(s.expires_at)
               return (
-                <div 
-                  key={share.id}
-                  className={`bg-white dark:bg-gray-800 rounded-lg border ${
-                    expired 
-                      ? 'border-red-200 dark:border-red-800' 
-                      : 'border-gray-200 dark:border-gray-700'
-                  } p-6 hover:shadow-md transition-shadow`}
-                >
-                  <div className="flex items-start justify-between">
-                    {/* Left side - Info */}
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-3">
-                        <FileText className="w-5 h-5 text-blue-600" />
-                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                          {share.filename || `Fichier #${share.file_id}`}
-                        </h3>
-                        {expired ? (
-                          <span className="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 text-xs font-medium rounded-full flex items-center gap-1">
-                            <XCircle className="w-3 h-3" />
-                            Expiré
-                          </span>
-                        ) : (
-                          <span className="px-2 py-1 bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 text-xs font-medium rounded-full flex items-center gap-1">
-                            <CheckCircle className="w-3 h-3" />
-                            Actif
-                          </span>
-                        )}
+                <div key={s.id} style={{ ...card, borderColor: exp ? 'var(--danger)' : 'var(--border)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <div style={{ flex: 1 }}>
+                      {/* Title row */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-3)' }}>
+                        <FileText size={18} style={{ color: 'var(--accent)' }} />
+                        <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)' }}>
+                          {s.filename || `Fichier #${s.file_id}`}
+                        </span>
+                        <Badge variant={exp ? 'danger' : 'success'} size="sm">{exp ? 'Expiré' : 'Actif'}</Badge>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-4 text-sm">
-                        {/* Destinataire */}
-                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
-                          <Mail className="w-4 h-4" />
-                          <span className="font-medium">Destinataire:</span>
-                          <span>{share.recipient_email}</span>
-                        </div>
-
-                        {/* Accès */}
-                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
-                          <Eye className="w-4 h-4" />
-                          <span className="font-medium">Accès:</span>
-                          <span>{share.access_count} fois {share.accessed ? '✓' : ''}</span>
-                        </div>
-
-                        {/* Date de création */}
-                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
-                          <Calendar className="w-4 h-4" />
-                          <span className="font-medium">Créé:</span>
-                          <span>{formatDate(share.created_at)}</span>
-                        </div>
-
-                        {/* Expiration */}
-                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
-                          <Clock className="w-4 h-4" />
-                          <span className="font-medium">
-                            {expired ? 'Expiré' : 'Expire'} dans:
-                          </span>
-                          <span className={expired ? 'text-red-600 dark:text-red-400 font-semibold' : ''}>
-                            {getTimeRemaining(share.expires_at)}
-                          </span>
-                        </div>
+                      {/* Meta grid */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
+                        <div style={meta}><Mail size={14} /> <strong>Dest.:</strong> {s.recipient_email}</div>
+                        <div style={meta}><Eye size={14} /> <strong>Accès:</strong> {s.access_count} fois</div>
+                        <div style={meta}><Calendar size={14} /> <strong>Créé:</strong> {fmt(s.created_at)}</div>
+                        <div style={{ ...meta, color: exp ? 'var(--danger)' : undefined }}><Clock size={14} /> <strong>{exp ? 'Expiré' : 'Expire'}:</strong> {remaining(s.expires_at)}</div>
                       </div>
 
-                      {/* Token (masqué) */}
-                      <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-gray-500 dark:text-gray-400">Token:</span>
-                          <code className="text-xs bg-gray-100 dark:bg-gray-900 px-2 py-1 rounded font-mono text-gray-700 dark:text-gray-300">
-                            {share.share_token.substring(0, 20)}...
-                          </code>
-                          <button
-                            onClick={() => copyShareLink(share.share_token)}
-                            className="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-                          >
-                            Copier le lien
-                          </button>
-                        </div>
+                      {/* Token */}
+                      <div style={{ marginTop: 'var(--space-3)', paddingTop: 'var(--space-3)', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>Token:</span>
+                        <code style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 'var(--radius-sm)' }}>
+                          {s.share_token.substring(0, 20)}…
+                        </code>
+                        <button onClick={() => copyLink(s.share_token)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--text-xs)' }}>
+                          <Copy size={12} /> Copier
+                        </button>
                       </div>
                     </div>
 
-                    {/* Right side - Actions */}
-                    <div className="ml-4">
-                      <button
-                        onClick={() => handleRevoke(share)}
-                        disabled={revokeShareMutation.isPending}
-                        className="p-2 text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-200 hover:bg-red-50 dark:hover:bg-red-900/50 rounded transition-colors disabled:opacity-50"
-                        title="Révoquer le partage"
-                      >
-                        <Trash2 className="w-5 h-5" />
-                      </button>
-                    </div>
+                    {/* Revoke */}
+                    <button onClick={() => handleRevoke(s)} disabled={revokeMut.isPending} title="Révoquer" style={{
+                      background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger)', padding: 'var(--space-2)', borderRadius: 'var(--radius-md)',
+                      opacity: revokeMut.isPending ? 0.5 : 1,
+                    }}>
+                      <Trash2 size={18} />
+                    </button>
                   </div>
                 </div>
               )
@@ -257,6 +120,6 @@ export default function SharesPage() {
           </div>
         )}
       </div>
-    </DashboardLayout>
+    </AppShell>
   )
 }

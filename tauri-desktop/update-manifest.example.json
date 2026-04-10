@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "notes": "FluXlock v2.0.0 - Première version stable\n\n🔒 Fonctionnalités de sécurité:\n- Chiffrement AES-256-GCM\n- Protection anti-brute force\n- Détection ransomware\n- Système de menaces avancé\n\n🚀 Améliorations:\n- Interface utilisateur modernisée\n- Performance optimisée\n- Backup/restore intégré\n\n📝 Corrections:\n- Nettoyage du code (30% réduit)\n- Stabilité améliorée\n- Tests validés",
+  "pub_date": "2024-12-02T23:00:00Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSNDc1RHJDQld6bFlUWXkrODZsdnhhd2c4djhQbEhuWTB1SW1hTWU1OWhPZzJPeE5yeGV6OXErTEw5NVFpRSsyeXFTUW41SXk2RE5ySzJ1ZWxZdDFUblBUSUExM01RdlFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzY0NzE0ODg5CWZpbGU6Rmx1WGxvY2suYXBwLnRhci5nego3QWR5OTlhVk81cjRlT0xMTVlndy9mN0ZtZUZoSXhBZkNoMlE4cUxqMXp3SlEyZWJWbVkvUzByQmZuVS9CczNNWFFjN1dVclVBRGxLM3VwelZxNmlEQT09Cg==",
+      "url": "https://releases.fluxlock.example.com/FluXlock_2.0.0_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "SIGNATURE_POUR_INTEL_MAC",
+      "url": "https://releases.fluxlock.example.com/FluXlock_2.0.0_x64.app.tar.gz"
+    },
+    "linux-x86_64": {
+      "signature": "SIGNATURE_POUR_LINUX",
+      "url": "https://releases.fluxlock.example.com/FluXlock_2.0.0_amd64.AppImage.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "SIGNATURE_POUR_WINDOWS",
+      "url": "https://releases.fluxlock.example.com/FluXlock_2.0.0_x64.msi.zip"
+    }
+  }
+}

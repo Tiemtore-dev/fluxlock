@@ -4,7 +4,6 @@
 //! de manière sécurisée, avec effacement automatique de la mémoire.
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use secrecy::{ExposeSecret, Secret};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -41,9 +40,9 @@ impl SecretBytes {
     }
 
     /// Convertit en Vec<u8> (consomme self)
-    pub fn into_vec(mut self) -> Vec<u8> {
-        let vec = std::mem::take(&mut self.0);
-        vec
+    /// ⚠️ Le Vec retourné est enveloppé dans Zeroizing pour effacement automatique
+    pub fn into_vec(mut self) -> zeroize::Zeroizing<Vec<u8>> {
+        zeroize::Zeroizing::new(std::mem::take(&mut self.0))
     }
 
     /// Clone sécurisé des données
@@ -185,7 +184,7 @@ impl CryptoKey {
         };
 
         let mut key = vec![0u8; key_size];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rngs::OsRng.fill_bytes(&mut key);
 
         Ok(CryptoKey::new(key, algorithm))
     }

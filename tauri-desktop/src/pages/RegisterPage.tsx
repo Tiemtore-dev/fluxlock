@@ -1,229 +1,148 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Lock, Mail, User, AlertTriangle } from 'lucide-react'
-import { tauriAPI } from '../lib/tauri-api'
+import { Lock, Mail, User, AlertTriangle, UserPlus } from 'lucide-react'
+import { auth } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
+import { Button, Input, Spinner } from '../design-system/atoms'
+import { PasswordStrength } from '../design-system/molecules'
 
 export default function RegisterPage() {
   const navigate = useNavigate()
   const setAuth = useAuthStore((state) => state.setAuth)
-  
-  const [formData, setFormData] = useState({
-    username: '',
-    email: '',
-    password: '',
-    confirmPassword: '',
-  })
+
+  const [username, setUsername] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [hasUser, setHasUser] = useState(false)
   const [checkingUser, setCheckingUser] = useState(true)
 
-  // Vérifier s'il y a déjà un utilisateur au chargement
   useEffect(() => {
-    const checkExistingUser = async () => {
-      try {
-        const exists = await tauriAPI.hasExistingUser()
-        setHasUser(exists)
-      } catch (err) {
-        console.error('Erreur vérification utilisateur:', err)
-      } finally {
-        setCheckingUser(false)
-      }
-    }
-
-    checkExistingUser()
+    auth.hasExistingUser().then((exists) => {
+      setHasUser(exists)
+      setCheckingUser(false)
+    })
   }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
-
-    // Validation
-    if (formData.password !== formData.confirmPassword) {
-      setError('Les mots de passe ne correspondent pas')
-      return
-    }
-
-    if (formData.password.length < 12) {
-      setError('Le mot de passe doit contenir au moins 12 caractères')
-      return
-    }
+    if (password !== confirmPassword) { setError('Les mots de passe ne correspondent pas'); return }
+    if (password.length < 12) { setError('Le mot de passe doit contenir au moins 12 caractères'); return }
 
     setIsLoading(true)
     try {
-      const response = await tauriAPI.register(
-        formData.username,
-        formData.email,
-        formData.password
-      )
-
-      if (response.success && response.token) {
-        // Créer un objet utilisateur pour le store
-        const user = {
-          id: response.user_id?.toString() || '1',
-          username: formData.username,
-          email: formData.email
-        }
-        
-        setAuth(user, response.token, response.token)
+      const res = await auth.register(username, email, password)
+      if (res.success && res.token) {
+        setAuth({ id: res.user_id?.toString() || '1', username, email }, res.token, res.token)
         navigate('/')
       } else {
-        setError(response.message || 'Erreur lors de l\'inscription')
+        setError(res.message || "Erreur lors de l'inscription")
       }
     } catch (err: any) {
-      setError(err.message || 'Erreur lors de l\'inscription')
+      setError(err.message || "Erreur lors de l'inscription")
     } finally {
       setIsLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-500 to-primary-700 p-4">
-      <div className="card max-w-md w-full">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-primary-100 rounded-full mb-4">
-            <Lock className="w-8 h-8 text-primary-600" />
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--bg-void)',
+      padding: 'var(--space-6)',
+    }}>
+      <div className="animate-fade-in" style={{ width: '100%', maxWidth: 400 }}>
+        {/* Brand */}
+        <div style={{ textAlign: 'center', marginBottom: 'var(--space-10)' }}>
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            width: 56, height: 56, borderRadius: 'var(--radius-xl)',
+            background: 'var(--accent)', boxShadow: 'var(--shadow-glow)',
+            marginBottom: 'var(--space-5)',
+          }}>
+            <Lock size={24} style={{ color: 'var(--text-inverse)' }} />
           </div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">SecureVault</h1>
-          <p className="text-gray-600 dark:text-gray-400 mt-2">Créer un nouveau compte</p>
+          <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', letterSpacing: 'var(--tracking-tight)' }}>
+            FluXlock
+          </h1>
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-1)' }}>
+            Créer un nouveau compte
+          </p>
         </div>
 
-        {checkingUser ? (
-          <div className="text-center py-8">
-            <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
-            <p className="text-gray-600 dark:text-gray-400 mt-4">Vérification...</p>
-          </div>
-        ) : hasUser ? (
-          <div>
-            <div className="bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg p-6 mb-6">
-              <div className="flex items-start">
-                <AlertTriangle className="w-6 h-6 text-orange-600 dark:text-orange-400 mr-3 flex-shrink-0 mt-0.5" />
+        {/* Card */}
+        <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', padding: 'var(--space-8)' }}>
+          {checkingUser ? (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-10)' }}>
+              <Spinner size={32} />
+            </div>
+          ) : hasUser ? (
+            <div>
+              <div style={{
+                padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
+                background: 'var(--warning-muted)', border: '1px solid var(--warning)',
+                display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-5)',
+              }}>
+                <AlertTriangle size={20} style={{ color: 'var(--warning)', flexShrink: 0, marginTop: 2 }} />
                 <div>
-                  <h3 className="text-lg font-semibold text-orange-900 dark:text-orange-300 mb-2">
+                  <p style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>
                     Appareil déjà enregistré
-                  </h3>
-                  <p className="text-sm text-orange-800 dark:text-orange-400 mb-4">
-                    Cet appareil possède déjà un compte utilisateur. Pour des raisons de sécurité, 
-                    chaque appareil ne peut avoir qu'un seul utilisateur.
                   </p>
-                  <p className="text-sm text-orange-800 dark:text-orange-400">
-                    Si vous avez oublié vos identifiants ou si vous souhaitez créer un nouveau compte, 
-                    vous devez d'abord réinitialiser l'application.
+                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-2)' }}>
+                    Cet appareil possède déjà un compte. Chaque appareil ne peut avoir qu'un seul utilisateur.
                   </p>
                 </div>
               </div>
-            </div>
-            <div className="text-center">
-              <Link 
-                to="/login" 
-                className="inline-flex items-center justify-center w-full px-6 py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors font-medium"
-              >
-                Retour à la connexion
+              <Link to="/login" style={{ textDecoration: 'none' }}>
+                <Button fullWidth>Retour à la connexion</Button>
               </Link>
             </div>
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Nom d'utilisateur
-            </label>
-            <div className="relative">
-              <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input
-                type="text"
-                value={formData.username}
-                onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                className="input pl-10"
-                placeholder="johndoe"
-                required
-                autoFocus
-              />
-            </div>
-          </div>
+          ) : (
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              <Input label="Nom d'utilisateur" icon={User} value={username} onChange={(e) => setUsername(e.target.value)} placeholder="johndoe" required autoFocus />
+              <Input label="Email" type="email" icon={Mail} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="john@example.com" required />
+              <div>
+                <Input label="Mot de passe" type="password" icon={Lock} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••••••" required />
+                <div style={{ marginTop: 'var(--space-2)' }}>
+                  <PasswordStrength password={password} />
+                </div>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-1)' }}>
+                  Minimum 12 caractères
+                </p>
+              </div>
+              <Input label="Confirmer le mot de passe" type="password" icon={Lock} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••••••" required />
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Email
-            </label>
-            <div className="relative">
-              <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input
-                type="email"
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                className="input pl-10"
-                placeholder="john@example.com"
-                required
-              />
-            </div>
-          </div>
+              {error && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                  padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                  background: 'var(--danger-muted)', border: '1px solid var(--danger)',
+                  fontSize: 'var(--text-sm)', color: 'var(--danger)', fontFamily: 'var(--font-body)',
+                }}>
+                  <AlertTriangle size={16} />
+                  {error}
+                </div>
+              )}
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Mot de passe
-            </label>
-            <div className="relative">
-              <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input
-                type="password"
-                value={formData.password}
-                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                className="input pl-10"
-                placeholder="••••••••••••"
-                required
-                minLength={12}
-              />
-            </div>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Minimum 12 caractères
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Confirmer le mot de passe
-            </label>
-            <div className="relative">
-              <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input
-                type="password"
-                value={formData.confirmPassword}
-                onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                className="input pl-10"
-                placeholder="••••••••••••"
-                required
-              />
-            </div>
-          </div>
-
-          {error && (
-            <div className="bg-danger-50 border border-danger-200 text-danger-700 px-4 py-3 rounded-lg">
-              {error}
-            </div>
+              <Button type="submit" fullWidth size="lg" loading={isLoading} icon={UserPlus}>
+                S'inscrire
+              </Button>
+            </form>
           )}
 
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="btn btn-primary w-full"
-          >
-            {isLoading ? 'Inscription...' : 'S\'inscrire'}
-          </button>
-        </form>
-        )}
-
-        {!checkingUser && !hasUser && (
-          <div className="mt-6 text-center">
-            <p className="text-sm text-gray-600 dark:text-gray-400">
+          {!checkingUser && !hasUser && (
+            <p style={{ textAlign: 'center', marginTop: 'var(--space-5)', fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
               Vous avez déjà un compte ?{' '}
-              <Link to="/login" className="text-primary-600 hover:text-primary-700 font-medium">
-                Se connecter
-              </Link>
+              <Link to="/login" style={{ color: 'var(--accent-text)', fontWeight: 500, textDecoration: 'none' }}>Se connecter</Link>
             </p>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   )

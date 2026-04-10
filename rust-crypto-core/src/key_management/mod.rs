@@ -1,9 +1,6 @@
 //! Gestion avancée des clés cryptographiques
 
-use crate::secure_memory::{CryptoKey, KeyAlgorithm};
-use crate::key_derivation::{derive_key_from_password, generate_salt};
-use crate::errors::Result;
-use serde::{Deserialize, Serialize};
+use crate::secure_memory::CryptoKey;
 use std::collections::HashMap;
 
 /// Gestionnaire de clés

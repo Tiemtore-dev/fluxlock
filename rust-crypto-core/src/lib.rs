@@ -36,8 +36,10 @@ pub mod secure_memory;
 pub mod key_management;
 pub mod errors;
 pub mod utils;
+pub mod migration;
 
 // Réexporter les types principaux pour faciliter l'usage
+// --- Legacy (v1) ---
 pub use crypto::{
     aes_gcm::{encrypt_aes_gcm, decrypt_aes_gcm, AesGcmCipher},
     chacha::{encrypt_chacha20, decrypt_chacha20, ChaCha20Cipher},
@@ -47,10 +49,26 @@ pub use key_derivation::{
     hkdf::derive_key_hkdf,
 };
 pub use signatures::ed25519::{KeyPair as Ed25519KeyPair, sign_message, verify_signature};
+pub use signatures::ml_dsa::{MlDsaKeyPair, verify_ml_dsa};
 pub use key_exchange::x25519::{generate_keypair, compute_shared_secret};
 pub use hashing::{blake3_hash, sha3_256_hash, sha256_hash};
 pub use secure_memory::{SecretBytes, SecretString};
 pub use errors::{CryptoError, Result};
+
+// Ré-export de blake3 pour usage streaming (TeeReader) dans les crates dépendants
+pub use blake3;
+
+// --- Post-Quantum / v2 ---
+pub use crypto::vault::{encrypt_vault, decrypt_vault, SealedVault, VaultData, VaultEntry, VaultMeta};
+pub use crypto::kdf::{derive_master_key, MasterKey, KdfParams};
+pub use crypto::cipher::{encrypt, decrypt, EncryptedBlob};
+pub use crypto::stream_cipher::{encrypt_stream, decrypt_stream, is_senc_format, SENC_MAGIC, SENC_HEADER_SIZE, DEFAULT_STREAM_CHUNK_SIZE};
+pub use crypto::integrity::{compute_header_mac, verify_header_mac};
+pub use crypto::kem::{
+    generate_recipient_keypair, encapsulate, decapsulate,
+    KemPublicKey, KemPrivateKey, SharedSecret as KemSharedSecret,
+};
+pub use migration::migrate::{migrate_v1_to_v2, MigrationReport};
 
 // Version du crate
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
