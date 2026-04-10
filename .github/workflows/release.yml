@@ -1,9 +1,20 @@
 name: Release FluXlock
 
+# ─────────────────────────────────────────────────────────────
+# Stratégie 2 repos :
+#   - Repo PRIVÉ (fluxlock)         → code source, CI/CD
+#   - Repo PUBLIC (fluxlock-releases) → installeurs + latest.json
+# Les utilisateurs voient uniquement fluxlock-releases.
+# L'updater Tauri pointe sur fluxlock-releases.
+# ─────────────────────────────────────────────────────────────
+
 on:
   push:
     tags:
-      - "v*" # Déclenché sur les tags comme v2.0.0, v2.0.1, etc.
+      - "v*"
+
+env:
+  PUBLIC_REPO: Tiemtore-dev/fluxlock-releases
 
 jobs:
   release:
@@ -62,86 +73,94 @@ jobs:
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # RELEASES_PAT → token avec accès au repo PUBLIC fluxlock-releases
+          GITHUB_TOKEN: ${{ secrets.RELEASES_PAT }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         with:
+          # Les binaires sont publiés dans le repo PUBLIC
+          owner: Tiemtore-dev
+          repo: fluxlock-releases
           projectPath: "./tauri-desktop"
           tagName: ${{ github.ref_name }}
           releaseName: "FluXlock ${{ github.ref_name }}"
-          releaseBody: "Voir les changements dans le CHANGELOG.md"
-          releaseDraft: true
+          releaseBody: |
+            ## 🔐 FluXlock ${{ github.ref_name }}
+
+            Téléchargez l'installeur pour votre système :
+
+            | Plateforme | Fichier |
+            |---|---|
+            | macOS (Apple Silicon M1/M2/M3) | `FluXlock_*_aarch64.dmg` |
+            | macOS (Intel) | `FluXlock_*_x64.dmg` |
+            | Windows | `FluXlock_*_x64-setup.exe` |
+            | Linux | `FluXlock_*_amd64.AppImage` |
+
+            Voir les changements dans le [CHANGELOG](https://github.com/Tiemtore-dev/fluxlock/blob/main/CHANGELOG.md).
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
 
-  create-manifest:
+  publish-manifest:
+    name: Publish update manifest (latest.json)
     needs: release
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download release assets
+      - name: Download release assets from public repo
         uses: robinraju/release-downloader@v1.8
         with:
+          repository: ${{ env.PUBLIC_REPO }}
+          token: ${{ secrets.RELEASES_PAT }}
           tag: ${{ github.ref_name }}
-          fileName: "*"
-          out-file-path: "downloads"
+          fileName: "*.sig"
+          out-file-path: "sigs"
 
-      - name: Create update manifest
+      - name: Build latest.json manifest
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          REPO="Tiemtore-dev/fluxlock"
-          BASE_URL="https://github.com/${REPO}/releases/download/${GITHUB_REF_NAME}"
+          BASE_URL="https://github.com/${{ env.PUBLIC_REPO }}/releases/download/${{ github.ref_name }}"
 
-          # Fonction pour extraire la signature
-          get_signature() {
-            local sig_file=$1
-            if [ -f "$sig_file" ]; then
-              cat "$sig_file"
-            else
-              echo "Signature non trouvée: $sig_file" >&2
-              echo ""
-            fi
+          get_sig() {
+            local f
+            f=$(ls sigs/$1 2>/dev/null | head -1)
+            [ -f "$f" ] && cat "$f" || echo ""
           }
 
-          # Créer le manifest JSON
           cat > latest.json << EOF
           {
-            "version": "v${VERSION}",
-            "notes": "Mise à jour FluXlock v${VERSION}",
+            "version": "${{ github.ref_name }}",
+            "notes": "FluXlock ${{ github.ref_name }} — voir CHANGELOG pour les détails.",
             "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "platforms": {
               "darwin-aarch64": {
-                "signature": "$(get_signature downloads/*.app.tar.gz.sig)",
-                "url": "${BASE_URL}/FluXlock.app.tar.gz"
+                "signature": "$(get_sig "FluXlock_aarch64.app.tar.gz.sig")",
+                "url": "${BASE_URL}/FluXlock_aarch64.app.tar.gz"
               },
               "darwin-x86_64": {
-                "signature": "$(get_signature downloads/*_x64.app.tar.gz.sig)",
+                "signature": "$(get_sig "FluXlock_x64.app.tar.gz.sig")",
                 "url": "${BASE_URL}/FluXlock_x64.app.tar.gz"
               },
               "linux-x86_64": {
-                "signature": "$(get_signature downloads/*.AppImage.tar.gz.sig)",
-                "url": "${BASE_URL}/fluxlock_${VERSION}_amd64.AppImage.tar.gz"
+                "signature": "$(get_sig "FluXlock_${VERSION}_amd64.AppImage.tar.gz.sig")",
+                "url": "${BASE_URL}/FluXlock_${VERSION}_amd64.AppImage.tar.gz"
               },
               "windows-x86_64": {
-                "signature": "$(get_signature downloads/*.msi.zip.sig)",
+                "signature": "$(get_sig "FluXlock_${VERSION}_x64_en-US.msi.zip.sig")",
                 "url": "${BASE_URL}/FluXlock_${VERSION}_x64_en-US.msi.zip"
               }
             }
           }
           EOF
 
-          echo "Manifest créé:"
+          echo "=== latest.json généré ==="
           cat latest.json
 
-      - name: Upload manifest to release
+      - name: Upload latest.json to public repo release
         uses: svenstaro/upload-release-action@v2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          repo_token: ${{ secrets.RELEASES_PAT }}
+          repo_name: ${{ env.PUBLIC_REPO }}
           file: latest.json
           asset_name: latest.json
           tag: ${{ github.ref_name }}
