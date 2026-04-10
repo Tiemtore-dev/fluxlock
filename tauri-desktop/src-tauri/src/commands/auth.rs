@@ -189,8 +189,8 @@ pub async fn local_register(
     debug_log!("🔐 Clé de chiffrement stockée dans l'enclave sécurisée (Keychain)");
     *state.current_user_id.lock().await = Some(user_id);
 
-    // Peupler le cache vault sécurisé (XOR-masked, TTL 3min, NIST SP 800-57)
-    if std::env::var("UTILISATION_CACHE").map(|v| v.to_lowercase() != "false").unwrap_or(true) {
+    // Peupler le cache vault sécurisé (XOR-masked, TTL configurable, NIST SP 800-57)
+    if state.cache_enabled {
         let key_bytes = encryption_key.to_vec();
         state.vault_key_cache.lock().await.store(user_id, &key_bytes);
     }
@@ -360,8 +360,8 @@ pub async fn local_login(
     debug_log!("✅ Connexion réussie pour {}", user.username);
     *state.current_user_id.lock().await = Some(user.id);
 
-    // Peupler le cache vault sécurisé (XOR-masked, TTL 3min, NIST SP 800-57)
-    if std::env::var("UTILISATION_CACHE").map(|v| v.to_lowercase() != "false").unwrap_or(true) {
+    // Peupler le cache vault sécurisé (XOR-masked, TTL configurable, NIST SP 800-57)
+    if state.cache_enabled {
         let key_bytes = encryption_key.to_vec();
         state.vault_key_cache.lock().await.store(user.id, &key_bytes);
     }

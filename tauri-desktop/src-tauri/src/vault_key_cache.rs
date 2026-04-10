@@ -17,8 +17,11 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 use rand::RngCore;
 
-/// Durée maximale de la clé en cache (OWASP: minimiser la fenêtre en clair)
-const CACHE_TTL: Duration = Duration::from_secs(3 * 60); // 3 minutes
+/// Durée maximale par défaut de la clé en cache (OWASP: minimiser la fenêtre en clair)
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(3 * 60); // 3 minutes
+
+/// Intervalle par défaut de rotation du masque XOR
+const DEFAULT_MASK_ROTATION: Duration = Duration::from_secs(30);
 
 /// Verrouille une région mémoire pour empêcher le swap sur disque.
 fn mlock_region(ptr: *const u8, len: usize) {
@@ -151,12 +154,23 @@ struct CacheEntry {
 /// Il ne contient qu'une seule entrée (l'utilisateur actuellement connecté).
 pub struct VaultKeyCache {
     entry: Option<CacheEntry>,
+    ttl: Duration,
+    mask_rotation: Duration,
 }
 
 impl VaultKeyCache {
-    /// Crée un cache vide.
+    /// Crée un cache vide avec les valeurs par défaut.
     pub fn new() -> Self {
-        VaultKeyCache { entry: None }
+        VaultKeyCache { entry: None, ttl: DEFAULT_CACHE_TTL, mask_rotation: DEFAULT_MASK_ROTATION }
+    }
+    
+    /// Crée un cache vide avec un TTL et un intervalle de rotation personnalisés.
+    pub fn with_config(ttl_secs: u64, mask_rotation_secs: u64) -> Self {
+        VaultKeyCache {
+            entry: None,
+            ttl: Duration::from_secs(ttl_secs),
+            mask_rotation: Duration::from_secs(mask_rotation_secs),
+        }
     }
 
     /// Stocke une clé dans le cache pour l'utilisateur donné.
@@ -170,7 +184,7 @@ impl VaultKeyCache {
             last_access: Instant::now(),
             user_id,
         });
-        debug_log!("🔐 Clé vault mise en cache (TTL: {}s, XOR-masked + mlock)", CACHE_TTL.as_secs());
+        debug_log!("🔐 Clé vault mise en cache (TTL: {}s, XOR-masked + mlock)", self.ttl.as_secs());
     }
 
     /// Récupère la clé depuis le cache si elle est valide (bon user_id + TTL non expiré).
@@ -188,14 +202,14 @@ impl VaultKeyCache {
         }
 
         // Vérifier le TTL
-        if entry.cached_at.elapsed() >= CACHE_TTL {
-            debug_log!("⏰ Cache vault expiré (TTL: {}s dépassé)", CACHE_TTL.as_secs());
+        if entry.cached_at.elapsed() >= self.ttl {
+            debug_log!("⏰ Cache vault expiré (TTL: {}s dépassé)", self.ttl.as_secs());
             self.invalidate();
             return None;
         }
 
-        // Rotation du masque toutes les 30 secondes (NIST: "frequently updated")
-        if entry.last_access.elapsed() >= Duration::from_secs(30) {
+        // Rotation du masque (NIST: "frequently updated")
+        if entry.last_access.elapsed() >= self.mask_rotation {
             entry.component.rotate_mask();
             entry.last_access = Instant::now();
             debug_log!("🔄 Rotation du masque XOR effectuée");
@@ -219,7 +233,7 @@ impl VaultKeyCache {
     /// Vérifie si le cache contient une entrée valide pour l'utilisateur donné.
     pub fn is_valid(&self, user_id: i64) -> bool {
         match &self.entry {
-            Some(entry) => entry.user_id == user_id && entry.cached_at.elapsed() < CACHE_TTL,
+            Some(entry) => entry.user_id == user_id && entry.cached_at.elapsed() < self.ttl,
             None => false,
         }
     }

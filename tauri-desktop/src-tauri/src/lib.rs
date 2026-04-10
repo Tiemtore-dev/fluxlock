@@ -97,12 +97,7 @@ pub fn generate_random_key_bytes() -> Vec<u8> {
 /// - Rotation du masque toutes les 30s
 /// - Zeroize + munlock au drop
 pub async fn get_or_fetch_vault_key(state: &AppState, user_id: i64) -> Result<secure_key::SecureKey, String> {
-    // Vérifier si le cache est activé (UTILISATION_CACHE=true par défaut)
-    let cache_enabled = std::env::var("UTILISATION_CACHE")
-        .map(|v| v.to_lowercase() != "false")
-        .unwrap_or(true);
-
-    if !cache_enabled {
+    if !state.cache_enabled {
         // Mode sans cache : accès direct au Keychain (ancien comportement)
         return secure_storage::retrieve_encryption_key_secure(user_id)
             .map_err(|e| format!("Erreur récupération clé: {}", e));
@@ -156,9 +151,11 @@ pub struct AppState {
     pub logging_enabled: Arc<Mutex<bool>>,
     /// Mode isolation réseau — bloque toute activité réseau
     pub isolation_mode: Arc<Mutex<bool>>,
-    /// Cache sécurisé de la clé vault (XOR-masked + mlock + TTL 3 min)
+    /// Cache sécurisé de la clé vault (XOR-masked + mlock + TTL configurable)
     /// Conforme NIST SP 800-57 (key splitting) + OWASP Secrets Management §2.5
     pub vault_key_cache: Arc<Mutex<VaultKeyCache>>,
+    /// Cache activé ou non (configurable via UTILISATION_CACHE)
+    pub cache_enabled: bool,
 }
 
 // Structures pour les requêtes
@@ -401,7 +398,11 @@ pub fn run() {
         signed_log_manager: Arc::new(Mutex::new(None)),
         logging_enabled: Arc::new(Mutex::new(config.signed_logging_enabled)),
         isolation_mode: Arc::new(Mutex::new(config.isolation_enabled)),
-        vault_key_cache: Arc::new(Mutex::new(VaultKeyCache::new())),
+        vault_key_cache: Arc::new(Mutex::new(VaultKeyCache::with_config(
+            config.cache_ttl_secs,
+            config.cache_mask_rotation_secs,
+        ))),
+        cache_enabled: config.cache_enabled,
     };
 
     let builder = tauri::Builder::default()

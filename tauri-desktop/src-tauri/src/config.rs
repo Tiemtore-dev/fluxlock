@@ -51,6 +51,11 @@ pub struct Config {
     
     // Logs signés
     pub signed_logging_enabled: bool,
+    
+    // Cache clé vault (Keychain / Secure Enclave)
+    pub cache_enabled: bool,
+    pub cache_ttl_secs: u64,
+    pub cache_mask_rotation_secs: u64,
 }
 
 impl std::fmt::Debug for Config {
@@ -119,14 +124,19 @@ impl Default for Config {
             
             // Logs signés
             signed_logging_enabled: true,
+            
+            // Cache clé vault
+            cache_enabled: false,
+            cache_ttl_secs: 180,           // 3 minutes (OWASP)
+            cache_mask_rotation_secs: 30,  // Rotation XOR mask
         }
     }
 }
 
 impl Config {
-    /// Charge la configuration depuis les variables d'environnement
+    /// Charge la configuration depuis les variables d'environnement.
+    /// Note: le .env doit être chargé en amont (lib.rs::run() via dotenv::from_path).
     pub fn from_env() -> Self {
-        dotenv::dotenv().ok(); // Charge le fichier .env
         
         let mut config = Config::default();
         
@@ -230,6 +240,19 @@ impl Config {
             config.signed_logging_enabled = val.to_lowercase() != "false";
         }
         
+        // Cache clé vault
+        if let Ok(val) = env::var("UTILISATION_CACHE") {
+            config.cache_enabled = val.to_lowercase() != "false";
+        }
+        if let Ok(val) = env::var("VAULT_CACHE_TTL_SECS") {
+            let parsed = val.parse().unwrap_or(180u64);
+            config.cache_ttl_secs = parsed.max(60).min(600); // Min 1 min, Max 10 min
+        }
+        if let Ok(val) = env::var("VAULT_CACHE_MASK_ROTATION_SECS") {
+            let parsed = val.parse().unwrap_or(30u64);
+            config.cache_mask_rotation_secs = parsed.max(10).min(120); // Min 10s, Max 2 min
+        }
+        
         config
     }
     
@@ -263,6 +286,17 @@ impl Config {
         }
         if self.argon2_parallelism < 1 || self.argon2_parallelism > 16 {
             warnings.push("VAULT_ARGON2_PARALLELISM doit être entre 1 et 16".to_string());
+        }
+        
+        // Validation cache
+        if self.cache_ttl_secs < 60 || self.cache_ttl_secs > 600 {
+            warnings.push("VAULT_CACHE_TTL_SECS doit être entre 60 et 600".to_string());
+        }
+        if self.cache_mask_rotation_secs < 10 || self.cache_mask_rotation_secs > 120 {
+            warnings.push("VAULT_CACHE_MASK_ROTATION_SECS doit être entre 10 et 120".to_string());
+        }
+        if self.cache_mask_rotation_secs >= self.cache_ttl_secs {
+            warnings.push("VAULT_CACHE_MASK_ROTATION_SECS doit être inférieur à VAULT_CACHE_TTL_SECS".to_string());
         }
         
         if warnings.is_empty() {
