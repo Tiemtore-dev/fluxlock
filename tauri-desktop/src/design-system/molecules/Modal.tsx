@@ -13,18 +13,7 @@ export function Modal({ open, onClose, title, children, width = 520 }: ModalProp
   if (!open) return null
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 'var(--z-modal)' as any,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 'var(--space-4)',
-        overflow: 'auto',
-      }}
-    >
+    <div className="modal-overlay">
       {/* Backdrop */}
       <div
         onClick={onClose}
@@ -39,30 +28,11 @@ export function Modal({ open, onClose, title, children, width = 520 }: ModalProp
 
       {/* Panel */}
       <div
-        className="animate-scale-in"
-        style={{
-          position: 'relative',
-          background: 'var(--bg-elevated)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-xl)',
-          boxShadow: 'var(--shadow-lg)',
-          width: '100%',
-          maxWidth: width,
-          maxHeight: 'calc(100vh - 40px)',
-          margin: 'auto',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}
+        className="modal-panel animate-scale-in"
+        style={{ maxWidth: width }}
       >
         {/* Header */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: 'var(--space-5) var(--space-6)',
-          borderBottom: '1px solid var(--border)',
-        }}>
+        <div className="modal-header">
           <h2 style={{
             fontSize: 'var(--text-lg)',
             fontWeight: 600,
@@ -90,11 +60,7 @@ export function Modal({ open, onClose, title, children, width = 520 }: ModalProp
         </div>
 
         {/* Body */}
-        <div style={{
-          padding: 'var(--space-6)',
-          overflowY: 'auto',
-          flex: 1,
-        }}>
+        <div className="modal-body">
           {children}
         </div>
       </div>

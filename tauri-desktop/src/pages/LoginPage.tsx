@@ -172,15 +172,8 @@ export default function LoginPage() {
   const locked = loginDelay > 0 && remainingTime > 0
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--bg-void)',
-      padding: 'var(--space-6)',
-    }}>
-      <div className="animate-fade-in" style={{ width: '100%', maxWidth: 400 }}>
+    <div className="auth-page">
+      <div className="auth-page-inner animate-fade-in" style={{ maxWidth: 400 }}>
         {/* Brand */}
         <div style={{ textAlign: 'center', marginBottom: 'var(--space-10)' }}>
           <div style={{
@@ -215,12 +208,7 @@ export default function LoginPage() {
         </div>
 
         {/* Card */}
-        <div style={{
-          background: 'var(--bg-surface)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-xl)',
-          padding: 'var(--space-8)',
-        }}>
+        <div className="auth-card">
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
             {!dbReady ? (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-6)' }}>

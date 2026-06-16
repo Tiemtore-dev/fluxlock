@@ -228,12 +228,12 @@ export function Sidebar() {
         display: 'none', /* shown via CSS @media */
         zIndex: 1000,
       }}>
-        <div style={{
+        <div className="mobile-bottom-nav__inner" style={{
           display: 'flex',
           justifyContent: 'space-around',
           alignItems: 'center',
-          padding: '6px 0',
-          paddingBottom: 'max(6px, env(safe-area-inset-bottom))',
+          padding: '8px 0',
+          paddingBottom: 'max(8px, env(safe-area-inset-bottom))',
         }}>
           {mobileNavItems.map((item) => {
             const isMore = item.href === '__more__'
@@ -303,7 +303,7 @@ export function Sidebar() {
           animation: 'fadeIn 0.15s ease',
         }}>
           {/* Header */}
-          <div style={{
+          <div className="mobile-drawer-header" style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
@@ -343,7 +343,7 @@ export function Sidebar() {
           </div>
 
           {/* All nav items */}
-          <nav style={{ flex: 1, padding: 'var(--space-4)', overflowY: 'auto' }}>
+          <nav className="mobile-drawer-nav" style={{ flex: 1, padding: 'var(--space-4) var(--space-5)', overflowY: 'auto' }}>
             {navItems.map((item) => {
               const isActive = location.pathname === item.href
               const Icon = item.icon
@@ -375,7 +375,7 @@ export function Sidebar() {
           </nav>
 
           {/* User / Logout */}
-          <div style={{
+          <div className="mobile-drawer-footer" style={{
             padding: 'var(--space-4) var(--space-5)',
             paddingBottom: 'max(var(--space-4), env(safe-area-inset-bottom))',
             borderTop: '1px solid var(--border)',

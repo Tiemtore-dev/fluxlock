@@ -15,12 +15,8 @@ export function AppShell({ children }: AppShellProps) {
       background: 'var(--bg-void)',
     }}>
       <Sidebar />
-      <main className="app-main" style={{
-        marginLeft: 'var(--sidebar-width)',
-        minHeight: '100vh',
-        padding: 'var(--space-8)',
-      }}>
-        <div className="animate-fade-in" style={{ maxWidth: 1100 }}>
+      <main className="app-main">
+        <div className="app-main-inner animate-fade-in">
           {children}
         </div>
       </main>

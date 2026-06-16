@@ -12,6 +12,12 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -35,6 +41,106 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--bg-hover); border-radius: var(--radius-sm); }
 ::-webkit-scrollbar-thumb:hover { background: var(--bg-active); }
 
+/* ─── App shell ─── */
+.app-main {
+  margin-left: var(--sidebar-width);
+  min-height: 100vh;
+  padding: var(--page-padding-y) var(--page-padding-x);
+  box-sizing: border-box;
+}
+
+.app-main-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ─── Auth pages (login, register, reset) ─── */
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-void);
+  padding: var(--space-8);
+  box-sizing: border-box;
+}
+
+.auth-page-inner {
+  width: 100%;
+}
+
+.auth-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: var(--space-8);
+}
+
+/* ─── Page content ─── */
+.page-content {
+  width: 100%;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+/* ─── Modal ─── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+  overflow: auto;
+}
+
+.modal-panel {
+  position: relative;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  width: 100%;
+  max-height: calc(100vh - 48px);
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-body {
+  padding: var(--space-6);
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* ─── Toasts ─── */
+.toast-container {
+  position: fixed;
+  bottom: var(--space-6);
+  right: var(--space-6);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  pointer-events: none;
+}
+
 /* ── Mobile responsive ── */
 @media (max-width: 768px) {
   /* Hide desktop sidebar on mobile */
@@ -47,36 +153,109 @@ body {
     display: block !important;
   }
 
-  /* Remove sidebar margin, add bottom padding for tab bar */
+  /* Page content — generous gutters + safe areas */
   .app-main {
     margin-left: 0 !important;
-    padding: var(--space-3) !important;
-    padding-top: max(var(--space-3), env(safe-area-inset-top)) !important;
-    padding-bottom: 80px !important;
+    padding-left: max(var(--mobile-gutter), env(safe-area-inset-left)) !important;
+    padding-right: max(var(--mobile-gutter), env(safe-area-inset-right)) !important;
+    padding-top: max(var(--mobile-gutter), env(safe-area-inset-top)) !important;
+    padding-bottom: calc(var(--mobile-bottom-nav-height) + max(var(--space-4), env(safe-area-inset-bottom))) !important;
+  }
+
+  /* Auth pages */
+  .auth-page {
+    align-items: flex-start;
+    padding-top: max(var(--space-8), env(safe-area-inset-top));
+    padding-left: max(var(--mobile-gutter), env(safe-area-inset-left));
+    padding-right: max(var(--mobile-gutter), env(safe-area-inset-right));
+    padding-bottom: max(var(--mobile-gutter), env(safe-area-inset-bottom));
+  }
+
+  .auth-card {
+    padding: var(--space-5) !important;
+  }
+
+  /* Page headers: stack title + action button */
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   /* Responsive page headings */
   h1 { font-size: var(--text-xl) !important; }
   h2 { font-size: var(--text-lg) !important; }
 
-  /* Page header rows: stack vertically on mobile */
-  .app-main > div > div:first-child {
-    flex-wrap: wrap;
-    gap: var(--space-3);
-  }
-
-  /* All buttons: don't force min-width */
+  /* Buttons: don't force min-width */
   button { min-width: auto !important; }
 
-  /* Cards: reduce padding on mobile */
-  .app-main [style*="padding: var(--space-6)"] {
-    padding: var(--space-4) !important;
-  }
-
-  /* Backup list buttons: stack */
-  .app-main [style*="justifyContent: space-between"] {
+  /* Backup / list rows: allow wrap */
+  .app-main-inner [style*="justifyContent: space-between"],
+  .app-main-inner [style*="justify-content: space-between"] {
     flex-wrap: wrap;
     gap: var(--space-3);
+  }
+
+  /* Modals: edge gutters + safe areas */
+  .modal-overlay {
+    padding:
+      max(var(--mobile-gutter), env(safe-area-inset-top))
+      max(var(--mobile-gutter), env(safe-area-inset-right))
+      max(var(--mobile-gutter), env(safe-area-inset-bottom))
+      max(var(--mobile-gutter), env(safe-area-inset-left));
+    align-items: flex-end;
+  }
+
+  .modal-panel {
+    max-height: calc(100vh - var(--mobile-gutter) * 2 - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    border-bottom-left-radius: var(--radius-lg);
+    border-bottom-right-radius: var(--radius-lg);
+  }
+
+  .modal-header {
+    padding: var(--space-4) var(--space-5);
+  }
+
+  .modal-body {
+    padding: var(--space-5);
+  }
+
+  /* Stack modal form actions vertically */
+  .modal-body form > div:last-child,
+  .modal-body > div > div:last-child {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  /* Stack password generate row */
+  .modal-body form div[style*="alignItems: flex-end"],
+  .modal-body form div[style*="align-items: flex-end"] {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  /* Toasts: above bottom nav, full width with gutters */
+  .toast-container {
+    left: max(var(--mobile-gutter), env(safe-area-inset-left));
+    right: max(var(--mobile-gutter), env(safe-area-inset-right));
+    bottom: calc(var(--mobile-bottom-nav-height) + max(var(--space-3), env(safe-area-inset-bottom)));
+  }
+
+  .toast-item {
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+
+  /* Bottom nav: inset from screen edges */
+  .mobile-bottom-nav__inner {
+    padding-left: max(var(--space-3), env(safe-area-inset-left));
+    padding-right: max(var(--space-3), env(safe-area-inset-right));
+  }
+
+  .mobile-drawer-header,
+  .mobile-drawer-nav,
+  .mobile-drawer-footer {
+    padding-left: max(var(--space-5), env(safe-area-inset-left)) !important;
+    padding-right: max(var(--space-5), env(safe-area-inset-right)) !important;
   }
 
   /* Fade-in animation for mobile drawer */
@@ -95,4 +274,3 @@ body {
     display: none !important;
   }
 }
-

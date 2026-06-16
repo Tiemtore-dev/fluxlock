@@ -14,9 +14,9 @@ export default function DashboardPage() {
 
   return (
     <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
         {/* Header */}
-        <div>
+        <div className="page-header">
           <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)' }}>
             Tableau de bord
           </h1>

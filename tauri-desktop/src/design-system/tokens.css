@@ -111,6 +111,17 @@
   --sidebar-width: 240px;
   --sidebar-collapsed: 64px;
   --header-height: 48px;
+  --page-padding-x: var(--space-8);
+  --page-padding-y: var(--space-8);
+  --mobile-gutter: var(--space-5);
+  --mobile-bottom-nav-height: 64px;
+}
+
+@media (max-width: 768px) {
+  :root {
+    --page-padding-x: var(--mobile-gutter);
+    --page-padding-y: var(--mobile-gutter);
+  }
 }
 
 /* ─── Keyframes ─── */

@@ -56,23 +56,14 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
 
       {/* Toast container */}
-      <div style={{
-        position: 'fixed',
-        bottom: 'var(--space-6)',
-        right: 'var(--space-6)',
-        zIndex: 'var(--z-toast)' as any,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 'var(--space-2)',
-        pointerEvents: 'none',
-      }}>
+      <div className="toast-container">
         {toasts.map((t) => {
           const Icon = icons[t.variant]
           const color = colors[t.variant]
           return (
             <div
               key={t.id}
-              className="animate-slide-up"
+              className="toast-item animate-slide-up"
               style={{
                 display: 'flex',
                 alignItems: 'center',
