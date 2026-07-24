@@ -187,6 +187,40 @@ export const biometric = {
   emergencyLock: () => invoke<string>('biometric_emergency_lock'),
 }
 
+/* ─── Passkey (FIDO2-like local + hybrid PQ) ─── */
+
+export interface PasskeyStatus {
+  available: boolean
+  enrolled: boolean
+  enrolled_username?: string
+  /** true if > 14 days since last password login — user must enter password */
+  needs_password_reminder: boolean
+}
+
+export const passkey = {
+  checkStatus: () =>
+    invoke<PasskeyStatus>('check_passkey').catch((err) => {
+      console.error('[vault] check_passkey failed:', err)
+      return {
+        available: false,
+        enrolled: false,
+        needs_password_reminder: false,
+      } as PasskeyStatus
+    }),
+
+  /** Register a new passkey (requires active session with password login) */
+  register: () => invoke<string>('register_passkey'),
+
+  /** Login with passkey (always-on: no cold start, no timeout) */
+  login: (username: string, androidKey?: string) => invoke<AuthResponse>('passkey_login', { username, androidKey }),
+
+  /** Re-authenticate with passkey for sensitive operations (CSV, backup, etc.) */
+  authenticate: (androidKey?: string) => invoke<string>('passkey_authenticate', { androidKey }),
+
+  /** Delete the passkey enrollment */
+  delete: () => invoke<string>('delete_passkey'),
+}
+
 /* ─── System ─── */
 
 export const system = {
@@ -227,6 +261,98 @@ export const passwords = {
 
   decrypt: (encrypted: string) =>
     invoke<string>('decrypt_password', { encrypted }),
+}
+
+/* ─── CSV Import/Export ─── */
+
+export interface EntryAction {
+  index: number
+  action: 'import' | 'skip' | 'overwrite'
+  overwrite_id?: number
+}
+
+export interface DuplicateMatch {
+  id: number
+  title: string
+  username?: string
+  url?: string
+}
+
+export interface ParsedCsvEntry {
+  index: number
+  title: string
+  username?: string
+  password_preview: string
+  url?: string
+  notes?: string
+  category?: string
+  is_duplicate: boolean
+  existing_match?: DuplicateMatch
+  parse_error?: string
+}
+
+export interface ImportCsvResponse {
+  success: boolean
+  mode: string
+  detected_format: string
+  total_parsed: number
+  duplicate_count: number
+  new_count: number
+  error_count: number
+  entries?: ParsedCsvEntry[]
+  imported_count: number
+  skipped_count: number
+  overwritten_count: number
+  errors: string[]
+  message: string
+}
+
+export interface ExportCsvResponse {
+  success: boolean
+  csv_content: string
+  count: number
+  message: string
+}
+
+export const csvIO = {
+  /**
+   * Preview CSV import: parse file, detect format, find duplicates.
+   * Requires re-authentication (password or biometric).
+   */
+  preview: (masterPassword: string | null, csvContent: string, sourceFormat?: string) =>
+    invoke<ImportCsvResponse>('import_passwords_csv', {
+      request: {
+        master_password: masterPassword,
+        csv_content: csvContent,
+        source_format: sourceFormat ?? 'auto',
+        mode: 'preview',
+        entry_actions: null,
+      },
+    }),
+
+  /**
+   * Execute CSV import with conflict resolution decisions.
+   * Requires re-authentication (password or biometric).
+   */
+  import: (masterPassword: string | null, csvContent: string, sourceFormat: string, entryActions: EntryAction[]) =>
+    invoke<ImportCsvResponse>('import_passwords_csv', {
+      request: {
+        master_password: masterPassword,
+        csv_content: csvContent,
+        source_format: sourceFormat,
+        mode: 'import',
+        entry_actions: entryActions,
+      },
+    }),
+
+  /**
+   * Export all passwords as CSV.
+   * Requires re-authentication (password or biometric).
+   */
+  export: (masterPassword: string | null) =>
+    invoke<ExportCsvResponse>('export_passwords_csv', {
+      request: { master_password: masterPassword },
+    }),
 }
 
 /* ─── Secure Files ─── */

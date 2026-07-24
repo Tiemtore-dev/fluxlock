@@ -2,10 +2,13 @@ name: Release FluXlock
 
 # ─────────────────────────────────────────────────────────────
 # Stratégie 2 repos :
-#   - Repo PRIVÉ (fluxlock)         → code source, CI/CD
+#   - Repo PRIVÉ (fluxlock)          → code source, CI/CD
 #   - Repo PUBLIC (fluxlock-releases) → installeurs + latest.json
-# Les utilisateurs voient uniquement fluxlock-releases.
-# L'updater Tauri pointe sur fluxlock-releases.
+#
+# Fonctionnement :
+#   1. tauri-action compile + crée une release DRAFT dans fluxlock (privé)
+#   2. "copy-to-public" copie tous les assets vers fluxlock-releases (public)
+#   3. La release dans fluxlock reste en draft (invisible)
 # ─────────────────────────────────────────────────────────────
 
 on:
@@ -17,7 +20,11 @@ env:
   PUBLIC_REPO: Tiemtore-dev/fluxlock-releases
 
 jobs:
-  release:
+  # ──────────────────────────────────────────────────────────
+  # ÉTAPE 1 — Compilation multi-plateforme
+  # ──────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.platform }})
     permissions:
       contents: write
     strategy:
@@ -62,75 +69,107 @@ jobs:
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tauri-desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install frontend dependencies
         working-directory: ./tauri-desktop
         run: npm ci
 
-      - name: Build frontend
-        working-directory: ./tauri-desktop
-        run: npm run build
-
-      - name: Build Tauri app
+      - name: Build Tauri app (draft release dans repo privé)
         uses: tauri-apps/tauri-action@v0
         env:
-          # RELEASES_PAT → token avec accès au repo PUBLIC fluxlock-releases
-          GITHUB_TOKEN: ${{ secrets.RELEASES_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         with:
-          # Les binaires sont publiés dans le repo PUBLIC
-          owner: Tiemtore-dev
-          repo: fluxlock-releases
           projectPath: "./tauri-desktop"
           tagName: ${{ github.ref_name }}
           releaseName: "FluXlock ${{ github.ref_name }}"
-          releaseBody: |
-            ## 🔐 FluXlock ${{ github.ref_name }}
-
-            Téléchargez l'installeur pour votre système :
-
-            | Plateforme | Fichier |
-            |---|---|
-            | macOS (Apple Silicon M1/M2/M3) | `FluXlock_*_aarch64.dmg` |
-            | macOS (Intel) | `FluXlock_*_x64.dmg` |
-            | Windows | `FluXlock_*_x64-setup.exe` |
-            | Linux | `FluXlock_*_amd64.AppImage` |
-
-            Voir les changements dans le [CHANGELOG](https://github.com/Tiemtore-dev/fluxlock/blob/main/CHANGELOG.md).
-          releaseDraft: false
+          releaseBody: "Draft interne — assets copiés vers fluxlock-releases."
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
 
-  publish-manifest:
-    name: Publish update manifest (latest.json)
-    needs: release
+  # ──────────────────────────────────────────────────────────
+  # ÉTAPE 2 — Copie des assets vers le repo public
+  # ──────────────────────────────────────────────────────────
+  publish-to-public:
+    name: Publish to fluxlock-releases (public)
+    needs: build
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Download release assets from public repo
+      - name: Checkout source repo (pour CHANGELOG)
+        uses: actions/checkout@v4
+
+      - name: Download all assets from private draft release
         uses: robinraju/release-downloader@v1.8
         with:
-          repository: ${{ env.PUBLIC_REPO }}
-          token: ${{ secrets.RELEASES_PAT }}
           tag: ${{ github.ref_name }}
-          fileName: "*.sig"
-          out-file-path: "sigs"
+          fileName: "*"
+          out-file-path: "release-assets"
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build latest.json manifest
+      - name: List downloaded assets
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          BASE_URL="https://github.com/${{ env.PUBLIC_REPO }}/releases/download/${{ github.ref_name }}"
+          echo "=== Assets téléchargés ==="
+          ls -lh release-assets/
+
+      - name: Create release in public repo + upload assets
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+          TAG: ${{ github.ref_name }}
+          PUBLIC_REPO: ${{ env.PUBLIC_REPO }}
+        run: |
+          # Extraire les notes du CHANGELOG pour cette version
+          VERSION="${TAG#v}"
+          NOTES=$(awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md || echo "FluXlock ${TAG}")
+
+          # Créer la release dans le repo public
+          gh release create "$TAG" \
+            --repo "$PUBLIC_REPO" \
+            --title "FluXlock $TAG" \
+            --notes "## 🔐 FluXlock ${TAG}
+
+          ${NOTES}
+
+          ### Télécharger l'installeur pour votre système
+
+          | Plateforme | Fichier |
+          |---|---|
+          | macOS Apple Silicon (M1/M2/M3) | \`FluXlock_*_aarch64.dmg\` |
+          | macOS Intel | \`FluXlock_*_x64.dmg\` |
+          | Windows 10/11 (64-bit) | \`FluXlock_*_x64-setup.exe\` |
+          | Linux (AppImage) | \`FluXlock_*_amd64.AppImage\` |" \
+            --latest \
+            release-assets/*
+
+      - name: Build and upload latest.json manifest
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+          TAG: ${{ github.ref_name }}
+          PUBLIC_REPO: ${{ env.PUBLIC_REPO }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${PUBLIC_REPO}/releases/download/${TAG}"
 
           get_sig() {
             local f
-            f=$(ls sigs/$1 2>/dev/null | head -1)
+            f=$(ls release-assets/$1 2>/dev/null | head -1)
             [ -f "$f" ] && cat "$f" || echo ""
           }
 
           cat > latest.json << EOF
           {
-            "version": "${{ github.ref_name }}",
-            "notes": "FluXlock ${{ github.ref_name }} — voir CHANGELOG pour les détails.",
+            "version": "${TAG}",
+            "notes": "FluXlock ${TAG}",
             "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "platforms": {
               "darwin-aarch64": {
@@ -153,15 +192,9 @@ jobs:
           }
           EOF
 
-          echo "=== latest.json généré ==="
+          echo "=== latest.json ==="
           cat latest.json
 
-      - name: Upload latest.json to public repo release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.RELEASES_PAT }}
-          repo_name: ${{ env.PUBLIC_REPO }}
-          file: latest.json
-          asset_name: latest.json
-          tag: ${{ github.ref_name }}
-          overwrite: true
+          gh release upload "$TAG" latest.json \
+            --repo "$PUBLIC_REPO" \
+            --clobber

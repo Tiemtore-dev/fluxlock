@@ -64,9 +64,9 @@ export default function SecurityPage() {
 
   return (
     <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} className="page-header">
           <div>
             <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', margin: 0 }}>
               Sécurité

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Lock, User, AlertTriangle, LogIn, Fingerprint, Info, Loader2 } from 'lucide-react'
-import { auth, biometric, type BiometricStatus } from '../lib/vault-service'
+import { Lock, User, AlertTriangle, LogIn, Fingerprint, Info, Loader2, Eye, EyeOff, KeyRound } from 'lucide-react'
+import { auth, biometric, passkey, type BiometricStatus, type PasskeyStatus } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
 import { Button, Input } from '../design-system/atoms'
 import { hasAndroidBiometric, androidBiometricAvailable, androidAuthenticate, hasAndroidKeystore, androidKeystoreRetrieve } from '../lib/android-biometric'
@@ -18,9 +18,15 @@ export default function LoginPage() {
   const [error, setError] = useState('')
   const [info, setInfo] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
   const [biometricLoading, setBiometricLoading] = useState(false)
   const [bioStatus, setBioStatus] = useState<BiometricStatus | null>(null)
   const biometricTriggered = useRef(false)
+
+  // ─── Passkey state ───
+  const [passkeyStatus, setPasskeyStatus] = useState<PasskeyStatus | null>(null)
+  const [passkeyLoading, setPasskeyLoading] = useState(false)
+  const passkeyTriggered = useRef(false)
 
   // Derived: can the user use biometric for this username?
   const canUseBiometric =
@@ -36,6 +42,18 @@ export default function LoginPage() {
     bioStatus?.enrolled &&
     username.trim().length > 0 &&
     bioStatus?.enrolled_username?.toLowerCase() === username.trim().toLowerCase()
+
+  // Derived: can the user use passkey for this username?
+  const canUsePasskey =
+    passkeyStatus?.enrolled &&
+    !passkeyStatus?.needs_password_reminder &&
+    username.trim().length > 0 &&
+    passkeyStatus?.enrolled_username?.toLowerCase() === username.trim().toLowerCase()
+
+  const showPasskeySection =
+    passkeyStatus?.enrolled &&
+    username.trim().length > 0 &&
+    passkeyStatus?.enrolled_username?.toLowerCase() === username.trim().toLowerCase()
 
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60)
@@ -54,7 +72,7 @@ export default function LoginPage() {
     return () => clearInterval(t)
   }, [remainingTime])
 
-  // Check biometric availability on mount
+  // Check biometric and passkey availability on mount
   useEffect(() => {
     biometric.checkStatus().then((status) => {
       // On Android, override availability from the native BiometricPrompt bridge
@@ -66,14 +84,17 @@ export default function LoginPage() {
       }
       setBioStatus(status)
     })
+    passkey.checkStatus().then(setPasskeyStatus)
   }, [])
 
-  // Pre-fill username if biometric is enrolled
+  // Pre-fill username if biometric or passkey is enrolled
   useEffect(() => {
     if (bioStatus?.enrolled && bioStatus.enrolled_username && !username) {
       setUsername(bioStatus.enrolled_username)
+    } else if (passkeyStatus?.enrolled && passkeyStatus.enrolled_username && !username) {
+      setUsername(passkeyStatus.enrolled_username)
     }
-  }, [bioStatus])
+  }, [bioStatus, passkeyStatus])
 
   const handleBiometricLogin = useCallback(async () => {
     const trimmed = username.trim()
@@ -136,6 +157,63 @@ export default function LoginPage() {
     }
   }, [bioStatus, username])
 
+  // ─── Passkey login handler ───
+  const handlePasskeyLogin = useCallback(async () => {
+    const trimmed = username.trim()
+    if (!trimmed) {
+      setError("Entrez votre nom d'utilisateur avant d'utiliser la passkey.")
+      return
+    }
+    setError('')
+    setInfo('')
+    setPasskeyLoading(true)
+    try {
+      let res
+      if (hasAndroidKeystore()) {
+        const account = `passkey_ed25519_${trimmed.toLowerCase()}`
+        const keyB64 = await androidKeystoreRetrieve(account)
+        res = await passkey.login(trimmed, keyB64)
+      } else {
+        res = await passkey.login(trimmed)
+      }
+      
+      if (res.success && res.token) {
+        if (res.email) localStorage.setItem('userEmail', res.email)
+        setAuth(
+          { id: res.user_id?.toString() || '1', username: res.message || trimmed, email: res.email || '' },
+          res.token,
+          res.token,
+        )
+        navigate('/')
+      } else {
+        setError(res.message || 'Échec de la connexion passkey')
+      }
+    } catch (err: any) {
+      const msg = err?.toString() || ''
+      setError(msg || 'Échec de la connexion passkey')
+      passkey.checkStatus().then(setPasskeyStatus)
+    } finally {
+      setPasskeyLoading(false)
+    }
+  }, [username, navigate, setAuth])
+
+  // Auto-trigger passkey if enrolled + allowed + username matches (ONCE only)
+  // Priority: passkey > biometric (passkey has no cold start restriction)
+  useEffect(() => {
+    if (
+      !passkeyTriggered.current &&
+      passkeyStatus?.enrolled &&
+      !passkeyStatus?.needs_password_reminder &&
+      passkeyStatus?.enrolled_username &&
+      username.trim().toLowerCase() === passkeyStatus.enrolled_username.toLowerCase() &&
+      document.visibilityState === 'visible'
+    ) {
+      passkeyTriggered.current = true
+      biometricTriggered.current = true // prevent biometric from also auto-triggering
+      handlePasskeyLogin()
+    }
+  }, [passkeyStatus, username])
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
@@ -172,15 +250,8 @@ export default function LoginPage() {
   const locked = loginDelay > 0 && remainingTime > 0
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--bg-void)',
-      padding: 'var(--space-6)',
-    }}>
-      <div className="animate-fade-in" style={{ width: '100%', maxWidth: 400 }}>
+    <div className="auth-page">
+      <div className="auth-page-inner animate-fade-in" style={{ maxWidth: 400 }}>
         {/* Brand */}
         <div style={{ textAlign: 'center', marginBottom: 'var(--space-10)' }}>
           <div style={{
@@ -215,12 +286,7 @@ export default function LoginPage() {
         </div>
 
         {/* Card */}
-        <div style={{
-          background: 'var(--bg-surface)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-xl)',
-          padding: 'var(--space-8)',
-        }}>
+        <div className="auth-card">
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
             {!dbReady ? (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-6)' }}>
@@ -243,8 +309,10 @@ export default function LoginPage() {
             {/* Password field — always shown, user always has the option to type password */}
             <Input
               label="Mot de passe"
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               icon={Lock}
+              iconRight={showPassword ? EyeOff : Eye}
+              onIconRightClick={() => setShowPassword((v) => !v)}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••••••"
@@ -390,6 +458,72 @@ export default function LoginPage() {
                     : bioStatus?.biometric_type === 'faceid'
                       ? `Vault · Face ID${bioStatus?.failed_attempts ? ` (${bioStatus.failed_attempts}/3)` : ''}`
                       : 'Déverrouiller avec biométrie'}
+              </button>
+            </div>
+          )}
+
+          {/* Passkey login — always available if enrolled (no cold start, no timeout) */}
+          {showPasskeySection && (
+            <div style={{ marginTop: showBiometricSection ? 'var(--space-2)' : 'var(--space-4)' }}>
+              {!showBiometricSection && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
+                  marginBottom: 'var(--space-3)',
+                }}>
+                  <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>ou</span>
+                  <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                </div>
+              )}
+
+              {/* 14-day password reminder banner */}
+              {passkeyStatus?.needs_password_reminder && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 'var(--space-2)',
+                  padding: 'var(--space-3)',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'color-mix(in srgb, var(--accent) 10%, transparent)',
+                  border: '1px solid var(--accent)',
+                  fontSize: 'var(--text-xs)',
+                  color: 'var(--accent-text)',
+                  fontFamily: 'var(--font-body)',
+                  marginBottom: 'var(--space-2)',
+                }}>
+                  <Info size={16} style={{ flexShrink: 0 }} />
+                  <span>Rappel de sécurité : veuillez taper votre mot de passe pour confirmer que vous le connaissez toujours.</span>
+                </div>
+              )}
+
+              <button
+                onClick={handlePasskeyLogin}
+                disabled={!canUsePasskey || passkeyLoading || locked}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 'var(--space-3)',
+                  padding: 'var(--space-3) var(--space-4)',
+                  borderRadius: 'var(--radius-lg)',
+                  border: '1px solid var(--border)',
+                  background: canUsePasskey ? 'color-mix(in srgb, var(--accent) 8%, var(--bg-hover))' : 'var(--bg-hover)',
+                  color: 'var(--text-primary)',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 'var(--text-sm)',
+                  fontWeight: 500,
+                  cursor: !canUsePasskey || passkeyLoading || locked ? 'not-allowed' : 'pointer',
+                  opacity: !canUsePasskey || passkeyLoading || locked ? 0.4 : 1,
+                  transition: 'all var(--transition-fast)',
+                }}
+              >
+                <KeyRound size={20} style={{ color: canUsePasskey ? 'var(--accent)' : 'var(--text-muted)' }} />
+                {passkeyLoading
+                  ? 'Authentification passkey...'
+                  : passkeyStatus?.needs_password_reminder
+                    ? 'Passkey (mot de passe requis)'
+                    : 'Déverrouiller avec Passkey'}
               </button>
             </div>
           )}

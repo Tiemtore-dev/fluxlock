@@ -8,7 +8,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
   Upload, Download, Trash2, FileText, Image, Film, Music, Archive,
-  File as FileIcon, AlertCircle, Share2, FolderLock,
+  File as FileIcon, AlertCircle, Share2, FolderLock, ShieldAlert,
 } from 'lucide-react'
 import { files as filesSvc, type SecureFile } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
@@ -70,6 +70,14 @@ const FilesPage = () => {
   const [progress, setProgress] = useState(0)
   const [progressMsg, setProgressMsg] = useState('')
   const [showProgress, setShowProgress] = useState(false)
+  const [isReadonly, setIsReadonly] = useState(false)
+
+  // Check readonly status
+  useEffect(() => {
+    invoke<{ is_readonly: boolean }>('get_security_status')
+      .then((s) => setIsReadonly(s.is_readonly))
+      .catch(() => {})
+  }, [])
 
   /* encryption / decryption progress listeners */
   useEffect(() => {
@@ -207,9 +215,9 @@ const FilesPage = () => {
 
   return (
     <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div className="page-header flex flex-col items-start sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
               <FolderLock size={28} style={{ color: 'var(--accent)' }} />
@@ -219,8 +227,16 @@ const FilesPage = () => {
               {list.length} fichier{list.length !== 1 ? 's' : ''} chiffré{list.length !== 1 ? 's' : ''}
             </p>
           </div>
-          <Button icon={Upload} onClick={() => setShowUpload(true)}>Ajouter</Button>
+          <Button icon={Upload} onClick={() => setShowUpload(true)} disabled={isReadonly} className="w-full sm:w-auto">Ajouter</Button>
         </div>
+
+        {/* Readonly banner */}
+        {isReadonly && (
+          <div className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm" style={{ background: 'var(--danger-muted)', border: '1px solid var(--danger)', color: 'var(--danger)', fontFamily: 'var(--font-body)' }}>
+            <ShieldAlert size={16} />
+            Coffre-fort en lecture seule — modifications bloquées
+          </div>
+        )}
 
         <SearchBar value={search} onChange={setSearch} placeholder="Rechercher un fichier…" />
 
@@ -248,14 +264,14 @@ const FilesPage = () => {
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
                   {mimeIcon(f.mime_type)}
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <p style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.filename}>{f.filename}</p>
+                    <p style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis' }} className="break-all" title={f.filename}>{f.filename}</p>
                     <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{fmtSize(f.file_size)}</p>
                   </div>
                 </div>
                 <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', fontFamily: 'var(--font-body)' }}>{fmtDate(f.created_at)}</span>
                 <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                   <Button size="sm" icon={Download} onClick={() => handleDownload(f)} style={{ flex: 1 }}>Télécharger</Button>
-                  <Button size="sm" variant="ghost" icon={Trash2} onClick={() => { if (confirm(`Supprimer "${f.filename}" ?`)) deleteMut.mutate(f.id) }} style={{ color: 'var(--danger)' }} />
+                  <Button size="sm" variant="ghost" icon={Trash2} onClick={() => { if (confirm(`Supprimer "${f.filename}" ?`)) deleteMut.mutate(f.id) }} disabled={isReadonly} style={{ color: 'var(--danger)' }} />
                 </div>
               </div>
             ))}

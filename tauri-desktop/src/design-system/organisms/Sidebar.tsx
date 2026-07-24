@@ -218,23 +218,8 @@ export function Sidebar() {
       </aside>
 
       {/* ── Mobile bottom tab bar ── */}
-      <nav className="mobile-bottom-nav" style={{
-        position: 'fixed',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        background: 'var(--bg-surface)',
-        borderTop: '1px solid var(--border)',
-        display: 'none', /* shown via CSS @media */
-        zIndex: 1000,
-      }}>
-        <div style={{
-          display: 'flex',
-          justifyContent: 'space-around',
-          alignItems: 'center',
-          padding: '6px 0',
-          paddingBottom: 'max(6px, env(safe-area-inset-bottom))',
-        }}>
+      <nav className="mobile-bottom-nav fixed bottom-0 left-0 right-0 bg-[var(--bg-surface)] border-t border-[var(--border)] hidden z-[1000]">
+        <div className="mobile-bottom-nav__inner flex justify-around items-center py-2 pb-[max(8px,env(safe-area-inset-bottom))] px-1">
           {mobileNavItems.map((item) => {
             const isMore = item.href === '__more__'
             const isActive = !isMore && location.pathname === item.href
@@ -252,14 +237,13 @@ export function Sidebar() {
                     gap: 2,
                     background: 'none',
                     border: 'none',
-                    padding: '4px 8px',
                     cursor: 'pointer',
                     color: mobileMenuOpen ? 'var(--accent)' : 'var(--text-muted)',
-                    fontSize: 10,
                     fontFamily: 'var(--font-body)',
                   }}
+                  className="py-1 px-1.5 text-[9px] min-[360px]:text-[10px]"
                 >
-                  <Menu size={20} />
+                  <Icon size={18} className="min-[360px]:w-5 min-[360px]:h-5" />
                   <span>Plus</span>
                 </button>
               )
@@ -276,14 +260,13 @@ export function Sidebar() {
                   alignItems: 'center',
                   gap: 2,
                   textDecoration: 'none',
-                  padding: '4px 8px',
                   color: isActive ? 'var(--accent)' : 'var(--text-muted)',
-                  fontSize: 10,
                   fontFamily: 'var(--font-body)',
                   fontWeight: isActive ? 600 : 400,
                 }}
+                className="py-1 px-1.5 text-[9px] min-[360px]:text-[10px]"
               >
-                <Icon size={20} />
+                <Icon size={18} className="min-[360px]:w-5 min-[360px]:h-5" />
                 <span>{item.label}</span>
               </Link>
             )
@@ -303,7 +286,7 @@ export function Sidebar() {
           animation: 'fadeIn 0.15s ease',
         }}>
           {/* Header */}
-          <div style={{
+          <div className="mobile-drawer-header" style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
@@ -343,7 +326,7 @@ export function Sidebar() {
           </div>
 
           {/* All nav items */}
-          <nav style={{ flex: 1, padding: 'var(--space-4)', overflowY: 'auto' }}>
+          <nav className="mobile-drawer-nav" style={{ flex: 1, padding: 'var(--space-4) var(--space-5)', overflowY: 'auto' }}>
             {navItems.map((item) => {
               const isActive = location.pathname === item.href
               const Icon = item.icon
@@ -375,7 +358,7 @@ export function Sidebar() {
           </nav>
 
           {/* User / Logout */}
-          <div style={{
+          <div className="mobile-drawer-footer" style={{
             padding: 'var(--space-4) var(--space-5)',
             paddingBottom: 'max(var(--space-4), env(safe-area-inset-bottom))',
             borderTop: '1px solid var(--border)',

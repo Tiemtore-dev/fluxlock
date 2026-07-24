@@ -82,9 +82,9 @@ export default function BackupRestorePage() {
 
   return (
     <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div>
+        <div className="page-header">
           <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', margin: 0 }}>
             <HardDrive size={28} style={{ color: 'var(--accent)' }} /> Backup & Restauration
           </h1>
@@ -107,11 +107,11 @@ export default function BackupRestorePage() {
 
         {/* Backup list */}
         <div style={card}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
+          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-4">
             <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Backups disponibles</h2>
-            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-              <Button variant="secondary" icon={FolderOpen} onClick={selectCustom}>Ouvrir .svbackup</Button>
-              <Button variant="secondary" icon={RefreshCw} onClick={searchBackups} disabled={searching}>
+            <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+              <Button variant="secondary" icon={FolderOpen} onClick={selectCustom} className="flex-1 sm:flex-initial">Ouvrir .svbackup</Button>
+              <Button variant="secondary" icon={RefreshCw} onClick={searchBackups} disabled={searching} className="flex-1 sm:flex-initial">
                 {searching ? 'Recherche…' : 'Rechercher'}
               </Button>
             </div>
@@ -122,17 +122,17 @@ export default function BackupRestorePage() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
               {backups.map((b, i) => (
-                <div key={i} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 'var(--space-4)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <div style={{ flex: 1 }}>
+                <div key={i} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 'var(--space-4)' }} className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex-1 min-w-0 w-full">
                     <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
                       {b.metadata.username}@{b.metadata.device_name}
                     </p>
                     <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', margin: '4px 0' }}>
                       {fmt(b.metadata.created_at)} · {b.metadata.file_count} fichier(s) · v{b.metadata.version}
                     </p>
-                    <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)', wordBreak: 'break-all', margin: 0 }}>{b.path}</p>
+                    <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }} className="break-all">{b.path}</p>
                   </div>
-                  <Button variant="secondary" onClick={() => { setRestorePath(b.path); setRestorePw(''); setShowRestore(true) }} disabled={loading}>
+                  <Button variant="secondary" onClick={() => { setRestorePath(b.path); setRestorePw(''); setShowRestore(true) }} disabled={loading} className="w-full sm:w-auto flex-shrink-0">
                     Restaurer
                   </Button>
                 </div>

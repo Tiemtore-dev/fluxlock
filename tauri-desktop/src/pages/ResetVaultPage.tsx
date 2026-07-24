@@ -34,15 +34,8 @@ export default function ResetVaultPage() {
   }
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--bg-void)',
-      padding: 'var(--space-6)',
-    }}>
-      <div className="animate-fade-in" style={{ width: '100%', maxWidth: 520 }}>
+    <div className="auth-page">
+      <div className="auth-page-inner animate-fade-in" style={{ maxWidth: 520 }}>
         {/* Brand header */}
         <div style={{ textAlign: 'center', marginBottom: 'var(--space-8)' }}>
           <div style={{
@@ -83,11 +76,7 @@ export default function ResetVaultPage() {
         </div>
 
         {/* Card */}
-        <div style={{
-          background: 'var(--bg-surface)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-xl)',
-          padding: 'var(--space-8)',
+        <div className="auth-card" style={{
           position: 'relative',
           overflow: 'hidden',
         }}>

@@ -59,6 +59,85 @@ const safetyBox: React.CSSProperties = {
   textAlign: 'center' as const,
 }
 
+/* ─── SafetyIdenticon — visual hash of the safety number ─── */
+/* Grille 3×3 avec 24 couleurs → 24^9 ≈ 2.6 milliards de combinaisons uniques.
+   L'ORDRE compte : même couleurs + positions différentes = identicon différent.
+   Utilise deux fonctions de hash (FNV-1a + DJB2) pour distribuer l'entropie
+   sur les 9 cellules de la grille. */
+function SafetyIdenticon({ value }: { value: string }) {
+  // FNV-1a hash — complementary to DJB2 for better entropy spread
+  const fnv1a = (s: string): number => {
+    let h = 0x811c9dc5
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, 0x01000193)
+    }
+    return h >>> 0
+  }
+  // DJB2 hash
+  const djb2 = (s: string): number => {
+    let h = 5381
+    for (let i = 0; i < s.length; i++) {
+      h = ((h << 5) + h + s.charCodeAt(i)) | 0
+    }
+    return Math.abs(h)
+  }
+
+  // 24 couleurs hautement distinctes, optimisées pour un fond sombre
+  const palette = [
+    '#EF4444', '#F97316', '#F59E0B', '#EAB308',  // rouges → jaunes
+    '#84CC16', '#22C55E', '#10B981', '#14B8A6',  // verts
+    '#06B6D4', '#22D3EE', '#0EA5E9', '#3B82F6',  // cyans → bleus
+    '#6366F1', '#8B5CF6', '#A855F7', '#D946EF',  // indigos → violets
+    '#EC4899', '#F43F5E', '#FB7185', '#FBBF24',  // roses + doré
+    '#2DD4BF', '#34D399', '#A78BFA', '#C084FC',  // teals + lavandes
+  ]
+
+  const h1 = fnv1a(value)
+  const h2 = djb2(value)
+
+  // 9 cellules : 5 du premier hash, 4 du second (5 bits par cellule)
+  const colors = [
+    palette[h1 % 24],
+    palette[(h1 >> 5) % 24],
+    palette[(h1 >> 10) % 24],
+    palette[(h1 >> 15) % 24],
+    palette[(h1 >> 20) % 24],
+    palette[h2 % 24],
+    palette[(h2 >> 5) % 24],
+    palette[(h2 >> 10) % 24],
+    palette[(h2 >> 15) % 24],
+  ]
+
+  return (
+    <div className="inline-grid grid-cols-3 gap-0.5 w-11 h-11 rounded-md overflow-hidden" title="Identicon de vérification — les couleurs ET leur position doivent correspondre">
+      {colors.map((c, i) => (
+        <div key={i} className="rounded-sm" style={{
+          background: c,
+          boxShadow: `inset 0 0 0 0.5px rgba(255,255,255,0.1), 0 0 4px ${c}55`,
+        }} />
+      ))}
+    </div>
+  )
+}
+
+/* ─── SonarScanner — animated sonar effect for scanning ─── */
+function SonarScanner() {
+  return (
+    <div className="relative w-12 h-12 flex items-center justify-center">
+      <div className="absolute inset-0 rounded-full border-2 opacity-30 animate-[sonarPulse_2s_ease-out_infinite]" style={{ borderColor: 'var(--accent)' }} />
+      <div className="absolute inset-1 rounded-full border-2 opacity-50 animate-[sonarPulse_2s_ease-out_0.4s_infinite]" style={{ borderColor: 'var(--accent)' }} />
+      <div className="w-3 h-3 rounded-full" style={{ background: 'var(--accent)', boxShadow: 'var(--shadow-glow)' }} />
+      <style>{`
+        @keyframes sonarPulse {
+          0% { transform: scale(0.8); opacity: 0.6; }
+          100% { transform: scale(2); opacity: 0; }
+        }
+      `}</style>
+    </div>
+  )
+}
+
 /* ─── WormholeSend ─── */
 function WormholeSend({ onItemsSelected }: { onItemsSelected: (type: string, ids: number[]) => void }) {
   const [selectedType, setSelectedType] = useState<string>('passwords')
@@ -254,11 +333,14 @@ function WormholeReceive() {
           <p style={{ color: 'var(--text-primary)', fontWeight: 600, margin: 0 }}>
             Vérifiez le Safety Number
           </p>
-          <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xl)', color: 'var(--text-primary)', margin: 'var(--space-3) 0', letterSpacing: '0.2em' }}>
-            {connection.safety_number}
-          </p>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--space-3)', margin: 'var(--space-3) 0' }}>
+            <SafetyIdenticon value={connection.safety_number || ''} />
+            <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xl)', color: 'var(--text-primary)', letterSpacing: '0.2em', margin: 0 }}>
+              {connection.safety_number}
+            </p>
+          </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', margin: 0 }}>
-            Confirmez que ce code est identique sur les deux appareils
+            Comparez le code <strong>et</strong> le motif coloré : chaque couleur doit être à la <strong>même position</strong> sur les deux appareils
           </p>
         </div>
 
@@ -274,11 +356,12 @@ function WormholeReceive() {
           )}
         </div>
 
-        <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+        <div className="flex flex-col sm:flex-row gap-3 w-full">
           <Button
             icon={ShieldCheck}
             onClick={() => confirmMut.mutate(true)}
             loading={confirmMut.isPending}
+            className="flex-1 w-full"
           >
             Confirmer et recevoir
           </Button>
@@ -286,6 +369,7 @@ function WormholeReceive() {
             variant="danger"
             icon={X}
             onClick={() => confirmMut.mutate(false)}
+            className="flex-1 w-full"
           >
             Refuser
           </Button>
@@ -593,11 +677,14 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
         <div style={safetyBox}>
           <ShieldAlert size={24} style={{ color: 'var(--warning)', margin: '0 auto var(--space-2)' }} />
           <p style={{ color: 'var(--text-primary)', fontWeight: 600, margin: 0 }}>Vérifiez le Safety Number</p>
-          <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xl)', color: 'var(--text-primary)', margin: 'var(--space-3) 0', letterSpacing: '0.2em' }}>
-            {safetyNumber}
-          </p>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--space-3)', margin: 'var(--space-3) 0' }}>
+            <SafetyIdenticon value={safetyNumber} />
+            <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xl)', color: 'var(--text-primary)', letterSpacing: '0.2em', margin: 0 }}>
+              {safetyNumber}
+            </p>
+          </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', margin: 0 }}>
-            Confirmez que ce code est identique sur les deux appareils
+            Comparez le code <strong>et</strong> le motif coloré : chaque couleur doit être à la <strong>même position</strong> sur les deux appareils
           </p>
           {peerName && (
             <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', marginTop: 'var(--space-2)' }}>
@@ -605,11 +692,11 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
             </p>
           )}
         </div>
-        <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
-          <Button icon={ShieldCheck} onClick={() => confirmMut.mutate(true)} loading={confirmMut.isPending}>
+        <div className="flex flex-col sm:flex-row gap-3 w-full">
+          <Button icon={ShieldCheck} onClick={() => confirmMut.mutate(true)} loading={confirmMut.isPending} className="flex-1 w-full">
             Confirmer et envoyer
           </Button>
-          <Button variant="danger" icon={X} onClick={() => confirmMut.mutate(false)}>Refuser</Button>
+          <Button variant="danger" icon={X} onClick={() => confirmMut.mutate(false)} className="flex-1 w-full">Refuser</Button>
         </div>
       </div>
     )
@@ -722,8 +809,11 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
           </Button>
         </div>
         {discovered.length === 0 ? (
-          <div style={{ textAlign: 'center' as const, padding: 'var(--space-4)' }}>
-            <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)', margin: 0 }}>Aucun pair détecté sur le réseau</p>
+          <div style={{ textAlign: 'center' as const, padding: 'var(--space-4)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-3)' }}>
+            {isScanning && <SonarScanner />}
+            <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)', margin: 0 }}>
+              {isScanning ? 'Recherche de pairs sur le réseau…' : 'Aucun pair détecté sur le réseau'}
+            </p>
             <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', marginTop: 'var(--space-2)' }}>
               Assurez-vous que l'autre appareil est sur le même réseau Wi-Fi
             </p>
@@ -732,20 +822,20 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             {discovered.map((p, i) => (
               
+              
                 <div key={i} style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   padding: '10px 12px', borderRadius: 'var(--radius-md)',
                   background: 'var(--bg-elevated)',
                   border: '1px solid transparent',
                   transition: 'all 0.15s',
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flex: 1 }}>
-                    <Radio size={14} style={{ color: 'var(--accent)' }} />
-                    <div>
-                      <span style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 500 }}>{p.name}</span>
-                      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 2 }}>
+                }} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 flex-1 min-w-0 w-full">
+                    <Radio size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+                    <div className="min-w-0 flex-1">
+                      <span style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 500 }} className="break-all">{p.name}</span>
+                      <div className="flex flex-wrap gap-2 items-center mt-1">
                         <Badge variant="info">{p.method}</Badge>
-                        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)' }}>{p.addr}</span>
+                        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)' }} className="break-all">{p.addr}</span>
                       </div>
                     </div>
                   </div>
@@ -759,6 +849,7 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
                         createOfferMut.mutate(false)
                       }}
                       loading={createOfferMut.isPending}
+                      className="w-full sm:w-auto flex-shrink-0"
                     >
                       Envoyer à
                     </Button>
@@ -835,15 +926,15 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
               <div key={p.fingerprint} style={{
                 padding: '12px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-elevated)',
               }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div>
-                    <div style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 500 }}>{p.name}</div>
-                    <div style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>{p.fingerprint}</div>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1 w-full">
+                    <div style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 500 }} className="break-all">{p.name}</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)', marginTop: 2 }} className="break-all">{p.fingerprint}</div>
                     <div style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', marginTop: 2 }}>
                       {p.transfer_count} transfert(s) · Vu {new Date(p.last_seen).toLocaleDateString('fr-FR')}
                     </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+                  <div className="flex gap-2 items-center justify-end sm:justify-start w-full sm:w-auto">
                     <Button variant="ghost" size="sm" icon={Trash2} onClick={() => {
                       if (confirm(`Révoquer la confiance de ${p.name} ?`)) revokeMut.mutate(p.fingerprint)
                     }} />
@@ -851,11 +942,10 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
                 </div>
                 {/* Sync toggle */}
                 <div style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   marginTop: 'var(--space-3)', paddingTop: 'var(--space-3)',
                   borderTop: '1px solid var(--border)',
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                }} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
                     <RefreshCw size={14} style={{ color: syncEnabled[p.fingerprint] ? 'var(--accent)' : 'var(--text-muted)' }} />
                     <span style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-xs)' }}>
                       Synchronisation automatique
@@ -868,6 +958,7 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
                       background: syncEnabled[p.fingerprint] ? 'var(--accent)' : 'var(--bg-input)',
                       position: 'relative', transition: 'background 0.2s',
                     }}
+                    className="self-end sm:self-auto"
                   >
                     <div style={{
                       width: 16, height: 16, borderRadius: '50%', background: 'white',
@@ -908,9 +999,9 @@ export default function TransferPage() {
 
   return (
     <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-3)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-3)' }} className="page-header">
           <div>
             <h1 style={{
               fontFamily: 'var(--font-display)',
@@ -930,7 +1021,7 @@ export default function TransferPage() {
         </div>
 
         {/* Tabs */}
-        <div style={{ display: 'flex', gap: 'var(--space-1)', background: 'var(--bg-surface)', padding: 4, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+        <div style={{ background: 'var(--bg-surface)', padding: 4, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }} className="flex gap-1 w-full">
           {tabs.map(t => {
             const active = tab === t.key
             const Icon = t.icon
@@ -939,22 +1030,19 @@ export default function TransferPage() {
                 key={t.key}
                 onClick={() => setTab(t.key)}
                 style={{
-                  flex: 1,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--space-2)',
-                  padding: '10px 16px',
                   border: 'none',
                   borderRadius: 'var(--radius-sm)',
                   background: active ? 'var(--bg-elevated)' : 'transparent',
                   color: active ? 'var(--text-primary)' : 'var(--text-muted)',
                   fontFamily: 'var(--font-body)',
-                  fontSize: 'var(--text-sm)',
                   fontWeight: active ? 500 : 400,
                   cursor: 'pointer',
                   transition: 'all 0.15s',
                 }}
+                className="flex-1 flex items-center justify-center gap-2 py-2.5 px-3 text-xs sm:text-sm"
               >
                 <Icon size={16} />
-                {t.label}
+                <span className="hidden min-[380px]:inline">{t.label}</span>
               </button>
             )
           })}

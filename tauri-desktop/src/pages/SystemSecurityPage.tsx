@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { Shield, AlertTriangle, Lock, Unlock, RefreshCw, Activity, HardDrive } from 'lucide-react'
+import { Shield, AlertTriangle, Lock, Unlock, RefreshCw, Activity, HardDrive, ShieldAlert } from 'lucide-react'
 import { AppShell } from '../design-system/layouts'
 import { Button, Input, Spinner, Badge } from '../design-system/atoms'
 import { Modal } from '../design-system/molecules'
@@ -78,9 +78,9 @@ export default function SystemSecurityPage() {
 
   return (
     <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} className="page-header">
           <div>
             <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', margin: 0 }}>
               <Shield size={28} style={{ color: 'var(--accent)' }} /> Sécurité Système
@@ -92,14 +92,43 @@ export default function SystemSecurityPage() {
 
         {sec && (
           <>
+            {/* Readonly warning banner */}
+            {sec.is_readonly && (
+              <div className="flex items-center gap-3 rounded-xl animate-fadeIn px-5 py-4" style={{ background: 'var(--danger-muted)', border: '1px solid var(--danger)' }}>
+                <ShieldAlert size={24} className="shrink-0" style={{ color: 'var(--danger)' }} />
+                <div className="flex-1">
+                  <p className="font-bold text-sm m-0" style={{ color: 'var(--danger)', fontFamily: 'var(--font-body)' }}>
+                    Coffre-fort en lecture seule
+                  </p>
+                  <p className="text-xs mt-1 mb-0" style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-body)' }}>
+                    Une menace active a été détectée. Toutes les modifications sont bloquées pour protéger vos données.
+                  </p>
+                </div>
+                <Button variant="danger" size="sm" icon={Unlock} onClick={() => setShowPwDialog(true)}>Déverrouiller</Button>
+              </div>
+            )}
             {/* Status cards */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 'var(--space-4)' }}>
-              {/* Threat level */}
+              {/* Threat level with visual gauge */}
               <div style={card}>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-wide)', marginBottom: 'var(--space-2)' }}>Niveau de menace</p>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                <div className="flex items-center gap-3 mb-3">
                   <AlertTriangle size={28} style={{ color: threatColor(sec.threat_level) }} />
                   <Badge variant={threatBadge(sec.threat_level)} size="sm">{sec.threat_level.toUpperCase()}</Badge>
+                </div>
+                {/* Visual threat gauge */}
+                <div className="flex gap-0.5 h-1.5 rounded-full overflow-hidden">
+                  {['none', 'low', 'medium', 'high', 'critical'].map((level, i) => {
+                    const levels = ['none', 'low', 'medium', 'high', 'critical']
+                    const currentIdx = levels.indexOf(sec.threat_level)
+                    const colors = ['var(--success)', '#22d3ee', 'var(--warning)', '#f97316', 'var(--danger)']
+                    const isActive = i <= currentIdx
+                    return (
+                      <div key={level} className={`flex-1 transition-colors duration-300 ${i === 0 ? 'rounded-l' : ''} ${i === 4 ? 'rounded-r' : ''}`} style={{
+                        background: isActive ? colors[i] : 'var(--bg-hover)',
+                      }} />
+                    )
+                  })}
                 </div>
               </div>
               {/* Readonly */}

@@ -385,6 +385,10 @@ pub async fn local_login(
     // This enables biometric quick-unlock for the configured timeout period
     biometric::notify_password_login_success();
     
+    // Notify passkey module that a master-password login succeeded
+    // This resets the 14-day password reminder timer
+    crate::passkey::notify_password_used();
+    
     // Générer et stocker le token de session
     let token = generate_session_token();
     *state.session_token.lock().await = Some(token.clone());

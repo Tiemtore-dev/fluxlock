@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { Settings, Moon, Sun, Bell, Shield, Save, Fingerprint, Info, AlertTriangle, Lock, RefreshCw, Smartphone, Trash2, Copy, Check, Link, Wifi, Globe, ShieldCheck, FileText, Server } from 'lucide-react'
+import { Settings, Moon, Sun, Bell, Shield, Save, Fingerprint, Info, AlertTriangle, Lock, RefreshCw, Smartphone, Trash2, Copy, Check, Link, Wifi, Globe, ShieldCheck, FileText, Server, KeyRound } from 'lucide-react'
 import { AppShell } from '../design-system/layouts'
 import { Button, Input } from '../design-system/atoms'
 import { useToast } from '../design-system/organisms'
-import { biometric, auth, transfer, isolationMode, signedLogging, enclave, type BiometricStatus, type SyncSettings, type SyncDeviceInfo, type EnclaveStatus } from '../lib/vault-service'
+import { biometric, passkey, auth, transfer, isolationMode, signedLogging, enclave, type BiometricStatus, type PasskeyStatus, type SyncSettings, type SyncDeviceInfo, type EnclaveStatus } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
 import { hasAndroidBiometric, androidBiometricAvailable, hasAndroidKeystore, androidKeystoreStore, androidKeystoreDelete } from '../lib/android-biometric'
 
@@ -32,6 +32,14 @@ export default function SettingsPage() {
   const [bioConsent, setBioConsent] = useState(false)
   const [confirmPassword, setConfirmPassword] = useState('')
   const [confirmError, setConfirmError] = useState('')
+
+  // Passkey activation flow states
+  const [passkeyStatus, setPasskeyStatus] = useState<PasskeyStatus | null>(null)
+  const [passkeyLoading, setPasskeyLoading] = useState(false)
+  const [passkeyStep, setPasskeyStep] = useState<'idle' | 'info' | 'confirm'>('idle')
+  const [passkeyConsent, setPasskeyConsent] = useState(false)
+  const [passkeyConfirmPassword, setPasskeyConfirmPassword] = useState('')
+  const [passkeyConfirmError, setPasskeyConfirmError] = useState('')
 
   // Sync state
   const [syncSettings, setSyncSettings] = useState<SyncSettings | null>(null)
@@ -82,10 +90,10 @@ export default function SettingsPage() {
   useEffect(() => {
     isolationMode.get().then(setIsolationEnabled)
     signedLogging.getStatus().then(setSignedLoggingEnabled)
-    enclave.getStatus().then(setEnclaveStatus).catch(() => {})
+    enclave.getStatus().then(setEnclaveStatus).catch(() => { })
   }, [])
 
-  // Check biometric availability
+  // Check biometric and passkey availability
   useEffect(() => {
     biometric.checkStatus().then((status) => {
       console.log('[Settings] biometric status:', JSON.stringify(status))
@@ -97,6 +105,7 @@ export default function SettingsPage() {
       }
       setBioStatus(status)
     })
+    passkey.checkStatus().then(setPasskeyStatus)
   }, [])
 
   const startBiometricActivation = () => {
@@ -195,6 +204,89 @@ export default function SettingsPage() {
     }
   }
 
+  // ─── Passkey functions ───
+  const startPasskeyActivation = () => {
+    setPasskeyStep('info')
+    setPasskeyConsent(false)
+    setPasskeyConfirmPassword('')
+    setPasskeyConfirmError('')
+  }
+
+  const cancelPasskeyActivation = () => {
+    setPasskeyStep('idle')
+    setPasskeyConsent(false)
+    setPasskeyConfirmPassword('')
+    setPasskeyConfirmError('')
+  }
+
+  const proceedToPasskeyConfirm = () => {
+    if (!passkeyConsent) return
+    setPasskeyStep('confirm')
+    setPasskeyConfirmError('')
+  }
+
+  const confirmAndEnablePasskey = async () => {
+    if (!passkeyConfirmPassword.trim()) {
+      setPasskeyConfirmError('Veuillez entrer votre mot de passe maître.')
+      return
+    }
+    setPasskeyLoading(true)
+    setPasskeyConfirmError('')
+    try {
+      const loginRes = await auth.login(
+        user?.username || passkeyStatus?.enrolled_username || '',
+        passkeyConfirmPassword
+      )
+      if (!loginRes.success) {
+        setPasskeyConfirmError('Mot de passe incorrect.')
+        setPasskeyLoading(false)
+        return
+      }
+      
+      const enableResult = await passkey.register()
+      
+      // On Android: Rust returns JSON with key_b64 — store it in Android Keystore (TEE/StrongBox)
+      if (hasAndroidKeystore()) {
+        try {
+          const parsed = JSON.parse(enableResult)
+          if (parsed.key_b64) {
+            const account = `passkey_ed25519_${(user?.username || passkeyStatus?.enrolled_username || '').toLowerCase()}`
+            await androidKeystoreStore(account, parsed.key_b64)
+          }
+        } catch {
+          // Fallback if not JSON
+        }
+      }
+      const updated = await passkey.checkStatus()
+      setPasskeyStatus(updated)
+      setPasskeyStep('idle')
+      setPasskeyConfirmPassword('')
+      toast('Passkey activée avec succès', 'success')
+    } catch (err: any) {
+      setPasskeyConfirmError(err?.toString() || 'Erreur lors de l\'activation passkey')
+    } finally {
+      setPasskeyLoading(false)
+    }
+  }
+
+  const disablePasskey = async () => {
+    setPasskeyLoading(true)
+    try {
+      if (hasAndroidKeystore()) {
+        const account = `passkey_ed25519_${(user?.username || passkeyStatus?.enrolled_username || '').toLowerCase()}`
+        androidKeystoreDelete(account)
+      }
+      await passkey.delete()
+      const updated = await passkey.checkStatus()
+      setPasskeyStatus(updated)
+      toast('Passkey supprimée', 'success')
+    } catch (err: any) {
+      toast(err?.toString() || 'Erreur passkey', 'error')
+    } finally {
+      setPasskeyLoading(false)
+    }
+  }
+
   const toggleSync = async () => {
     setSyncLoading(true)
     try {
@@ -279,7 +371,7 @@ export default function SettingsPage() {
       pairingPollRef.current = null
     }
     if (pairingId) {
-      transfer.cancel(pairingId).catch(() => {})
+      transfer.cancel(pairingId).catch(() => { })
     }
     setPairingStep('idle')
     setPairingCode('')
@@ -329,7 +421,7 @@ export default function SettingsPage() {
   const card: React.CSSProperties = { background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', marginBottom: 'var(--space-5)' }
   const cardHeader: React.CSSProperties = { padding: 'var(--space-5)', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }
   const cardBody: React.CSSProperties = { padding: 'var(--space-5)' }
-  const row: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between' }
+  const row = "flex flex-col sm:flex-row sm:items-center justify-between gap-3"
 
   const Toggle = ({ on, onToggle }: { on: boolean; onToggle: () => void }) => (
     <button onClick={onToggle} style={{
@@ -345,9 +437,9 @@ export default function SettingsPage() {
 
   return (
     <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div>
+        <div className="page-header">
           <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', margin: 0 }}>
             <Settings size={28} style={{ color: 'var(--accent)' }} /> Paramètres
           </h1>
@@ -361,7 +453,7 @@ export default function SettingsPage() {
             <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Apparence</h2>
           </div>
           <div style={cardBody}>
-            <div style={row}>
+            <div className={row}>
               <div>
                 <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Mode sombre</p>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Réduire la fatigue oculaire</p>
@@ -372,13 +464,13 @@ export default function SettingsPage() {
         </div>
 
         {/* Notifications */}
-        <div style={card}>
+        {/* <div style={card}>
           <div style={cardHeader}>
             <Bell size={20} style={{ color: 'var(--accent)' }} />
             <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Notifications</h2>
           </div>
           <div style={cardBody}>
-            <div style={row}>
+            <div className={row}>
               <div>
                 <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer les notifications</p>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Alertes événements de sécurité</p>
@@ -386,7 +478,7 @@ export default function SettingsPage() {
               <Toggle on={notifications} onToggle={() => setNotifications(!notifications)} />
             </div>
           </div>
-        </div>
+        </div> */}
 
         {/* Sécurité */}
         <div style={card}>
@@ -398,32 +490,32 @@ export default function SettingsPage() {
             {/* Biometric — always visible */}
             {bioStep === 'idle' && (
               <>
-                <div style={row}>
+                <div className={row}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
                     <Fingerprint size={18} style={{ color: bioStatus?.available ? 'var(--accent)' : 'var(--text-muted)' }} />
                     <div>
                       <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
                         {bioStatus?.biometric_type === 'touchid' ? 'Touch ID'
                           : bioStatus?.biometric_type === 'faceid' ? 'Face ID'
-                          : bioStatus?.biometric_type === 'fingerprint' ? 'Empreinte digitale'
-                          : 'Biométrie'}
+                            : bioStatus?.biometric_type === 'fingerprint' ? 'Empreinte digitale'
+                              : 'Biométrie'}
                       </p>
                       <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
                         {!bioStatus
                           ? 'Vérification en cours…'
                           : bioStatus.available && bioStatus.enrolled
-                          ? `Activé pour ${bioStatus.enrolled_username || 'cet utilisateur'}`
-                          : bioStatus.available
-                          ? 'Déverrouillage rapide par empreinte'
-                          : 'Non disponible sur cette plateforme'}
+                            ? `Activé pour ${bioStatus.enrolled_username || 'cet utilisateur'}`
+                            : bioStatus.available
+                              ? 'Déverrouillage rapide par empreinte'
+                              : 'Non disponible sur cette plateforme'}
                       </p>
                     </div>
                   </div>
                   {bioStatus?.available ? (
                     bioStatus.enrolled ? (
-                      <Toggle on={true} onToggle={bioLoading ? () => {} : disableBiometric} />
+                      <Toggle on={true} onToggle={bioLoading ? () => { } : disableBiometric} />
                     ) : (
-                      <Toggle on={false} onToggle={bioLoading ? () => {} : startBiometricActivation} />
+                      <Toggle on={false} onToggle={bioLoading ? () => { } : startBiometricActivation} />
                     )
                   ) : (
                     <span style={{
@@ -594,7 +686,147 @@ export default function SettingsPage() {
               </div>
             )}
 
-            <div style={row}>
+            {/* ─── Passkey (Always-on) ─── */}
+            {passkeyStep === 'idle' && (
+              <>
+                <div className={row}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                    <KeyRound size={18} style={{ color: passkeyStatus?.enrolled ? 'var(--accent)' : 'var(--text-muted)' }} />
+                    <div>
+                      <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+                        Authentification Passkey
+                      </p>
+                      <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
+                        {!passkeyStatus
+                          ? 'Vérification en cours…'
+                          : passkeyStatus.enrolled
+                            ? `Activé pour ${passkeyStatus.enrolled_username || 'cet utilisateur'}`
+                            : 'Déverrouillage persistant et ultra-rapide'}
+                      </p>
+                    </div>
+                  </div>
+                  {passkeyStatus ? (
+                    passkeyStatus.enrolled ? (
+                      <Toggle on={true} onToggle={passkeyLoading ? () => { } : disablePasskey} />
+                    ) : (
+                      <Toggle on={false} onToggle={passkeyLoading ? () => { } : startPasskeyActivation} />
+                    )
+                  ) : (
+                    <span style={{
+                      fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+                      padding: '4px 10px', borderRadius: 'var(--radius-full)',
+                      background: 'var(--bg-hover)',
+                    }}>
+                      …
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+
+            {/* Passkey activation — Step 1: Information screen */}
+            {passkeyStep === 'info' && (
+              <div style={{
+                padding: 'var(--space-5)',
+                borderRadius: 'var(--radius-lg)',
+                background: 'color-mix(in srgb, var(--accent) 8%, transparent)',
+                border: '1px solid var(--accent)',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
+                  <Info size={18} style={{ color: 'var(--accent)' }} />
+                  <h3 style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0, fontSize: 'var(--text-base)' }}>
+                    Activation Passkey
+                  </h3>
+                </div>
+
+                <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', lineHeight: 1.6 }}>
+                  <p style={{ margin: '0 0 var(--space-3) 0' }}>
+                    <strong>Ce que la passkey fait :</strong> Elle remplace la saisie de votre mot de passe à l'ouverture du coffre, 
+                    <strong> même au premier lancement de l'application ou après une longue inactivité</strong>.
+                  </p>
+                  <p style={{ margin: '0 0 var(--space-3) 0' }}>
+                    La sécurité est assurée par un chiffrement hybride local post-quantique. 
+                    Toutefois, pour votre sécurité, <strong>votre mot de passe maître sera exigé tous les 14 jours</strong> pour s'assurer que vous ne l'avez pas oublié.
+                  </p>
+                </div>
+
+                {/* Consent checkbox */}
+                <label style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)',
+                  cursor: 'pointer', padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                  background: 'var(--bg-surface)', border: '1px solid var(--border)',
+                  marginBottom: 'var(--space-4)',
+                  marginTop: 'var(--space-3)'
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={passkeyConsent}
+                    onChange={(e) => setPasskeyConsent(e.target.checked)}
+                    style={{ marginTop: 2, accentColor: 'var(--accent)' }}
+                  />
+                  <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>
+                    J'ai lu et compris le fonctionnement de la Passkey.
+                  </span>
+                </label>
+
+                <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end' }}>
+                  <Button variant="ghost" onClick={cancelPasskeyActivation}>Annuler</Button>
+                  <Button onClick={proceedToPasskeyConfirm} disabled={!passkeyConsent}>Continuer</Button>
+                </div>
+              </div>
+            )}
+
+            {/* Passkey activation — Step 2: Password confirmation */}
+            {passkeyStep === 'confirm' && (
+              <div style={{
+                padding: 'var(--space-5)',
+                borderRadius: 'var(--radius-lg)',
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border)',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
+                  <Lock size={18} style={{ color: 'var(--accent)' }} />
+                  <h3 style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0, fontSize: 'var(--text-base)' }}>
+                    Confirmez votre identité
+                  </h3>
+                </div>
+                <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', margin: '0 0 var(--space-4) 0' }}>
+                  Entrez votre mot de passe maître pour générer et enregistrer la Passkey.
+                </p>
+
+                <Input
+                  label="Mot de passe maître"
+                  type="password"
+                  icon={Lock}
+                  value={passkeyConfirmPassword}
+                  onChange={(e) => { setPasskeyConfirmPassword(e.target.value); setPasskeyConfirmError('') }}
+                  placeholder="••••••••••••"
+                  autoFocus
+                />
+
+                {passkeyConfirmError && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                    padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                    background: 'var(--danger-muted)', border: '1px solid var(--danger)',
+                    fontSize: 'var(--text-sm)', color: 'var(--danger)',
+                    fontFamily: 'var(--font-body)', marginTop: 'var(--space-3)',
+                  }}>
+                    <AlertTriangle size={14} />
+                    {passkeyConfirmError}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end', marginTop: 'var(--space-4)' }}>
+                  <Button variant="ghost" onClick={cancelPasskeyActivation}>Annuler</Button>
+                  <Button onClick={confirmAndEnablePasskey} loading={passkeyLoading} icon={KeyRound}>
+                    Activer la Passkey
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className={row}>
               <div>
                 <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Verrouillage automatique</p>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Verrouiller après une période d'inactivité</p>
@@ -633,14 +865,14 @@ export default function SettingsPage() {
           ) : (
             <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
               {/* Enable/disable sync */}
-              <div style={row}>
+              <div className={row}>
                 <div>
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer la synchronisation</p>
                   <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
                     Synchroniser le trust store entre vos appareils (ML-DSA-65 + ML-KEM-768)
                   </p>
                 </div>
-                <Toggle on={syncSettings.enabled} onToggle={syncLoading ? () => {} : toggleSync} />
+                <Toggle on={syncSettings.enabled} onToggle={syncLoading ? () => { } : toggleSync} />
               </div>
 
               {/* ── Pairing section ── */}
@@ -825,7 +1057,7 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              {/* Sync devices list */}
+              {/* Sync devices list
               {syncSettings.enabled && (
                 <div>
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 var(--space-3) 0', fontSize: 'var(--text-sm)' }}>
@@ -875,7 +1107,7 @@ export default function SettingsPage() {
                     </div>
                   ))}
                 </div>
-              )}
+              )} */}
             </div>
           )}
         </div>
@@ -887,7 +1119,7 @@ export default function SettingsPage() {
             <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Mode Isolation</h2>
           </div>
           <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-            <div style={row}>
+            <div className={row}>
               <div>
                 <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer le mode isolation</p>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
@@ -926,7 +1158,7 @@ export default function SettingsPage() {
             <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Logs Signés</h2>
           </div>
           <div style={cardBody}>
-            <div style={row}>
+            <div className={row}>
               <div>
                 <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer les logs signés</p>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>
@@ -948,7 +1180,7 @@ export default function SettingsPage() {
         </div>
 
         {/* Enclave Sécurisée */}
-        {enclaveStatus && (
+        {/* {enclaveStatus && (
           <div style={card}>
             <div style={cardHeader}>
               <Server size={20} style={{ color: 'var(--accent)' }} />
@@ -956,15 +1188,15 @@ export default function SettingsPage() {
             </div>
             <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)' }}>
+                <div className="flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4 text-sm">
                   <span style={{ color: 'var(--text-secondary)' }}>Plateforme</span>
                   <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{enclaveStatus.platform}</span>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)' }}>
+                <div className="flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4 text-sm">
                   <span style={{ color: 'var(--text-secondary)' }}>Type d'enclave</span>
                   <span style={{ color: 'var(--text-primary)', fontWeight: 500, textAlign: 'right', maxWidth: '60%' }}>{enclaveStatus.enclave_type}</span>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)' }}>
+                <div className="flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4 text-sm">
                   <span style={{ color: 'var(--text-secondary)' }}>Protection matérielle</span>
                   <span style={{
                     color: enclaveStatus.hardware_backed ? 'var(--success)' : 'var(--warning)',
@@ -973,7 +1205,7 @@ export default function SettingsPage() {
                     {enclaveStatus.hardware_backed ? 'Oui (Secure Enclave)' : 'Non (logiciel)'}
                   </span>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)' }}>
+                <div className="flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4 text-sm">
                   <span style={{ color: 'var(--text-secondary)' }}>Sync iCloud désactivée</span>
                   <span style={{
                     color: enclaveStatus.sync_disabled ? 'var(--success)' : 'var(--warning)',
@@ -996,11 +1228,11 @@ export default function SettingsPage() {
               )}
             </div>
           </div>
-        )}
+        )} */}
 
         {/* Save */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <Button icon={Save} onClick={save}>Enregistrer les paramètres</Button>
+        <div className="flex justify-end w-full">
+          <Button icon={Save} onClick={save} className="w-full sm:w-auto">Enregistrer les paramètres</Button>
         </div>
       </div>
     </AppShell>

@@ -25,7 +25,7 @@ CRYPTO_DIR="$PROJECT_ROOT/rust-crypto-core"
 ANDROID_TARGET="aarch64"   # Par défaut: ARM64 uniquement (plus rapide)
 ANDROID_BUILD_MODE="debug" # Par défaut: debug (installable directement via ADB)
 ADB_INSTALL=false          # Par défaut: pas d'installation ADB automatique
-MIN_DISK_SPACE_GB=5        # Espace disque minimum requis en Go
+MIN_DISK_SPACE_GB=2        # Espace disque minimum requis en Go
 
 # ============================================================================
 # Fonctions utilitaires
@@ -314,7 +314,7 @@ create_macos_dmg() {
         -ov \
         -format UDZO \
         -imagekey zlib-level=9 \
-        "$DMG_PATH" > /dev/null 2>&1
+        "$DMG_PATH"
     
     # Nettoyer
     rm -rf "$TMP_DIR"

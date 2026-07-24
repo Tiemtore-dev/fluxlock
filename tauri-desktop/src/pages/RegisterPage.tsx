@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Lock, Mail, User, AlertTriangle, UserPlus } from 'lucide-react'
+import { Lock, Mail, User, AlertTriangle, UserPlus, Eye, EyeOff } from 'lucide-react'
 import { auth } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
 import { Button, Input, Spinner } from '../design-system/atoms'
@@ -16,6 +16,8 @@ export default function RegisterPage() {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
   const [hasUser, setHasUser] = useState(false)
   const [checkingUser, setCheckingUser] = useState(true)
 
@@ -49,15 +51,8 @@ export default function RegisterPage() {
   }
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--bg-void)',
-      padding: 'var(--space-6)',
-    }}>
-      <div className="animate-fade-in" style={{ width: '100%', maxWidth: 400 }}>
+    <div className="auth-page">
+      <div className="auth-page-inner animate-fade-in" style={{ maxWidth: 400 }}>
         {/* Brand */}
         <div style={{ textAlign: 'center', marginBottom: 'var(--space-10)' }}>
           <div style={{
@@ -77,7 +72,7 @@ export default function RegisterPage() {
         </div>
 
         {/* Card */}
-        <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', padding: 'var(--space-8)' }}>
+        <div className="auth-card">
           {checkingUser ? (
             <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-10)' }}>
               <Spinner size={32} />
@@ -108,7 +103,7 @@ export default function RegisterPage() {
               <Input label="Nom d'utilisateur" icon={User} value={username} onChange={(e) => setUsername(e.target.value)} placeholder="johndoe" required autoFocus />
               <Input label="Email" type="email" icon={Mail} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="john@example.com" required />
               <div>
-                <Input label="Mot de passe" type="password" icon={Lock} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••••••" required />
+                <Input label="Mot de passe" type={showPassword ? 'text' : 'password'} icon={Lock} iconRight={showPassword ? EyeOff : Eye} onIconRightClick={() => setShowPassword((v) => !v)} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••••••" required />
                 <div style={{ marginTop: 'var(--space-2)' }}>
                   <PasswordStrength password={password} />
                 </div>
@@ -116,7 +111,7 @@ export default function RegisterPage() {
                   Minimum 12 caractères
                 </p>
               </div>
-              <Input label="Confirmer le mot de passe" type="password" icon={Lock} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••••••" required />
+              <Input label="Confirmer le mot de passe" type={showConfirm ? 'text' : 'password'} icon={Lock} iconRight={showConfirm ? EyeOff : Eye} onIconRightClick={() => setShowConfirm((v) => !v)} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••••••" required />
 
               {error && (
                 <div style={{

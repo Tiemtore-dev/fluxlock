@@ -44,6 +44,9 @@ lettre = { version = "0.11", default-features = false, features = ["smtp-transpo
 # Compression
 flate2 = "1.0"  # gzip
 
+# CSV import/export with serde integration
+csv = "1.3"
+
 # Environment variables
 dotenv = "0.15"
 
