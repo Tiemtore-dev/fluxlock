@@ -22,6 +22,7 @@ mod path_validator;
 pub mod secure_key;
 pub mod transfer;
 mod biometric;
+mod passkey;
 mod signed_log;
 pub mod commands;
 pub mod vault_key_cache;
@@ -469,6 +470,12 @@ pub fn run() {
             biometric_login,
             biometric_login_with_key,
             biometric_emergency_lock,
+            // Passkey commands
+            check_passkey,
+            register_passkey,
+            passkey_login,
+            passkey_authenticate,
+            delete_passkey,
             // Threat reaction commands
             analyze_and_react,
             // Maintenance commands
@@ -492,6 +499,9 @@ pub fn run() {
             get_backup_metadata,
             // Vault reset command
             reset_vault_completely,
+            // CSV import/export commands
+            import_passwords_csv,
+            export_passwords_csv,
             // Signed log commands
             verify_log_integrity,
             toggle_signed_logging,

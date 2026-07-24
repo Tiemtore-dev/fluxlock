@@ -6,8 +6,10 @@ pub mod keys;
 pub mod sharing;
 pub mod security;
 pub mod biometric_cmds;
+pub mod passkey_cmds;
 pub mod totp_2fa;
 pub mod backup;
+pub mod csv_io;
 pub mod system;
 
 // Re-export all command functions for generate_handler![]
@@ -19,6 +21,8 @@ pub use keys::*;
 pub use sharing::*;
 pub use security::*;
 pub use biometric_cmds::*;
+pub use passkey_cmds::*;
 pub use totp_2fa::*;
 pub use backup::*;
+pub use csv_io::*;
 pub use system::*;

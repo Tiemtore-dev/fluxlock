@@ -50,10 +50,9 @@ export default function DashboardPage() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', maxHeight: 380, overflowY: 'auto' }}>
               {events.slice(0, 10).map((ev, i) => (
                 <div key={i} style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   padding: 'var(--space-3) var(--space-4)',
                   borderRadius: 'var(--radius-md)', background: 'var(--bg-elevated)',
-                }}>
+                }} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)', flex: 1 }}>
                     <div style={{
                       width: 6, height: 6, borderRadius: 'var(--radius-full)', marginTop: 7, flexShrink: 0,
@@ -73,9 +72,11 @@ export default function DashboardPage() {
                       </p>
                     </div>
                   </div>
-                  <Badge variant={ev.severity === 'high' ? 'danger' : ev.severity === 'medium' ? 'warning' : 'success'} size="sm">
-                    {ev.severity === 'high' ? 'Élevé' : ev.severity === 'medium' ? 'Moyen' : 'Faible'}
-                  </Badge>
+                  <div className="self-start sm:self-auto">
+                    <Badge variant={ev.severity === 'high' ? 'danger' : ev.severity === 'medium' ? 'warning' : 'success'} size="sm">
+                      {ev.severity === 'high' ? 'Élevé' : ev.severity === 'medium' ? 'Moyen' : 'Faible'}
+                    </Badge>
+                  </div>
                 </div>
               ))}
             </div>

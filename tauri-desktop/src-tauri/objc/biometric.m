@@ -160,7 +160,7 @@ int biometric_keychain_store(const char *account, const void *data, int data_len
     NSString *nsAccount = [NSString stringWithUTF8String:account];
     NSData *nsData = [NSData dataWithBytes:data length:(NSUInteger)data_len];
 
-    // Delete any existing item first (SecItemUpdate doesn't work well with ACLs)
+    // Delete any existing item first
     NSDictionary *deleteQuery = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: kBioKeychainService,
@@ -177,21 +177,31 @@ int biometric_keychain_store(const char *account, const void *data, int data_len
         &acError
     );
 
-    if (!accessControl || acError) {
-        if (accessControl) CFRelease(accessControl);
-        return -2;
-    }
-
-    NSDictionary *addQuery = @{
+    NSMutableDictionary *addQuery = [@{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: kBioKeychainService,
         (__bridge id)kSecAttrAccount: nsAccount,
         (__bridge id)kSecValueData: nsData,
-        (__bridge id)kSecAttrAccessControl: (__bridge id)accessControl,
-    };
+    } mutableCopy];
+
+    if (accessControl && !acError) {
+        addQuery[(__bridge id)kSecAttrAccessControl] = (__bridge id)accessControl;
+    }
 
     OSStatus status = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
-    CFRelease(accessControl);
+
+    // Fallback if missing entitlements (e.g., local ad-hoc build without Apple Developer Program)
+    if (status == errSecMissingEntitlement /* -34018 */) {
+        NSLog(@"[FluXlock] errSecMissingEntitlement (-34018) detected. Falling back to non-ACL keychain storage for local dev.");
+        [addQuery removeObjectForKey:(__bridge id)kSecAttrAccessControl];
+        // Enforce basic accessibility instead
+        addQuery[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
+        status = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+    }
+
+    if (accessControl) {
+        CFRelease(accessControl);
+    }
 
     return (int)status;
 }
@@ -202,17 +212,36 @@ int biometric_keychain_store(const char *account, const void *data, int data_len
 /// The `reason` string appears in the biometric dialog.
 ///
 /// Returns: number of bytes copied on success, negative on error.
-///   out_data must be pre-allocated by the caller (out_data_capacity bytes).
 int biometric_keychain_retrieve(const char *account, const char *reason,
                                 void *out_data, int out_data_capacity) {
     if (!account || !out_data || out_data_capacity <= 0) return -1;
 
     NSString *nsAccount = [NSString stringWithUTF8String:account];
-
-    // Create context with localized reason for the biometric prompt
+    
+    // Explicitly prompt for Touch ID first. 
+    // This is required if the item was stored via the -34018 fallback (no ACL).
     LAContext *context = [[LAContext alloc] init];
     if (reason) {
         context.localizedReason = [NSString stringWithUTF8String:reason];
+    }
+    
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    __block BOOL authSuccess = NO;
+    __block NSError *authError = nil;
+    
+    [context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
+            localizedReason:context.localizedReason
+                      reply:^(BOOL success, NSError *error) {
+        authSuccess = success;
+        authError = error;
+        dispatch_semaphore_signal(sema);
+    }];
+    
+    dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+    
+    if (!authSuccess) {
+        NSLog(@"[FluXlock] Biometric authentication failed or canceled: %@", authError);
+        return -25293; // errSecAuthFailed
     }
 
     NSDictionary *query = @{
@@ -221,14 +250,13 @@ int biometric_keychain_retrieve(const char *account, const char *reason,
         (__bridge id)kSecAttrAccount: nsAccount,
         (__bridge id)kSecReturnData: @YES,
         (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne,
-        (__bridge id)kSecUseAuthenticationContext: context,
     };
 
     CFTypeRef result = NULL;
     OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
 
     if (status != errSecSuccess || !result) {
-        return (int)status; // negative OSStatus (e.g. -25293 = errSecAuthFailed)
+        return (int)status;
     }
 
     NSData *nsData = (__bridge_transfer NSData *)result;

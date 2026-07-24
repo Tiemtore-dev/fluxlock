@@ -162,7 +162,7 @@ export default function KeysPage() {
     <AppShell>
       <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }} className="page-header">
+        <div className="page-header flex flex-col items-start sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
               <Shield size={28} style={{ color: 'var(--accent)' }} /> Clés cryptographiques
@@ -171,9 +171,9 @@ export default function KeysPage() {
               {list.length} clé{list.length !== 1 ? 's' : ''} stockée{list.length !== 1 ? 's' : ''}
             </p>
           </div>
-          <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-            <Button icon={Plus} onClick={() => setShowCreate(true)}>Générer</Button>
-            <Button variant="secondary" icon={Upload} onClick={() => setShowImport(true)}>Importer</Button>
+          <div className="flex gap-2 w-full sm:w-auto">
+            <Button icon={Plus} onClick={() => setShowCreate(true)} className="flex-1 sm:flex-initial">Générer</Button>
+            <Button variant="secondary" icon={Upload} onClick={() => setShowImport(true)} className="flex-1 sm:flex-initial">Importer</Button>
           </div>
         </div>
 
@@ -187,19 +187,21 @@ export default function KeysPage() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
             {filtered.map(k => (
-              <div key={k.id} style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)', display: 'flex', alignItems: 'center', gap: 'var(--space-4)', transition: 'border-color var(--transition-fast)' }}>
-                <div style={{ width: 40, height: 40, borderRadius: 'var(--radius-md)', background: `color-mix(in srgb, ${keyColor(k.key_type)} 12%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: keyColor(k.key_type), flexShrink: 0 }}>
-                  {keyIcon(k.key_type)}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>{k.key_name}</p>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginTop: 2 }}>
-                    <Badge size="sm">{k.key_type.toUpperCase()}</Badge>
-                    <Badge size="sm" variant="info">{k.algorithm}</Badge>
-                    <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', fontFamily: 'var(--font-body)' }}>{fmtDate(k.created_at)}</span>
+              <div key={k.id} style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)', transition: 'border-color var(--transition-fast)' }} className="flex flex-col md:flex-row md:items-center gap-4">
+                <div className="flex items-center gap-4 flex-1 min-w-0 w-full">
+                  <div style={{ width: 40, height: 40, borderRadius: 'var(--radius-md)', background: `color-mix(in srgb, ${keyColor(k.key_type)} 12%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: keyColor(k.key_type), flexShrink: 0 }}>
+                    {keyIcon(k.key_type)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }} className="break-all">{k.key_name}</p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <Badge size="sm">{k.key_type.toUpperCase()}</Badge>
+                      <Badge size="sm" variant="info">{k.algorithm}</Badge>
+                      <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', fontFamily: 'var(--font-body)' }}>{fmtDate(k.created_at)}</span>
+                    </div>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 'var(--space-1)', flexShrink: 0 }}>
+                <div className="flex gap-2 justify-end border-t border-[var(--border)] pt-3 md:pt-0 md:border-t-0 md:justify-start flex-shrink-0 w-full md:w-auto">
                   <Button variant="ghost" size="sm" icon={revealedKeys.has(k.id) ? EyeOff : Eye} onClick={() => handleReveal(k)} disabled={decryptMut.isPending} />
                   <Button variant="ghost" size="sm" icon={Copy} onClick={() => handleCopyKey(k)} disabled={decryptMut.isPending} />
                   <Button variant="ghost" size="sm" icon={Trash2} onClick={() => { if (confirm(`Supprimer "${k.key_name}" ?`)) { deleteMut.mutate(k.id); setRevealedKeys(p => { const s = new Set(p); s.delete(k.id); return s }); setDecryptedCache(p => { const m = new Map(p); m.delete(k.id); return m }) } }} style={{ color: 'var(--danger)' }} />

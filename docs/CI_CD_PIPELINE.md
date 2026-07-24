@@ -66,11 +66,11 @@
 
 ## Secrets GitHub configurés (repo fluxlock privé)
 
-| Secret | Rôle |
-|---|---|
-| `TAURI_PRIVATE_KEY` | Clé privée minisign pour signer les binaires |
-| `TAURI_KEY_PASSWORD` | Mot de passe de la clé privée |
-| `RELEASES_PAT` | Token OAuth pour publier dans `fluxlock-releases` (repo public) |
+| Secret               | Rôle                                                            |
+| -------------------- | --------------------------------------------------------------- |
+| `TAURI_PRIVATE_KEY`  | Clé privée minisign pour signer les binaires                    |
+| `TAURI_KEY_PASSWORD` | Mot de passe de la clé privée                                   |
+| `RELEASES_PAT`       | Token OAuth pour publier dans `fluxlock-releases` (repo public) |
 
 ---
 
@@ -81,11 +81,11 @@
 **Bumper la version** = mettre à jour le numéro de version dans les fichiers du projet avant de publier.
 Le format utilisé est le **Semantic Versioning** : `MAJEUR.MINEUR.PATCH`
 
-| Type de changement | Exemple | Incrément |
-|---|---|---|
-| Bug fix, correction mineure | `2.1.0` → `2.1.1` | PATCH |
-| Nouvelle fonctionnalité (sans casser l'existant) | `2.1.0` → `2.2.0` | MINEUR |
-| Changement majeur / incompatible | `2.1.0` → `3.0.0` | MAJEUR |
+| Type de changement                               | Exemple           | Incrément |
+| ------------------------------------------------ | ----------------- | --------- |
+| Bug fix, correction mineure                      | `2.1.0` → `2.1.1` | PATCH     |
+| Nouvelle fonctionnalité (sans casser l'existant) | `2.1.0` → `2.2.0` | MINEUR    |
+| Changement majeur / incompatible                 | `2.1.0` → `3.0.0` | MAJEUR    |
 
 **Fichiers à mettre à jour manuellement :**
 

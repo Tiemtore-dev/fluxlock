@@ -50,14 +50,14 @@ export default function SharesPage() {
     <AppShell>
       <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} className="page-header">
+        <div className="page-header flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
           <div>
             <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', margin: 0 }}>
               <Share2 size={28} style={{ color: 'var(--accent)' }} /> Mes Partages
             </h1>
             <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>Gérez les fichiers partagés</p>
           </div>
-          <div style={{ textAlign: 'right' }}>
+          <div className="text-left sm:text-right">
             <p style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>{filtered.length}</p>
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>{filtered.length === 1 ? 'Partage actif' : 'Partages actifs'}</p>
           </div>
@@ -75,12 +75,12 @@ export default function SharesPage() {
               const exp = isExpired(s.expires_at)
               return (
                 <div key={s.id} style={{ ...card, borderColor: exp ? 'var(--danger)' : 'var(--border)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div style={{ flex: 1 }}>
+                  <div className="flex justify-between items-start gap-4">
+                    <div className="min-w-0 flex-1 w-full">
                       {/* Title row */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-3)' }}>
-                        <FileText size={18} style={{ color: 'var(--accent)' }} />
-                        <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)' }}>
+                      <div className="flex flex-wrap items-center gap-2 mb-3">
+                        <FileText size={18} style={{ color: 'var(--accent)' }} className="flex-shrink-0" />
+                        <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)' }} className="break-all">
                           {s.filename || `Fichier #${s.file_id}`}
                         </span>
                         <Badge variant={exp ? 'danger' : 'success'} size="sm">{exp ? 'Expiré' : 'Actif'}</Badge>
@@ -95,9 +95,9 @@ export default function SharesPage() {
                       </div>
 
                       {/* Token */}
-                      <div style={{ marginTop: 'var(--space-3)', paddingTop: 'var(--space-3)', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                      <div style={{ marginTop: 'var(--space-3)', paddingTop: 'var(--space-3)', borderTop: '1px solid var(--border)' }} className="flex flex-wrap items-center gap-2">
                         <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>Token:</span>
-                        <code style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 'var(--radius-sm)' }}>
+                        <code style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 'var(--radius-sm)' }} className="break-all">
                           {s.share_token.substring(0, 20)}…
                         </code>
                         <button onClick={() => copyLink(s.share_token)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--text-xs)' }}>

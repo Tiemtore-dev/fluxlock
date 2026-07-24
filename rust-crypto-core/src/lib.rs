@@ -48,7 +48,7 @@ pub use key_derivation::{
     argon2::{derive_key_from_password, Argon2Config},
     hkdf::derive_key_hkdf,
 };
-pub use signatures::ed25519::{KeyPair as Ed25519KeyPair, sign_message, verify_signature};
+pub use signatures::ed25519::{KeyPair as Ed25519KeyPair, sign_message, verify_signature, verify_signature_from_bytes};
 pub use signatures::ml_dsa::{MlDsaKeyPair, verify_ml_dsa};
 pub use key_exchange::x25519::{generate_keypair, compute_shared_secret};
 pub use hashing::{blake3_hash, sha3_256_hash, sha256_hash};

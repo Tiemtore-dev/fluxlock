@@ -12,7 +12,9 @@ use sqlx::SqlitePool;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateBackupRequest {
-    pub master_password: String,
+    pub master_password: Option<String>,
+    /// Authentication method: "passkey" to use passkey, null for password.
+    pub auth_method: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,6 +44,27 @@ pub async fn create_backup(
         .map_err(|e| format!("Erreur récupération utilisateur: {}", e))?
         .ok_or("Utilisateur non trouvé")?;
 
+    // Authenticate: passkey, password, or biometric
+    let master_password_for_backup = if request.auth_method.as_deref() == Some("passkey") {
+        // Passkey auth — authenticate and use a dummy password for backup encryption
+        // The backup is encrypted with the master_password, so we need it.
+        // With passkey, we derive a backup-specific key from the vault key.
+        let (_pk_uid, _pk_name, _key_bytes) =
+            crate::passkey::authenticate_passkey(&user.username, None)
+                .map_err(|e| format!("Échec passkey: {}", e))?;
+        // For backup compatibility, we still need the user's password.
+        // Since passkey wraps the vault key (not the password), we use
+        // the vault key directly to create the backup.
+        return Err("Les backups nécessitent le mot de passe maître pour le chiffrement. \
+                    La passkey ne peut pas être utilisée pour créer un backup car le backup \
+                    doit être déchiffrable avec le mot de passe sur un autre appareil.".to_string());
+    } else {
+        request.master_password
+            .as_ref()
+            .ok_or("Mot de passe maître requis pour le backup")?
+            .clone()
+    };
+
     // Obtenir les chemins
     let db_path = hidden_storage::get_hidden_database_path()?;
     let files_dir = hidden_storage::get_hidden_files_dir()?;
@@ -50,7 +73,7 @@ pub async fn create_backup(
     let backup_path = backup_manager::create_backup(
         &db_path,
         &files_dir,
-        &request.master_password,
+        &master_password_for_backup,
         &user.username,
     )
     .await?;
@@ -77,6 +100,8 @@ pub async fn search_backups() -> Result<SearchBackupsResponse, String> {
 pub struct RestoreBackupRequest {
     pub backup_path: String,
     pub master_password: String,
+    // Note: restore always requires the master password because
+    // the backup file is encrypted with it. Passkey cannot be used here.
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -130,9 +155,13 @@ pub async fn get_backup_metadata(
 
 // ========== COMMANDE RESET VAULT ==========
 
-/// CFG-003: Réinitialisation complète avec vérification du mot de passe
+/// CFG-003: Réinitialisation complète avec vérification du mot de passe ou passkey
 #[tauri::command]
-pub async fn reset_vault_completely(password: String, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn reset_vault_completely(
+    password: Option<String>,
+    auth_method: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     debug_log!("⚠️ Réinitialisation complète du coffre-fort demandée");
     
     // CFG-003: Vérifier l'identité avant la destruction
@@ -150,9 +179,19 @@ pub async fn reset_vault_completely(password: String, state: State<'_, AppState>
             .map_err(|e| format!("Erreur récupération utilisateur: {}", e))?
             .ok_or("Utilisateur non trouvé")?;
         
-        if verify_password(&password, &user.password_hash).is_err() {
-            debug_log!("❌ Mot de passe incorrect pour réinitialisation du coffre");
-            return Err("❌ Mot de passe incorrect — réinitialisation refusée".to_string());
+        if auth_method.as_deref() == Some("passkey") {
+            // Passkey authentication for reset
+            let (pk_uid, _, _) = crate::passkey::authenticate_passkey(&user.username, None)
+                .map_err(|e| format!("Échec passkey: {}", e))?;
+            if pk_uid != user_id {
+                return Err("❌ Incohérence de compte — réinitialisation refusée".to_string());
+            }
+        } else {
+            let pw = password.as_ref().ok_or("❌ Mot de passe requis")?;
+            if verify_password(pw, &user.password_hash).is_err() {
+                debug_log!("❌ Mot de passe incorrect pour réinitialisation du coffre");
+                return Err("❌ Mot de passe incorrect — réinitialisation refusée".to_string());
+            }
         }
     }
     

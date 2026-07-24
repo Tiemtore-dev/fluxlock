@@ -114,6 +114,15 @@ pub fn verify_signature(message: &[u8], signature: &[u8], public_key: &Verifying
     public_key.verify(message, &sig).is_ok()
 }
 
+/// Vérifie une signature avec une clé publique brute
+pub fn verify_signature_from_bytes(message: &[u8], signature: &[u8], public_key_bytes: &[u8; PUBLIC_KEY_LENGTH]) -> bool {
+    let public_key = match VerifyingKey::from_bytes(public_key_bytes) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    verify_signature(message, signature, &public_key)
+}
+
 /// Structure pour la clé publique sérialisable
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicKeyExport {
