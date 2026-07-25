@@ -15,6 +15,9 @@ export default function SettingsPage() {
     localStorage.getItem('theme') === 'dark' ||
     (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)
   )
+  const [colorTheme, setColorTheme] = useState(
+    localStorage.getItem('color-theme') || 'default'
+  )
   const [notifications, setNotifications] = useState(
     localStorage.getItem('notifications') === 'true' || !localStorage.getItem('notifications')
   )
@@ -67,6 +70,12 @@ export default function SettingsPage() {
     const saved = localStorage.getItem('theme')
     if (saved === 'dark') { document.documentElement.classList.add('dark'); setIsDark(true) }
     else if (saved === 'light') { document.documentElement.classList.remove('dark'); setIsDark(false) }
+
+    const savedColor = localStorage.getItem('color-theme')
+    if (savedColor && savedColor !== 'default') {
+      document.documentElement.setAttribute('data-theme', savedColor)
+      setColorTheme(savedColor)
+    }
   }, [])
 
   // Load sync settings (with retry)
@@ -410,6 +419,17 @@ export default function SettingsPage() {
     localStorage.setItem('theme', next ? 'dark' : 'light')
   }
 
+  const changeColorTheme = (theme: string) => {
+    setColorTheme(theme)
+    if (theme === 'default') {
+      document.documentElement.removeAttribute('data-theme')
+      localStorage.removeItem('color-theme')
+    } else {
+      document.documentElement.setAttribute('data-theme', theme)
+      localStorage.setItem('color-theme', theme)
+    }
+  }
+
   const save = () => {
     localStorage.setItem('notifications', notifications.toString())
     sessionStorage.setItem('autoLock', autoLock.toString())
@@ -452,13 +472,40 @@ export default function SettingsPage() {
             {isDark ? <Moon size={20} style={{ color: 'var(--accent)' }} /> : <Sun size={20} style={{ color: 'var(--accent)' }} />}
             <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Apparence</h2>
           </div>
-          <div style={cardBody}>
+          <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
             <div className={row}>
               <div>
                 <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Mode sombre</p>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Réduire la fatigue oculaire</p>
               </div>
               <Toggle on={isDark} onToggle={toggleDarkMode} />
+            </div>
+            
+            <div className={row}>
+              <div>
+                <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Thème de couleur</p>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Personnalisez l'accent principal</p>
+              </div>
+              <select 
+                value={colorTheme} 
+                onChange={(e) => changeColorTheme(e.target.value)}
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-input)',
+                  color: 'var(--text-primary)',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 'var(--text-sm)',
+                  outline: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="default">Émeraude (Défaut)</option>
+                <option value="ocean">Océan (Bleu)</option>
+                <option value="amethyst">Améthyste (Violet)</option>
+                <option value="sunset">Crépuscule (Orange)</option>
+              </select>
             </div>
           </div>
         </div>

@@ -215,15 +215,15 @@ const FilesPage = () => {
 
   return (
     <AppShell>
-      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+      <div className="page-content flex flex-col gap-6">
         {/* Header */}
-        <div className="page-header flex flex-col items-start sm:flex-row sm:items-center justify-between gap-4">
+        <div className="page-header flex-col items-start sm:flex-row sm:items-center gap-4">
           <div>
-            <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-              <FolderLock size={28} style={{ color: 'var(--accent)' }} />
+            <h1 className="font-display text-3xl text-tx-primary flex items-center gap-3">
+              <FolderLock size={28} className="text-accent" />
               Fichiers sécurisés
             </h1>
-            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-1)' }}>
+            <p className="text-sm text-tx-muted font-body mt-1">
               {list.length} fichier{list.length !== 1 ? 's' : ''} chiffré{list.length !== 1 ? 's' : ''}
             </p>
           </div>
@@ -232,7 +232,7 @@ const FilesPage = () => {
 
         {/* Readonly banner */}
         {isReadonly && (
-          <div className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm" style={{ background: 'var(--danger-muted)', border: '1px solid var(--danger)', color: 'var(--danger)', fontFamily: 'var(--font-body)' }}>
+          <div className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm bg-danger-muted border border-danger text-danger font-body">
             <ShieldAlert size={16} />
             Coffre-fort en lecture seule — modifications bloquées
           </div>
@@ -242,36 +242,43 @@ const FilesPage = () => {
 
         {/* Progress bar (visible during encrypt/decrypt) */}
         {showProgress && (
-          <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-4)', display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-sm)', fontFamily: 'var(--font-body)' }}>
-              <span style={{ color: 'var(--text-secondary)' }}>{progressMsg}</span>
-              <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{progress}%</span>
+          <div className="bg-surface border border-bd rounded-xl p-4 flex flex-col gap-2">
+            <div className="flex justify-between text-sm font-body">
+              <span className="text-tx-secondary">{progressMsg}</span>
+              <span className="text-accent font-semibold">{progress}%</span>
             </div>
-            <div style={{ width: '100%', height: 6, background: 'var(--bg-input)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
-              <div style={{ width: `${progress}%`, height: '100%', background: 'var(--accent)', borderRadius: 'var(--radius-full)', transition: 'width 0.3s ease' }} />
+            <div className="w-full h-1.5 bg-input rounded-full overflow-hidden">
+              <div className="h-full bg-accent rounded-full transition-all duration-300 ease-out" style={{ width: `${progress}%` }} />
             </div>
           </div>
         )}
 
-        {/* File grid */}
+        {/* File list */}
         {filtered.length === 0 ? (
           <EmptyState icon={FolderLock} title={search ? 'Aucun résultat' : 'Aucun fichier'} description={search ? undefined : 'Ajoutez votre premier fichier sécurisé'}
             action={!search ? <Button icon={Upload} onClick={() => setShowUpload(true)}>Ajouter</Button> : undefined} />
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(280px, 100%), 1fr))', gap: 'var(--space-4)' }}>
+          <div className="flex flex-col gap-3">
             {filtered.map((f) => (
-              <div key={f.id} style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', transition: 'border-color var(--transition-fast)' }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
-                  {mimeIcon(f.mime_type)}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <p style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis' }} className="break-all" title={f.filename}>{f.filename}</p>
-                    <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{fmtSize(f.file_size)}</p>
+              <div key={f.id} className="bg-surface sm:border sm:border-bd rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all duration-200">
+                <div className="flex items-start gap-4 min-w-0 flex-1">
+                  <div className="w-12 h-12 rounded-full bg-elevated border border-bd flex items-center justify-center shrink-0">
+                    {mimeIcon(f.mime_type)}
+                  </div>
+                  <div className="flex-1 min-w-0 py-0.5">
+                    <p className="text-base font-semibold text-tx-primary font-body truncate" title={f.filename}>{f.filename}</p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <span className="text-xs text-tx-muted font-mono bg-elevated px-2 py-0.5 rounded-md border border-bd/50">{fmtSize(f.file_size)}</span>
+                      <span className="text-xs text-tx-disabled font-body">{fmtDate(f.created_at)}</span>
+                    </div>
                   </div>
                 </div>
-                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', fontFamily: 'var(--font-body)' }}>{fmtDate(f.created_at)}</span>
-                <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                  <Button size="sm" icon={Download} onClick={() => handleDownload(f)} style={{ flex: 1 }}>Télécharger</Button>
-                  <Button size="sm" variant="ghost" icon={Trash2} onClick={() => { if (confirm(`Supprimer "${f.filename}" ?`)) deleteMut.mutate(f.id) }} disabled={isReadonly} style={{ color: 'var(--danger)' }} />
+                
+                <div className="flex items-center gap-2 pl-[64px] sm:pl-0 shrink-0">
+                  <Button size="sm" icon={Download} onClick={() => handleDownload(f)} className="flex-1 sm:flex-none">Télécharger</Button>
+                  <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Supprimer "${f.filename}" ?`)) deleteMut.mutate(f.id) }} disabled={isReadonly} className="w-9 h-9 p-0 flex items-center justify-center text-danger hover:bg-danger-muted shrink-0" title="Supprimer">
+                    <Trash2 size={18} />
+                  </Button>
                 </div>
               </div>
             ))}

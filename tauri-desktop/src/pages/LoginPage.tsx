@@ -250,48 +250,28 @@ export default function LoginPage() {
   const locked = loginDelay > 0 && remainingTime > 0
 
   return (
-    <div className="auth-page">
-      <div className="auth-page-inner animate-fade-in" style={{ maxWidth: 400 }}>
+    <div className="auth-page flex items-center justify-center min-h-screen p-4 sm:p-6 w-full">
+      <div className="auth-page-inner animate-fade-in w-full max-w-md">
         {/* Brand */}
-        <div style={{ textAlign: 'center', marginBottom: 'var(--space-10)' }}>
-          <div style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 56,
-            height: 56,
-            borderRadius: 'var(--radius-xl)',
-            background: 'var(--accent)',
-            boxShadow: 'var(--shadow-glow)',
-            marginBottom: 'var(--space-5)',
-          }}>
-            <Lock size={24} style={{ color: 'var(--text-inverse)' }} />
+        <div className="text-center mb-10">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-accent shadow-[0_0_30px_rgba(var(--accent-rgb),0.3)] mb-5">
+            <Lock size={24} className="text-tx-inverse" />
           </div>
-          <h1 style={{
-            fontFamily: 'var(--font-display)',
-            fontSize: 'var(--text-3xl)',
-            color: 'var(--text-primary)',
-            letterSpacing: 'var(--tracking-tight)',
-          }}>
+          <h1 className="font-display text-3xl sm:text-4xl text-tx-primary tracking-tight m-0">
             FluXlock
           </h1>
-          <p style={{
-            fontSize: 'var(--text-sm)',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--font-body)',
-            marginTop: 'var(--space-1)',
-          }}>
+          <p className="text-sm text-tx-muted font-body mt-2 m-0">
             Connexion sécurisée à votre coffre-fort
           </p>
         </div>
 
         {/* Card */}
-        <div className="auth-card">
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+        <div className="auth-card bg-surface border border-bd rounded-2xl p-6 sm:p-8 shadow-sm">
+          <form onSubmit={handleSubmit} className="flex flex-col gap-5">
             {!dbReady ? (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-6)' }}>
-                <Loader2 size={28} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite' }} />
-                <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)', margin: 0 }}>Initialisation du coffre-fort…</p>
+              <div className="flex flex-col items-center gap-3 p-6">
+                <Loader2 size={28} className="text-accent animate-spin" />
+                <p className="text-tx-muted text-sm m-0">Initialisation du coffre-fort…</p>
               </div>
             ) : (
             <>
@@ -322,71 +302,35 @@ export default function LoginPage() {
 
             {/* Rate-limit countdown */}
             {locked && (
-              <div style={{
-                padding: 'var(--space-5)',
-                borderRadius: 'var(--radius-lg)',
-                background: 'var(--warning-muted)',
-                border: '1px solid var(--warning)',
-                textAlign: 'center',
-              }}>
-                <p style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--warning)', fontFamily: 'var(--font-body)' }}>
+              <div className="p-5 rounded-lg bg-warning-muted border border-warning text-center">
+                <p className="text-sm font-semibold text-warning font-body m-0">
                   Trop de tentatives échouées
                 </p>
-                <p style={{
-                  fontSize: 'var(--text-2xl)',
-                  fontFamily: 'var(--font-mono)',
-                  fontWeight: 700,
-                  color: 'var(--warning)',
-                  margin: 'var(--space-3) 0',
-                }}>
+                <p className="text-2xl font-mono font-bold text-warning my-3">
                   {formatTime(remainingTime)}
                 </p>
-                <div style={{ height: 3, borderRadius: 'var(--radius-full)', background: 'var(--bg-hover)', overflow: 'hidden' }}>
-                  <div style={{
-                    height: '100%',
-                    width: `${(remainingTime / loginDelay) * 100}%`,
-                    background: 'var(--warning)',
-                    transition: 'width 1s linear',
-                  }} />
+                <div className="h-1 rounded-full bg-bg-hover overflow-hidden">
+                  <div
+                    className="h-full bg-warning transition-[width] duration-1000 ease-linear"
+                    style={{ width: `${(remainingTime / loginDelay) * 100}%` }}
+                  />
                 </div>
               </div>
             )}
 
             {/* Error */}
             {error && !locked && (
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--space-2)',
-                padding: 'var(--space-3)',
-                borderRadius: 'var(--radius-md)',
-                background: 'var(--danger-muted)',
-                border: '1px solid var(--danger)',
-                fontSize: 'var(--text-sm)',
-                color: 'var(--danger)',
-                fontFamily: 'var(--font-body)',
-              }}>
-                <AlertTriangle size={16} />
-                {error}
+              <div className="flex items-center gap-2 p-3 rounded-md bg-danger-muted border border-danger text-sm text-danger font-body">
+                <AlertTriangle size={16} className="shrink-0" />
+                <span>{error}</span>
               </div>
             )}
 
             {/* Info (password reason from biometric gate) */}
             {info && (
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--space-2)',
-                padding: 'var(--space-3)',
-                borderRadius: 'var(--radius-md)',
-                background: 'color-mix(in srgb, var(--accent) 10%, transparent)',
-                border: '1px solid var(--accent)',
-                fontSize: 'var(--text-sm)',
-                color: 'var(--accent-text)',
-                fontFamily: 'var(--font-body)',
-              }}>
-                <Info size={16} />
-                {info}
+              <div className="flex items-center gap-2 p-3 rounded-md bg-accent/10 border border-accent text-sm text-accent-text font-body">
+                <Info size={16} className="shrink-0" />
+                <span>{info}</span>
               </div>
             )}
 
@@ -406,24 +350,15 @@ export default function LoginPage() {
 
           {/* Biometric login — only shown if enrolled for this username */}
           {showBiometricSection && (
-            <div style={{ marginTop: 'var(--space-4)' }}>
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
-                marginBottom: 'var(--space-3)',
-              }}>
-                <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>ou</span>
-                <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+            <div className="mt-4">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="flex-1 h-px bg-border" />
+                <span className="text-xs text-tx-muted font-body">ou</span>
+                <div className="flex-1 h-px bg-border" />
               </div>
 
               {bioStatus?.requires_password && (
-                <p style={{
-                  fontSize: 'var(--text-xs)',
-                  color: 'var(--text-muted)',
-                  fontFamily: 'var(--font-body)',
-                  textAlign: 'center',
-                  marginBottom: 'var(--space-2)',
-                }}>
+                <p className="text-xs text-tx-muted font-body text-center mb-2">
                   {bioStatus.password_reason || 'Mot de passe requis'}
                 </p>
               )}
@@ -431,26 +366,11 @@ export default function LoginPage() {
               <button
                 onClick={handleBiometricLogin}
                 disabled={!canUseBiometric || biometricLoading || locked}
-                style={{
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 'var(--space-3)',
-                  padding: 'var(--space-3) var(--space-4)',
-                  borderRadius: 'var(--radius-lg)',
-                  border: '1px solid var(--border)',
-                  background: 'var(--bg-hover)',
-                  color: 'var(--text-primary)',
-                  fontFamily: 'var(--font-body)',
-                  fontSize: 'var(--text-sm)',
-                  fontWeight: 500,
-                  cursor: !canUseBiometric || biometricLoading || locked ? 'not-allowed' : 'pointer',
-                  opacity: !canUseBiometric || biometricLoading || locked ? 0.4 : 1,
-                  transition: 'all var(--transition-fast)',
-                }}
+                className={`w-full flex items-center justify-center gap-3 px-4 py-3 rounded-lg border border-bd bg-bg-hover text-tx-primary font-body text-sm font-medium transition-all duration-200 ${
+                  !canUseBiometric || biometricLoading || locked ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:border-bd-hover'
+                }`}
               >
-                <Fingerprint size={20} style={{ color: canUseBiometric ? 'var(--accent)' : 'var(--text-muted)' }} />
+                <Fingerprint size={20} className={canUseBiometric ? 'text-accent' : 'text-tx-muted'} />
                 {biometricLoading
                   ? 'Authentification...'
                   : bioStatus?.biometric_type === 'touchid'
@@ -464,34 +384,19 @@ export default function LoginPage() {
 
           {/* Passkey login — always available if enrolled (no cold start, no timeout) */}
           {showPasskeySection && (
-            <div style={{ marginTop: showBiometricSection ? 'var(--space-2)' : 'var(--space-4)' }}>
+            <div className={showBiometricSection ? 'mt-2' : 'mt-4'}>
               {!showBiometricSection && (
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
-                  marginBottom: 'var(--space-3)',
-                }}>
-                  <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>ou</span>
-                  <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="flex-1 h-px bg-border" />
+                  <span className="text-xs text-tx-muted font-body">ou</span>
+                  <div className="flex-1 h-px bg-border" />
                 </div>
               )}
 
               {/* 14-day password reminder banner */}
               {passkeyStatus?.needs_password_reminder && (
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 'var(--space-2)',
-                  padding: 'var(--space-3)',
-                  borderRadius: 'var(--radius-md)',
-                  background: 'color-mix(in srgb, var(--accent) 10%, transparent)',
-                  border: '1px solid var(--accent)',
-                  fontSize: 'var(--text-xs)',
-                  color: 'var(--accent-text)',
-                  fontFamily: 'var(--font-body)',
-                  marginBottom: 'var(--space-2)',
-                }}>
-                  <Info size={16} style={{ flexShrink: 0 }} />
+                <div className="flex items-center gap-2 p-3 rounded-md bg-accent/10 border border-accent text-xs text-accent-text font-body mb-2">
+                  <Info size={16} className="shrink-0" />
                   <span>Rappel de sécurité : veuillez taper votre mot de passe pour confirmer que vous le connaissez toujours.</span>
                 </div>
               )}
@@ -499,26 +404,13 @@ export default function LoginPage() {
               <button
                 onClick={handlePasskeyLogin}
                 disabled={!canUsePasskey || passkeyLoading || locked}
-                style={{
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 'var(--space-3)',
-                  padding: 'var(--space-3) var(--space-4)',
-                  borderRadius: 'var(--radius-lg)',
-                  border: '1px solid var(--border)',
-                  background: canUsePasskey ? 'color-mix(in srgb, var(--accent) 8%, var(--bg-hover))' : 'var(--bg-hover)',
-                  color: 'var(--text-primary)',
-                  fontFamily: 'var(--font-body)',
-                  fontSize: 'var(--text-sm)',
-                  fontWeight: 500,
-                  cursor: !canUsePasskey || passkeyLoading || locked ? 'not-allowed' : 'pointer',
-                  opacity: !canUsePasskey || passkeyLoading || locked ? 0.4 : 1,
-                  transition: 'all var(--transition-fast)',
-                }}
+                className={`w-full flex items-center justify-center gap-3 px-4 py-3 rounded-lg border border-bd font-body text-sm font-medium transition-all duration-200 ${
+                  canUsePasskey ? 'bg-accent/5 hover:bg-accent/10' : 'bg-bg-hover'
+                } text-tx-primary ${
+                  !canUsePasskey || passkeyLoading || locked ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:border-bd-hover'
+                }`}
               >
-                <KeyRound size={20} style={{ color: canUsePasskey ? 'var(--accent)' : 'var(--text-muted)' }} />
+                <KeyRound size={20} className={canUsePasskey ? 'text-accent' : 'text-tx-muted'} />
                 {passkeyLoading
                   ? 'Authentification passkey...'
                   : passkeyStatus?.needs_password_reminder
@@ -529,23 +421,14 @@ export default function LoginPage() {
           )}
 
           {/* Links */}
-          <div style={{ marginTop: 'var(--space-5)', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-            <Link to="/reset-vault" style={{
-              fontSize: 'var(--text-xs)',
-              color: 'var(--danger)',
-              fontFamily: 'var(--font-body)',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 'var(--space-1)',
-              textDecoration: 'none',
-            }}>
+          <div className="mt-5 text-center flex flex-col gap-3 border-t border-bd pt-5">
+            <Link to="/reset-vault" className="text-xs text-danger font-body inline-flex items-center justify-center gap-1.5 no-underline hover:underline opacity-80 hover:opacity-100 transition-opacity">
               <AlertTriangle size={12} />
               Mot de passe oublié ? Réinitialiser le coffre-fort
             </Link>
-            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
+            <p className="text-sm text-tx-muted font-body m-0">
               Pas encore de compte ?{' '}
-              <Link to="/register" style={{ color: 'var(--accent-text)', fontWeight: 500, textDecoration: 'none' }}>
+              <Link to="/register" className="text-accent-text font-medium no-underline hover:underline">
                 Créer un compte
               </Link>
             </p>

@@ -224,3 +224,56 @@
   --shadow-inner: inset 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
+/* ─── Océan Theme ─── */
+:root[data-theme="ocean"] {
+  --accent:        #0ea5e9;
+  --accent-hover:  #0284c7;
+  --accent-muted:  rgba(14, 165, 233, 0.1);
+  --accent-glow:   rgba(14, 165, 233, 0.15);
+  --accent-text:   #0369a1;
+  --border-focus:  rgba(14, 165, 233, 0.5);
+}
+.dark[data-theme="ocean"] {
+  --accent:        #0ea5e9;
+  --accent-hover:  #0284c7;
+  --accent-muted:  rgba(14, 165, 233, 0.15);
+  --accent-glow:   rgba(14, 165, 233, 0.25);
+  --accent-text:   #38bdf8;
+  --border-focus:  rgba(14, 165, 233, 0.5);
+}
+
+/* ─── Améthyste Theme ─── */
+:root[data-theme="amethyst"] {
+  --accent:        #8b5cf6;
+  --accent-hover:  #7c3aed;
+  --accent-muted:  rgba(139, 92, 246, 0.1);
+  --accent-glow:   rgba(139, 92, 246, 0.15);
+  --accent-text:   #6d28d9;
+  --border-focus:  rgba(139, 92, 246, 0.5);
+}
+.dark[data-theme="amethyst"] {
+  --accent:        #8b5cf6;
+  --accent-hover:  #7c3aed;
+  --accent-muted:  rgba(139, 92, 246, 0.15);
+  --accent-glow:   rgba(139, 92, 246, 0.25);
+  --accent-text:   #a78bfa;
+  --border-focus:  rgba(139, 92, 246, 0.5);
+}
+
+/* ─── Crépuscule Theme ─── */
+:root[data-theme="sunset"] {
+  --accent:        #f97316;
+  --accent-hover:  #ea580c;
+  --accent-muted:  rgba(249, 115, 22, 0.1);
+  --accent-glow:   rgba(249, 115, 22, 0.15);
+  --accent-text:   #c2410c;
+  --border-focus:  rgba(249, 115, 22, 0.5);
+}
+.dark[data-theme="sunset"] {
+  --accent:        #f97316;
+  --accent-hover:  #ea580c;
+  --accent-muted:  rgba(249, 115, 22, 0.15);
+  --accent-glow:   rgba(249, 115, 22, 0.25);
+  --accent-text:   #fb923c;
+  --border-focus:  rgba(249, 115, 22, 0.5);
+}

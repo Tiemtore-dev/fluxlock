@@ -12,6 +12,7 @@ import DashboardPage from './pages/DashboardPage'
 import PasswordsPage from './pages/PasswordsPage'
 import FilesPage from './pages/FilesPage'
 import KeysPage from './pages/KeysPage'
+import { AutoUpdater } from './components/AutoUpdater'
 import SecurityPage from './pages/SecurityPage'
 import SystemSecurityPage from './pages/SystemSecurityPage'
 import SettingsPage from './pages/SettingsPage'
@@ -28,6 +29,10 @@ function AppRoutes() {
     if (saved === 'dark') document.documentElement.classList.add('dark')
     else if (saved === 'light') document.documentElement.classList.remove('dark')
     else if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.classList.add('dark')
+
+    const savedColor = localStorage.getItem('color-theme')
+    if (savedColor) document.documentElement.setAttribute('data-theme', savedColor)
+    else document.documentElement.removeAttribute('data-theme')
 
     invoke<string>('init_local_db')
       .then(() => setDbReady(true))
@@ -89,6 +94,7 @@ function App() {
   return (
     <BrowserRouter>
       <ToastProvider>
+        <AutoUpdater />
         <AppRoutes />
       </ToastProvider>
     </BrowserRouter>

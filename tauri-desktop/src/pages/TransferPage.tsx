@@ -26,38 +26,7 @@ import {
 
 type Tab = 'send' | 'receive' | 'peers'
 
-/* ─── Styles ─── */
-const card: React.CSSProperties = {
-  background: 'var(--bg-surface)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-lg)',
-  padding: 'var(--space-6)',
-}
-const label: React.CSSProperties = {
-  fontSize: 'var(--text-sm)',
-  color: 'var(--text-secondary)',
-  marginBottom: 'var(--space-2)',
-  display: 'block',
-}
-const codeBox: React.CSSProperties = {
-  background: 'var(--bg-input)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: 'var(--space-4)',
-  fontFamily: 'var(--font-mono)',
-  fontSize: 'var(--text-lg)',
-  textAlign: 'center' as const,
-  letterSpacing: '0.15em',
-  color: 'var(--accent-text)',
-  userSelect: 'all' as const,
-}
-const safetyBox: React.CSSProperties = {
-  background: 'var(--warning-muted)',
-  border: '1px solid var(--warning)',
-  borderRadius: 'var(--radius-lg)',
-  padding: 'var(--space-5)',
-  textAlign: 'center' as const,
-}
+/* ─── Shared Helpers ─── */
 
 /* ─── SafetyIdenticon — visual hash of the safety number ─── */
 /* Grille 3×3 avec 24 couleurs → 24^9 ≈ 2.6 milliards de combinaisons uniques.
@@ -159,32 +128,37 @@ function WormholeSend({ onItemsSelected }: { onItemsSelected: (type: string, ids
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
-      {/* Type selector */}
-      <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+    <div className="flex flex-col gap-5">
+      {/* Type selector (Segmented Control) */}
+      <div className="flex p-1 bg-input rounded-xl border border-bd">
         {[
           { key: 'passwords', label: 'Mots de passe', icon: KeyRound },
           { key: 'files', label: 'Fichiers', icon: Files },
           { key: 'keys', label: 'Clés', icon: Lock },
-        ].map(t => (
-          <Button
-            key={t.key}
-            variant={selectedType === t.key ? 'primary' : 'secondary'}
-            size="sm"
-            icon={t.icon}
-            onClick={() => { setSelectedType(t.key); setSelectedIds([]) }}
-          >
-            {t.label}
-          </Button>
-        ))}
+        ].map(t => {
+          const Icon = t.icon
+          const isSelected = selectedType === t.key
+          return (
+            <button
+              key={t.key}
+              onClick={() => { setSelectedType(t.key); setSelectedIds([]) }}
+              className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all duration-200 ${
+                isSelected ? 'bg-surface shadow-sm text-tx-primary' : 'text-tx-secondary hover:text-tx-primary'
+              }`}
+            >
+              <Icon size={16} className={isSelected ? 'text-accent' : 'text-tx-muted'} />
+              <span className="hidden sm:inline">{t.label}</span>
+            </button>
+          )
+        })}
       </div>
 
       {/* Item list */}
-      <div style={{ ...card, maxHeight: 300, overflowY: 'auto' }}>
+      <div className="bg-surface border border-bd rounded-xl p-2 max-h-[300px] overflow-y-auto">
         {items.length === 0 ? (
-          <p style={{ color: 'var(--text-muted)', textAlign: 'center', margin: 0 }}>Aucun élément disponible</p>
+          <p className="text-tx-muted text-center py-6 text-sm font-body">Aucun élément disponible</p>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          <div className="flex flex-col gap-1">
             {items.map((item: any) => {
               const id = item.id as number
               const name = item.title || item.filename || item.key_name || '—'
@@ -193,24 +167,16 @@ function WormholeSend({ onItemsSelected }: { onItemsSelected: (type: string, ids
                 <div
                   key={id}
                   onClick={() => toggleItem(id)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
-                    padding: '8px 12px', borderRadius: 'var(--radius-md)',
-                    cursor: 'pointer',
-                    background: selected ? 'var(--accent-muted)' : 'transparent',
-                    border: `1px solid ${selected ? 'var(--accent)' : 'transparent'}`,
-                    transition: 'all 0.15s',
-                  }}
+                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all duration-150 border ${
+                    selected ? 'bg-accent-muted border-accent text-accent-text' : 'border-transparent hover:bg-elevated'
+                  }`}
                 >
-                  <div style={{
-                    width: 18, height: 18, borderRadius: 4,
-                    border: `2px solid ${selected ? 'var(--accent)' : 'var(--text-muted)'}`,
-                    background: selected ? 'var(--accent)' : 'transparent',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    {selected && <Check size={12} style={{ color: 'var(--text-inverse)' }} />}
+                  <div className={`w-5 h-5 rounded flex items-center justify-center border-2 transition-colors ${
+                    selected ? 'bg-accent border-accent text-white' : 'border-tx-muted'
+                  }`}>
+                    {selected && <Check size={14} />}
                   </div>
-                  <span style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>{name}</span>
+                  <span className={`text-sm font-medium font-body truncate ${selected ? 'text-tx-primary' : 'text-tx-secondary'}`}>{name}</span>
                 </div>
               )
             })}
@@ -288,12 +254,10 @@ function WormholeReceive() {
   // Completed
   if (receiveStatus === 'completed') {
     return (
-      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)', textAlign: 'center' as const }}>
-        <ShieldCheck size={40} style={{ color: 'var(--success)', margin: '0 auto' }} />
-        <p style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: 'var(--text-lg)' }}>Données reçues !</p>
-        <Button variant="secondary" onClick={resetState}>
-          Recevoir un autre transfert
-        </Button>
+      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 text-center">
+        <ShieldCheck size={48} className="text-success mx-auto" />
+        <p className="text-tx-primary font-semibold text-lg">Données reçues !</p>
+        <Button variant="secondary" onClick={resetState}>Recevoir un autre transfert</Button>
       </div>
     )
   }
@@ -301,12 +265,10 @@ function WormholeReceive() {
   // Failed
   if (receiveStatus === 'failed') {
     return (
-      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)', textAlign: 'center' as const }}>
-        <ShieldAlert size={40} style={{ color: 'var(--danger, #ef4444)', margin: '0 auto' }} />
-        <p style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Réception échouée</p>
-        <Button variant="secondary" onClick={resetState}>
-          Réessayer
-        </Button>
+      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 text-center">
+        <ShieldAlert size={48} className="text-danger mx-auto" />
+        <p className="text-tx-primary font-semibold">Réception échouée</p>
+        <Button variant="secondary" onClick={resetState}>Réessayer</Button>
       </div>
     )
   }
@@ -314,63 +276,52 @@ function WormholeReceive() {
   // Transferring
   if (receiveStatus === 'transferring') {
     return (
-      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)', alignItems: 'center' }}>
-        <Loader2 size={32} style={{ color: 'var(--accent)' }} className="animate-spin" />
-        <p style={{ color: 'var(--text-primary)', fontWeight: 500 }}>Réception en cours…</p>
+      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 items-center">
+        <Loader2 size={36} className="text-accent animate-spin" />
+        <p className="text-tx-primary font-medium">Réception en cours…</p>
         {connection && <SecurityBadge method={connection.connection_method} />}
       </div>
     )
   }
 
+  // Confirming
   if (connection && receiveStatus === 'confirming') {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+      <div className="flex flex-col gap-5">
         <SecurityBadge method={connection.connection_method} />
 
         {/* Safety number */}
-        <div style={safetyBox}>
-          <ShieldAlert size={24} style={{ color: 'var(--warning)', margin: '0 auto var(--space-2)' }} />
-          <p style={{ color: 'var(--text-primary)', fontWeight: 600, margin: 0 }}>
-            Vérifiez le Safety Number
-          </p>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--space-3)', margin: 'var(--space-3) 0' }}>
+        <div className="bg-warning-muted border border-warning rounded-xl p-6 text-center shadow-[inset_0_0_20px_rgba(245,158,11,0.05)]">
+          <ShieldAlert size={28} className="text-warning mx-auto mb-3" />
+          <p className="text-tx-primary font-semibold">Vérifiez le Safety Number</p>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-5 my-5 bg-surface/50 p-4 rounded-xl border border-warning/20">
             <SafetyIdenticon value={connection.safety_number || ''} />
-            <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xl)', color: 'var(--text-primary)', letterSpacing: '0.2em', margin: 0 }}>
+            <p className="font-mono text-2xl text-tx-primary tracking-[0.2em] font-medium">
               {connection.safety_number}
             </p>
           </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', margin: 0 }}>
+          <p className="text-tx-secondary text-sm">
             Comparez le code <strong>et</strong> le motif coloré : chaque couleur doit être à la <strong>même position</strong> sur les deux appareils
           </p>
         </div>
 
         {/* Peer info */}
-        <div style={card}>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', margin: 0 }}>
-            Pair : <strong style={{ color: 'var(--text-primary)' }}>{connection.peer_name}</strong>
+        <div className="bg-surface border border-bd rounded-xl p-5">
+          <p className="text-tx-secondary text-sm">
+            Pair : <strong className="text-tx-primary">{connection.peer_name}</strong>
           </p>
           {connection.items.length > 0 && (
-            <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', margin: 'var(--space-2) 0 0' }}>
+            <p className="text-tx-secondary text-sm mt-2">
               {connection.items.length} élément(s) — {formatSize(connection.total_size)}
             </p>
           )}
         </div>
 
         <div className="flex flex-col sm:flex-row gap-3 w-full">
-          <Button
-            icon={ShieldCheck}
-            onClick={() => confirmMut.mutate(true)}
-            loading={confirmMut.isPending}
-            className="flex-1 w-full"
-          >
+          <Button icon={ShieldCheck} onClick={() => confirmMut.mutate(true)} loading={confirmMut.isPending} className="flex-1 w-full">
             Confirmer et recevoir
           </Button>
-          <Button
-            variant="danger"
-            icon={X}
-            onClick={() => confirmMut.mutate(false)}
-            className="flex-1 w-full"
-          >
+          <Button variant="danger" icon={X} onClick={() => confirmMut.mutate(false)} className="flex-1 w-full">
             Refuser
           </Button>
         </div>
@@ -378,28 +329,17 @@ function WormholeReceive() {
     )
   }
 
+  // Idle
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+    <div className="flex flex-col gap-4">
       <div>
-        <span style={label}>Code Wormhole reçu du sender</span>
+        <span className="text-sm text-tx-secondary mb-2 block font-medium">Code Wormhole reçu du sender</span>
         <input
           type="text"
           value={code}
           onChange={e => setCode(e.target.value)}
           placeholder="ex: 42-alpha-beacon-drift"
-          style={{
-            width: '100%',
-            padding: 'var(--space-3) var(--space-4)',
-            background: 'var(--bg-input)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-md)',
-            color: 'var(--text-primary)',
-            fontFamily: 'var(--font-mono)',
-            fontSize: 'var(--text-base)',
-            outline: 'none',
-          }}
-          onFocus={e => (e.target.style.borderColor = 'var(--border-focus)')}
-          onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+          className="w-full px-4 py-3 bg-input border border-bd rounded-lg text-tx-primary font-mono text-base outline-none focus:border-accent transition-colors tracking-wide"
           onKeyDown={e => { if (e.key === 'Enter' && code.trim()) connectMut.mutate() }}
         />
       </div>
@@ -418,20 +358,13 @@ function WormholeReceive() {
 /* ─── SecurityBadge ─── */
 function SecurityBadge({ method }: { method: string }) {
   const isSecure = method.includes('IPv6') || method.includes('mDNS') || method.includes('Local') || method.includes('TLS') || method.includes('PQC')
-  const color = isSecure ? 'var(--success)' : 'var(--warning)'
-  const bg = isSecure ? 'var(--success-muted)' : 'var(--warning-muted)'
-  const Icon = isSecure ? ShieldCheck : WifiOff
-
+  
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
-      padding: '6px 12px', borderRadius: 'var(--radius-full)',
-      background: bg, width: 'fit-content',
-    }}>
-      <Icon size={14} style={{ color }} />
-      <span style={{ color, fontSize: 'var(--text-xs)', fontWeight: 500 }}>{method}</span>
-      <Shield size={12} style={{ color }} />
-      <span style={{ color, fontSize: 'var(--text-xs)' }}>E2E PQC</span>
+    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full w-fit border ${isSecure ? 'bg-success-muted border-success/30 text-success' : 'bg-warning-muted border-warning/30 text-warning'}`}>
+      {isSecure ? <ShieldCheck size={16} /> : <WifiOff size={16} />}
+      <span className="text-xs font-medium">{method}</span>
+      <Shield size={14} className="ml-1 opacity-70" />
+      <span className="text-xs opacity-90">E2E PQC</span>
     </div>
   )
 }
@@ -641,9 +574,9 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
   // ── Sender flow overlays (offer created, waiting, confirming, transferring, done) ──
   if (offer && transferStatus === 'completed') {
     return (
-      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)', textAlign: 'center' as const }}>
-        <ShieldCheck size={40} style={{ color: 'var(--success)', margin: '0 auto' }} />
-        <p style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: 'var(--text-lg)' }}>Transfert terminé !</p>
+      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 text-center">
+        <ShieldCheck size={48} className="text-success mx-auto" />
+        <p className="text-tx-primary font-semibold text-lg">Transfert terminé !</p>
         <Button variant="secondary" onClick={resetSenderFlow}>Nouveau transfert</Button>
       </div>
     )
@@ -651,9 +584,9 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
 
   if (offer && transferStatus === 'failed') {
     return (
-      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)', textAlign: 'center' as const }}>
-        <ShieldAlert size={40} style={{ color: 'var(--danger, #ef4444)', margin: '0 auto' }} />
-        <p style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Transfert échoué</p>
+      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 text-center">
+        <ShieldAlert size={48} className="text-danger mx-auto" />
+        <p className="text-tx-primary font-semibold">Transfert échoué</p>
         <Button variant="secondary" onClick={resetSenderFlow}>Réessayer</Button>
       </div>
     )
@@ -661,9 +594,9 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
 
   if (offer && transferStatus === 'transferring') {
     return (
-      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)', alignItems: 'center' }}>
-        <Loader2 size={32} style={{ color: 'var(--accent)' }} className="animate-spin" />
-        <p style={{ color: 'var(--text-primary)', fontWeight: 500 }}>Transfert en cours…</p>
+      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 items-center">
+        <Loader2 size={36} className="text-accent animate-spin" />
+        <p className="text-tx-primary font-medium">Transfert en cours…</p>
         <SecurityBadge method={offer.connection_method} />
       </div>
     )
@@ -672,22 +605,22 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
   // Safety number confirmation (sender side)
   if (offer && safetyNumber && transferStatus === 'confirming') {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+      <div className="flex flex-col gap-5">
         <SecurityBadge method={offer.connection_method} />
-        <div style={safetyBox}>
-          <ShieldAlert size={24} style={{ color: 'var(--warning)', margin: '0 auto var(--space-2)' }} />
-          <p style={{ color: 'var(--text-primary)', fontWeight: 600, margin: 0 }}>Vérifiez le Safety Number</p>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--space-3)', margin: 'var(--space-3) 0' }}>
+        <div className="bg-warning-muted border border-warning rounded-xl p-6 text-center shadow-[inset_0_0_20px_rgba(245,158,11,0.05)]">
+          <ShieldAlert size={28} className="text-warning mx-auto mb-3" />
+          <p className="text-tx-primary font-semibold">Vérifiez le Safety Number</p>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-5 my-5 bg-surface/50 p-4 rounded-xl border border-warning/20">
             <SafetyIdenticon value={safetyNumber} />
-            <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xl)', color: 'var(--text-primary)', letterSpacing: '0.2em', margin: 0 }}>
+            <p className="font-mono text-2xl text-tx-primary tracking-[0.2em] font-medium">
               {safetyNumber}
             </p>
           </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', margin: 0 }}>
+          <p className="text-tx-secondary text-sm">
             Comparez le code <strong>et</strong> le motif coloré : chaque couleur doit être à la <strong>même position</strong> sur les deux appareils
           </p>
           {peerName && (
-            <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', marginTop: 'var(--space-2)' }}>
+            <p className="text-tx-muted text-xs mt-3 bg-surface/50 p-2 rounded-lg inline-block">
               Pair : <strong>{peerName}</strong>
             </p>
           )}
@@ -705,23 +638,25 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
   // Offer created — waiting for receiver to enter the code
   if (offer && transferStatus === 'waiting') {
     return (
-      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-          <Radio size={20} style={{ color: 'var(--accent)' }} className="animate-pulse" />
-          <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>En attente du destinataire…</span>
+      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5">
+        <div className="flex items-center gap-3">
+          <Radio size={20} className="text-accent animate-pulse" />
+          <span className="text-tx-primary font-medium">En attente du destinataire…</span>
         </div>
         <div>
-          <span style={label}>Code Wormhole — partagez-le avec le destinataire</span>
-          <div style={codeBox}>{offer.wormhole_code}</div>
-          <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', marginTop: 'var(--space-2)', textAlign: 'center' }}>
+          <span className="text-sm text-tx-secondary mb-2 block font-medium">Code Wormhole — partagez-le avec le destinataire</span>
+          <div className="bg-input border border-bd rounded-lg p-4 font-mono text-xl text-center tracking-[0.15em] text-accent-text select-all shadow-inner">
+            {offer.wormhole_code}
+          </div>
+          <p className="text-tx-muted text-xs mt-3 text-center">
             Le destinataire doit saisir ce code dans l'onglet « Recevoir »
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
-          <Button variant="secondary" icon={copied ? Check : Copy} onClick={handleCopy}>
+        <div className="flex flex-col sm:flex-row gap-3">
+          <Button variant="secondary" icon={copied ? Check : Copy} onClick={handleCopy} className="flex-1">
             {copied ? 'Copié !' : 'Copier le code'}
           </Button>
-          <Button variant="danger" icon={X} onClick={() => { cancelMut.mutate(offer.transfer_id); resetSenderFlow() }}>
+          <Button variant="danger" icon={X} onClick={() => { cancelMut.mutate(offer.transfer_id); resetSenderFlow() }} className="flex-1">
             Annuler
           </Button>
         </div>
@@ -731,25 +666,19 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+    <div className="flex flex-col gap-5">
       {/* Visibility toggle */}
-      <div style={{
-        ...card,
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: 'var(--space-4) var(--space-6)',
-        background: isVisible ? 'var(--success-muted)' : 'var(--bg-surface)',
-        border: `1px solid ${isVisible ? 'var(--success)' : 'var(--border)'}`,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+      <div className={`flex items-center justify-between p-4 sm:p-5 rounded-xl border transition-colors ${isVisible ? 'bg-success-muted border-success/30' : 'bg-surface border-bd'}`}>
+        <div className="flex items-center gap-3">
           {isVisible
-            ? <Wifi size={20} style={{ color: 'var(--success)' }} />
-            : <WifiOff size={20} style={{ color: 'var(--text-muted)' }} />
+            ? <Wifi size={20} className="text-success shrink-0" />
+            : <WifiOff size={20} className="text-tx-muted shrink-0" />
           }
           <div>
-            <div style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 600 }}>
+            <div className={`text-sm font-semibold ${isVisible ? 'text-success' : 'text-tx-primary'}`}>
               {isVisible ? 'Visible sur le réseau' : 'Masqué du réseau'}
             </div>
-            <div style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-xs)' }}>
+            <div className={`text-xs mt-0.5 ${isVisible ? 'text-success/80' : 'text-tx-secondary'}`}>
               {isVisible
                 ? 'Les autres appareils peuvent vous découvrir'
                 : 'Activez pour être détectable par les autres appareils'
@@ -760,37 +689,21 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
         <button
           onClick={() => visibilityMut.mutate(!isVisible)}
           disabled={visibilityMut.isPending}
-          style={{
-            width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
-            background: isVisible ? 'var(--success)' : 'var(--bg-input)',
-            position: 'relative', transition: 'background 0.2s',
-            opacity: visibilityMut.isPending ? 0.6 : 1,
-          }}
+          className={`relative w-11 h-6 rounded-full transition-colors focus:outline-none ${visibilityMut.isPending ? 'opacity-60' : ''} ${isVisible ? 'bg-success' : 'bg-input border border-bd'}`}
         >
-          <div style={{
-            width: 20, height: 20, borderRadius: '50%', background: 'white',
-            position: 'absolute', top: 2,
-            left: isVisible ? 22 : 2,
-            transition: 'left 0.2s',
-          }} />
+          <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform shadow-sm ${isVisible ? 'translate-x-5' : 'translate-x-0'}`} />
         </button>
       </div>
 
       {/* Pending items banner */}
       {pendingItems && !offer && (
-        <div style={{
-          ...card,
-          background: 'var(--accent-muted)',
-          border: '1px solid var(--accent)',
-          display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
-          padding: 'var(--space-4)',
-        }}>
-          <Send size={18} style={{ color: 'var(--accent)', flexShrink: 0 }} />
-          <div style={{ flex: 1 }}>
-            <p style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 600, margin: 0 }}>
+        <div className="bg-accent-muted border border-accent rounded-xl p-4 flex items-center gap-3">
+          <Send size={18} className="text-accent shrink-0" />
+          <div className="flex-1">
+            <p className="text-tx-primary text-sm font-semibold m-0">
               {pendingItems.ids.length} élément(s) sélectionné(s)
             </p>
-            <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-xs)', margin: 'var(--space-1) 0 0' }}>
+            <p className="text-tx-secondary text-xs mt-1 mb-0">
               Choisissez un destinataire ci-dessous pour lancer le transfert
             </p>
           </div>
@@ -799,43 +712,38 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
       )}
 
       {/* Discovered on network */}
-      <div style={card}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
-          <h3 style={{ color: 'var(--text-primary)', fontSize: 'var(--text-base)', margin: 0, display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-            <Wifi size={16} style={{ color: 'var(--accent)' }} /> Réseau local
+      <div className="bg-surface border border-bd rounded-xl p-5 sm:p-6">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-tx-primary text-base font-semibold m-0 flex items-center gap-2">
+            <Wifi size={16} className="text-accent" /> Réseau local
           </h3>
           <Button variant="ghost" size="sm" icon={RefreshCw} onClick={() => rescan()} loading={isScanning}>
             Scanner
           </Button>
         </div>
         {discovered.length === 0 ? (
-          <div style={{ textAlign: 'center' as const, padding: 'var(--space-4)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-3)' }}>
+          <div className="text-center p-4 flex flex-col items-center gap-3">
             {isScanning && <SonarScanner />}
-            <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)', margin: 0 }}>
+            <p className="text-tx-muted text-sm m-0">
               {isScanning ? 'Recherche de pairs sur le réseau…' : 'Aucun pair détecté sur le réseau'}
             </p>
-            <p style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', marginTop: 'var(--space-2)' }}>
+            <p className="text-tx-muted text-xs mt-2 mb-0">
               Assurez-vous que l'autre appareil est sur le même réseau Wi-Fi
             </p>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+          <div className="flex flex-col gap-2">
             {discovered.map((p, i) => (
               
               
-                <div key={i} style={{
-                  padding: '10px 12px', borderRadius: 'var(--radius-md)',
-                  background: 'var(--bg-elevated)',
-                  border: '1px solid transparent',
-                  transition: 'all 0.15s',
-                }} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div key={i} className="px-3 py-2.5 rounded-lg bg-elevated border border-transparent transition-all duration-150 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-bd/50">
                   <div className="flex items-center gap-2 flex-1 min-w-0 w-full">
-                    <Radio size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+                    <Radio size={14} className="text-accent shrink-0" />
                     <div className="min-w-0 flex-1">
-                      <span style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 500 }} className="break-all">{p.name}</span>
+                      <span className="text-tx-primary text-sm font-medium break-all">{p.name}</span>
                       <div className="flex flex-wrap gap-2 items-center mt-1">
-                        <Badge variant="info">{p.method}</Badge>
-                        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)' }} className="break-all">{p.addr}</span>
+                        <Badge variant="info" size="sm">{p.method}</Badge>
+                        <span className="text-tx-muted text-xs font-mono break-all">{p.addr}</span>
                       </div>
                     </div>
                   </div>
@@ -862,20 +770,14 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
 
       {/* Cross-network / manual send option */}
       {pendingItems && !offer && (
-        <div style={{
-          ...card,
-          background: 'var(--bg-surface)',
-          border: '1px dashed var(--border)',
-          display: 'flex', flexDirection: 'column', gap: 'var(--space-3)',
-          padding: 'var(--space-4)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-            <Globe size={18} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
-            <div style={{ flex: 1 }}>
-              <p style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 600, margin: 0 }}>
+        <div className="bg-surface border border-dashed border-bd rounded-xl p-4 flex flex-col gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <Globe size={18} className="text-tx-secondary shrink-0 hidden sm:block" />
+            <div className="flex-1 min-w-[200px]">
+              <p className="text-tx-primary text-sm font-semibold m-0">
                 Envoyer à distance
               </p>
-              <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-xs)', margin: 'var(--space-1) 0 0' }}>
+              <p className="text-tx-secondary text-xs mt-1 mb-0">
                 Destinataire sur un autre réseau ? Générez un code à partager
               </p>
             </div>
@@ -885,6 +787,7 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
               icon={Send}
               onClick={() => createOfferMut.mutate(true)}
               loading={createOfferMut.isPending}
+              className="w-full sm:w-auto"
             >
               Générer un code
             </Button>
@@ -893,44 +796,36 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
       )}
 
       {/* ML-DSA-65 Security info */}
-      <div style={{
-        ...card,
-        background: 'var(--accent-muted)',
-        border: '1px solid var(--accent)',
-        display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
-        padding: 'var(--space-4)',
-      }}>
-        <Shield size={20} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+      <div className="bg-accent-muted border border-accent rounded-xl p-4 flex items-start sm:items-center gap-3">
+        <Shield size={20} className="text-accent shrink-0 mt-0.5 sm:mt-0" />
         <div>
-          <p style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 600, margin: 0 }}>
+          <p className="text-tx-primary text-sm font-semibold m-0">
             Sécurité Post-Quantique ML-DSA-65
           </p>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-xs)', margin: 'var(--space-1) 0 0' }}>
+          <p className="text-tx-secondary text-xs mt-1 mb-0">
             Tous les transferts et synchronisations sont signés avec ML-DSA-65 (Dilithium) pour garantir l'intégrité et l'authenticité des données.
           </p>
         </div>
       </div>
 
       {/* Trusted peers with sync controls */}
-      <div style={card}>
-        <h3 style={{ color: 'var(--text-primary)', fontSize: 'var(--text-base)', margin: '0 0 var(--space-4)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-          <Fingerprint size={16} style={{ color: 'var(--accent)' }} /> Pairs de confiance
+      <div className="bg-surface border border-bd rounded-xl p-5 sm:p-6">
+        <h3 className="text-tx-primary text-base font-semibold m-0 mb-4 flex items-center gap-2">
+          <Fingerprint size={16} className="text-accent" /> Pairs de confiance
         </h3>
         {isLoading ? (
-          <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-6)' }}><Spinner size={24} /></div>
+          <div className="flex justify-center p-6"><Spinner size={24} /></div>
         ) : peers.length === 0 ? (
           <EmptyState icon={Users} title="Aucun pair de confiance" description="Scannez le réseau et ajoutez des pairs, ou effectuez un transfert réussi" />
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+          <div className="flex flex-col gap-3">
             {peers.map(p => (
-              <div key={p.fingerprint} style={{
-                padding: '12px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-elevated)',
-              }}>
+              <div key={p.fingerprint} className="p-3.5 rounded-xl bg-elevated border border-bd/50">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="min-w-0 flex-1 w-full">
-                    <div style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)', fontWeight: 500 }} className="break-all">{p.name}</div>
-                    <div style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)', marginTop: 2 }} className="break-all">{p.fingerprint}</div>
-                    <div style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)', marginTop: 2 }}>
+                    <div className="text-tx-primary text-sm font-semibold break-all">{p.name}</div>
+                    <div className="text-tx-muted text-xs font-mono mt-1 break-all">{p.fingerprint}</div>
+                    <div className="text-tx-muted text-xs mt-1">
                       {p.transfer_count} transfert(s) · Vu {new Date(p.last_seen).toLocaleDateString('fr-FR')}
                     </div>
                   </div>
@@ -941,31 +836,18 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
                   </div>
                 </div>
                 {/* Sync toggle */}
-                <div style={{
-                  marginTop: 'var(--space-3)', paddingTop: 'var(--space-3)',
-                  borderTop: '1px solid var(--border)',
-                }} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="mt-3 pt-3 border-t border-bd/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
-                    <RefreshCw size={14} style={{ color: syncEnabled[p.fingerprint] ? 'var(--accent)' : 'var(--text-muted)' }} />
-                    <span style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-xs)' }}>
+                    <RefreshCw size={14} className={syncEnabled[p.fingerprint] ? 'text-accent' : 'text-tx-muted'} />
+                    <span className="text-tx-secondary text-xs font-medium">
                       Synchronisation automatique
                     </span>
                   </div>
                   <button
                     onClick={() => toggleSync(p.fingerprint)}
-                    style={{
-                      width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer',
-                      background: syncEnabled[p.fingerprint] ? 'var(--accent)' : 'var(--bg-input)',
-                      position: 'relative', transition: 'background 0.2s',
-                    }}
-                    className="self-end sm:self-auto"
+                    className={`relative w-9 h-5 rounded-full transition-colors focus:outline-none self-end sm:self-auto ${syncEnabled[p.fingerprint] ? 'bg-accent' : 'bg-input border border-bd'}`}
                   >
-                    <div style={{
-                      width: 16, height: 16, borderRadius: '50%', background: 'white',
-                      position: 'absolute', top: 2,
-                      left: syncEnabled[p.fingerprint] ? 18 : 2,
-                      transition: 'left 0.2s',
-                    }} />
+                    <div className={`absolute top-[2px] left-[2px] w-4 h-4 bg-white rounded-full transition-transform shadow-sm ${syncEnabled[p.fingerprint] ? 'translate-x-[16px]' : 'translate-x-0'}`} />
                   </button>
                 </div>
               </div>
@@ -999,21 +881,15 @@ export default function TransferPage() {
 
   return (
     <AppShell>
-      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+      <div className="page-content flex flex-col gap-6 w-full max-w-4xl mx-auto pb-24 md:pb-6">
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-3)' }} className="page-header">
+        <div className="page-header flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
-            <h1 style={{
-              fontFamily: 'var(--font-display)',
-              fontSize: 'var(--text-3xl)',
-              color: 'var(--text-primary)',
-              display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
-              margin: 0,
-            }}>
-              <ArrowLeftRight size={28} style={{ color: 'var(--accent)' }} />
+            <h1 className="font-display text-2xl sm:text-3xl text-tx-primary flex items-center gap-3 m-0">
+              <ArrowLeftRight size={28} className="text-accent" />
               Vault Secure Transfer
             </h1>
-            <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>
+            <p className="text-tx-secondary text-sm mt-1">
               Transfert P2P chiffré end-to-end · Post-Quantum
             </p>
           </div>
@@ -1021,7 +897,7 @@ export default function TransferPage() {
         </div>
 
         {/* Tabs */}
-        <div style={{ background: 'var(--bg-surface)', padding: 4, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }} className="flex gap-1 w-full">
+        <div className="bg-surface p-1 rounded-xl border border-bd flex gap-1 w-full">
           {tabs.map(t => {
             const active = tab === t.key
             const Icon = t.icon
@@ -1029,17 +905,9 @@ export default function TransferPage() {
               <button
                 key={t.key}
                 onClick={() => setTab(t.key)}
-                style={{
-                  border: 'none',
-                  borderRadius: 'var(--radius-sm)',
-                  background: active ? 'var(--bg-elevated)' : 'transparent',
-                  color: active ? 'var(--text-primary)' : 'var(--text-muted)',
-                  fontFamily: 'var(--font-body)',
-                  fontWeight: active ? 500 : 400,
-                  cursor: 'pointer',
-                  transition: 'all 0.15s',
-                }}
-                className="flex-1 flex items-center justify-center gap-2 py-2.5 px-3 text-xs sm:text-sm"
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 text-xs sm:text-sm rounded-lg font-body transition-all duration-200 ${
+                  active ? 'bg-elevated text-tx-primary font-medium shadow-sm' : 'bg-transparent text-tx-muted hover:text-tx-secondary'
+                }`}
               >
                 <Icon size={16} />
                 <span className="hidden min-[380px]:inline">{t.label}</span>
@@ -1049,7 +917,7 @@ export default function TransferPage() {
         </div>
 
         {/* Tab content */}
-        <div className="animate-fade-in">
+        <div className="animate-fade-in w-full">
           {tab === 'send' && <WormholeSend onItemsSelected={(type, ids) => { setPendingItems({ type, ids }); setTab('peers') }} />}
           {tab === 'receive' && <WormholeReceive />}
           {tab === 'peers' && <TrustedPeers pendingItems={pendingItems} onClearPending={() => setPendingItems(null)} />}
