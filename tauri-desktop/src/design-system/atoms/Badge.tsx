@@ -7,6 +7,7 @@ interface BadgeProps {
   variant?: BadgeVariant
   dot?: boolean
   size?: 'sm' | 'md'
+  className?: string
 }
 
 const variantColors: Record<BadgeVariant, { bg: string; text: string; dot?: string }> = {
@@ -18,12 +19,12 @@ const variantColors: Record<BadgeVariant, { bg: string; text: string; dot?: stri
   accent:   { bg: 'var(--accent-muted)',  text: 'var(--accent)',  dot: 'var(--accent)' },
 }
 
-export function Badge({ children, variant = 'default', dot = false, size = 'sm' }: BadgeProps) {
+export function Badge({ children, variant = 'default', dot = false, size = 'sm', className = '' }: BadgeProps) {
   const colors = variantColors[variant]
   const isSmall = size === 'sm'
 
   return (
-    <span style={{
+    <span className={className} style={{
       display: 'inline-flex',
       alignItems: 'center',
       gap: '6px',

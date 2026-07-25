@@ -5,71 +5,93 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Thème Noir et Bleu Nuit
-        bg: {
-          primary: "#0a0e1a",
-          secondary: "#121826",
-          tertiary: "#1a2234",
-          elevated: "#1e2738",
+        void: "var(--bg-void)",
+        surface: "var(--bg-surface)",
+        elevated: "var(--bg-elevated)",
+        input: "var(--bg-input)",
+        hover: "var(--bg-hover)",
+        active: "var(--bg-active)",
+        
+        accent: {
+          DEFAULT: "var(--accent)",
+          hover: "var(--accent-hover)",
+          muted: "var(--accent-muted)",
+          glow: "var(--accent-glow)",
+          text: "var(--accent-text)",
         },
-        primary: {
-          50: "#eff6ff",
-          100: "#dbeafe",
-          200: "#bfdbfe",
-          300: "#93c5fd",
-          400: "#60a5fa",
-          500: "#3b82f6",
-          600: "#2563eb",
-          700: "#1d4ed8",
-          800: "#1e40af",
-          900: "#1e3a8a",
-        },
+        
         danger: {
-          50: "#fef2f2",
-          100: "#fee2e2",
-          200: "#fecaca",
-          300: "#fca5a5",
-          400: "#f87171",
-          500: "#ef4444",
-          600: "#dc2626",
-          700: "#b91c1c",
-          800: "#991b1b",
-          900: "#7f1d1d",
+          DEFAULT: "var(--danger)",
+          hover: "var(--danger-hover)",
+          muted: "var(--danger-muted)",
+        },
+        warning: {
+          DEFAULT: "var(--warning)",
+          muted: "var(--warning-muted)",
         },
         success: {
-          500: "#10b981",
-          600: "#059669",
+          DEFAULT: "var(--success)",
+          muted: "var(--success-muted)",
         },
-        text: {
-          primary: "#e2e8f0",
-          secondary: "#94a3b8",
-          muted: "#64748b",
+        info: {
+          DEFAULT: "var(--info)",
+          muted: "var(--info-muted)",
         },
+        
+        tx: {
+          primary: "var(--text-primary)",
+          secondary: "var(--text-secondary)",
+          muted: "var(--text-muted)",
+          disabled: "var(--text-disabled)",
+          inverse: "var(--text-inverse)",
+        },
+        
+        bd: {
+          DEFAULT: "var(--border)",
+          hover: "var(--border-hover)",
+          focus: "var(--border-focus)",
+          error: "var(--border-error)",
+        }
       },
       boxShadow: {
-        glow: "0 0 20px rgba(59, 130, 246, 0.3)",
-        "glow-lg": "0 0 40px rgba(59, 130, 246, 0.4)",
-        card: "0 4px 16px rgba(0, 0, 0, 0.2)",
-        "card-hover": "0 8px 24px rgba(0, 0, 0, 0.3)",
+        sm: "var(--shadow-sm)",
+        md: "var(--shadow-md)",
+        lg: "var(--shadow-lg)",
+        glow: "var(--shadow-glow)",
+        inner: "var(--shadow-inner)",
       },
-      animation: {
-        fadeIn: "fadeIn 0.5s ease-out",
-        slideIn: "slideIn 0.5s ease-out",
-        glow: "glow 2s ease-in-out infinite",
+      fontFamily: {
+        display: "var(--font-display)",
+        body: "var(--font-body)",
+        mono: "var(--font-mono)",
       },
-      keyframes: {
-        fadeIn: {
-          "0%": { opacity: "0", transform: "translateY(10px)" },
-          "100%": { opacity: "1", transform: "translateY(0)" },
-        },
-        slideIn: {
-          "0%": { opacity: "0", transform: "translateX(-20px)" },
-          "100%": { opacity: "1", transform: "translateX(0)" },
-        },
-        glow: {
-          "0%, 100%": { boxShadow: "0 0 20px rgba(59, 130, 246, 0.2)" },
-          "50%": { boxShadow: "0 0 30px rgba(59, 130, 246, 0.4)" },
-        },
+      fontSize: {
+        xs: "var(--text-xs)",
+        sm: "var(--text-sm)",
+        base: "var(--text-base)",
+        lg: "var(--text-lg)",
+        xl: "var(--text-xl)",
+        "2xl": "var(--text-2xl)",
+        "3xl": "var(--text-3xl)",
+      },
+      borderRadius: {
+        sm: "var(--radius-sm)",
+        md: "var(--radius-md)",
+        lg: "var(--radius-lg)",
+        xl: "var(--radius-xl)",
+        full: "var(--radius-full)",
+      },
+      spacing: {
+        1: "var(--space-1)",
+        2: "var(--space-2)",
+        3: "var(--space-3)",
+        4: "var(--space-4)",
+        5: "var(--space-5)",
+        6: "var(--space-6)",
+        8: "var(--space-8)",
+        10: "var(--space-10)",
+        12: "var(--space-12)",
+        16: "var(--space-16)",
       },
     },
   },

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Edit2, Trash2, KeyRound, RefreshCw, AlertCircle, ShieldAlert, Download, Upload, Fingerprint, Eye, EyeOff, FileText, CheckCircle2, XCircle, ArrowRightLeft } from 'lucide-react'
+import { Plus, Edit2, Trash2, KeyRound, RefreshCw, AlertCircle, ShieldAlert, Download, Upload, Fingerprint, Eye, EyeOff, FileText, CheckCircle2, XCircle, ArrowRightLeft, X } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { passwords, csvIO, type Password, type ParsedCsvEntry, type EntryAction, type ImportCsvResponse } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
@@ -294,197 +294,203 @@ export default function PasswordsPage() {
     </AppShell>
   )
 
-  return (
-    <AppShell>
-      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-        {/* Header */}
-        <div className="page-header flex flex-col items-start sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-              <KeyRound size={28} style={{ color: 'var(--accent)' }} />
-              Mots de passe
-            </h1>
-            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-1)' }}>
-              {list.length} entrée{list.length !== 1 ? 's' : ''} enregistrée{list.length !== 1 ? 's' : ''}
-            </p>
+  const renderForm = () => (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <Input label="Titre" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: Gmail" required />
+      <Input label="Nom d'utilisateur / Email" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="user@example.com" />
+      <div>
+        <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
+          <div className="flex-1">
+            <Input label="Mot de passe" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mot de passe" required />
           </div>
-          <div className="flex flex-wrap gap-2 w-full sm:w-auto">
-            <Button variant="secondary" size="sm" icon={Download} onClick={openImport} disabled={isReadonly} className="flex-1 sm:flex-none">Importer</Button>
-            <Button variant="secondary" size="sm" icon={Upload} onClick={openExport} className="flex-1 sm:flex-none">Exporter</Button>
-            <Button icon={Plus} onClick={openCreate} disabled={isReadonly} className="flex-1 sm:flex-none">Nouveau</Button>
+          <Button type="button" variant="secondary" icon={RefreshCw} onClick={generatePassword} style={{ marginBottom: 0 }} className="w-full sm:w-auto">
+            Générer
+          </Button>
+        </div>
+        <div className="mt-3 flex flex-col gap-3">
+          <div className="flex items-center gap-3">
+            <label className="text-xs text-tx-secondary font-body min-w-[70px]">Longueur : {pwLength}</label>
+            <input type="range" min={8} max={64} value={pwLength} onChange={(e) => setPwLength(Number(e.target.value))} className="flex-1 accent-accent" />
+          </div>
+          <div className="flex gap-4 flex-wrap">
+            {([['A-Z', pwUpper, setPwUpper], ['a-z', pwLower, setPwLower], ['0-9', pwDigits, setPwDigits], ['!@#', pwSymbols, setPwSymbols]] as const).map(([label, val, set]) => (
+              <label key={label} className="flex items-center gap-1.5 text-xs text-tx-secondary font-mono cursor-pointer">
+                <input type="checkbox" checked={val as boolean} onChange={() => (set as React.Dispatch<React.SetStateAction<boolean>>)((v: boolean) => !v)} className="accent-accent" />
+                {label}
+              </label>
+            ))}
           </div>
         </div>
+        <div className="mt-3">
+          <PasswordStrength password={password} />
+        </div>
+      </div>
+      <Input label="URL" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com" />
+      <Input label="Catégorie" value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Social, Email, Travail…" />
+      <div>
+        <label className="block text-xs font-medium text-tx-secondary font-body tracking-wide uppercase mb-1">Notes</label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Notes additionnelles…"
+          rows={3}
+          className="w-full bg-input border border-bd rounded-lg px-3 py-2.5 text-tx-primary font-body text-sm outline-none resize-y focus:border-accent transition-colors"
+        />
+      </div>
+      <div className="flex gap-3 pt-2 mt-auto">
+        <Button type="submit" fullWidth loading={createMut.isPending || updateMut.isPending}>
+          {editing ? 'Modifier' : 'Créer'}
+        </Button>
+        <Button type="button" variant="secondary" fullWidth onClick={close}>Annuler</Button>
+      </div>
+    </form>
+  )
 
-        {/* Readonly banner */}
-        {isReadonly && (
-          <div className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm" style={{ background: 'var(--danger-muted)', border: '1px solid var(--danger)', color: 'var(--danger)', fontFamily: 'var(--font-body)' }}>
-            <ShieldAlert size={16} />
-            Coffre-fort en lecture seule — modifications bloquées
+  return (
+    <AppShell>
+      <div className="flex h-full w-full">
+        {/* MASTER PANE */}
+        <div className={`flex-1 flex-col gap-6 min-w-0 overflow-y-auto page-content ${showModal ? 'hidden md:flex' : 'flex'} pr-0 md:pr-6 pb-20 md:pb-0`}>
+          {/* Header */}
+          <div className="page-header flex-col items-start sm:flex-row sm:items-center gap-4">
+            <div>
+              <h1 className="font-display text-3xl text-tx-primary flex items-center gap-3">
+                <KeyRound size={28} className="text-accent" />
+                Mots de passe
+              </h1>
+              <p className="text-sm text-tx-muted font-body mt-1">
+                {list.length} entrée{list.length !== 1 ? 's' : ''} enregistrée{list.length !== 1 ? 's' : ''}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <Button variant="secondary" size="sm" icon={Download} onClick={openImport} disabled={isReadonly} title="Importer" style={{ padding: '8px' }} />
+              <Button variant="secondary" size="sm" icon={Upload} onClick={openExport} title="Exporter" style={{ padding: '8px' }} />
+              <Button icon={Plus} onClick={openCreate} disabled={isReadonly} className="w-full sm:w-auto ml-1">Nouveau</Button>
+            </div>
           </div>
-        )}
 
-        {/* Search */}
-        <SearchBar value={search} onChange={setSearch} placeholder="Rechercher un mot de passe…" />
+          {/* Readonly banner */}
+          {isReadonly && (
+            <div className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm bg-danger-muted border border-danger text-danger font-body shrink-0">
+              <ShieldAlert size={16} />
+              Coffre-fort en lecture seule — modifications bloquées
+            </div>
+          )}
 
-        {/* Category filter chips */}
-        {categories.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            <button
-              onClick={() => setFilterCategory(null)}
-              className="px-3 py-1 rounded-full text-xs font-medium cursor-pointer transition-all duration-150"
-              style={{
-                border: `1px solid ${!filterCategory ? 'var(--accent)' : 'var(--border)'}`,
-                background: !filterCategory ? 'var(--accent-muted)' : 'transparent',
-                color: !filterCategory ? 'var(--accent-text)' : 'var(--text-muted)',
-                fontFamily: 'var(--font-body)',
-              }}
-            >
-              Tous
-            </button>
-            {categories.map((cat) => (
+          {/* Search */}
+          <div className="shrink-0">
+            <SearchBar value={search} onChange={setSearch} placeholder="Rechercher un mot de passe…" />
+          </div>
+
+          {/* Category filter chips */}
+          {categories.length > 0 && (
+            <div className="flex gap-2 overflow-x-auto pb-2 -mx-4 px-4 sm:mx-0 sm:px-0 [&::-webkit-scrollbar]:hidden shrink-0">
               <button
-                key={cat}
-                onClick={() => setFilterCategory(filterCategory === cat ? null : cat)}
-                className="px-3 py-1 rounded-full text-xs font-medium cursor-pointer transition-all duration-150"
-                style={{
-                  border: `1px solid ${filterCategory === cat ? 'var(--accent)' : 'var(--border)'}`,
-                  background: filterCategory === cat ? 'var(--accent-muted)' : 'transparent',
-                  color: filterCategory === cat ? 'var(--accent-text)' : 'var(--text-muted)',
-                  fontFamily: 'var(--font-body)',
-                }}
+                onClick={() => setFilterCategory(null)}
+                className={`shrink-0 px-3 py-1 rounded-full text-xs font-medium cursor-pointer transition-all duration-150 font-body border ${!filterCategory ? 'border-accent bg-accent-muted text-accent-text' : 'border-bd bg-transparent text-tx-muted'}`}
               >
-                {cat}
+                Tous
               </button>
-            ))}
-          </div>
-        )}
+              {categories.map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setFilterCategory(filterCategory === cat ? null : cat)}
+                  className={`shrink-0 px-3 py-1 rounded-full text-xs font-medium cursor-pointer transition-all duration-150 font-body border ${filterCategory === cat ? 'border-accent bg-accent-muted text-accent-text' : 'border-bd bg-transparent text-tx-muted'}`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          )}
 
-        {/* List */}
-        {filtered.length === 0 ? (
-          <EmptyState
-            icon={KeyRound}
-            title={search ? 'Aucun résultat' : 'Aucun mot de passe'}
-            description={search ? undefined : 'Commencez par ajouter votre premier mot de passe'}
-            action={!search ? <Button icon={Plus} onClick={openCreate}>Créer</Button> : undefined}
-          />
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-            {filtered.map((p) => (
-              <div key={p.id} style={{
-                background: 'var(--bg-surface)',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-lg)',
-                padding: 'var(--space-5)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 'var(--space-3)',
-                transition: `border-color var(--transition-fast)`,
-              }}>
-                <div className="flex justify-between items-start gap-4">
-                  <div className="min-w-0 flex-1">
-                    <p style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }} className="break-words">
-                      {p.title}
-                    </p>
-                    {p.username && <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', marginTop: 2 }} className="break-all">{p.username}</p>}
-                    {p.url && <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 2 }} className="break-all">{p.url}</p>}
+          {/* List */}
+          {filtered.length === 0 ? (
+            <EmptyState
+              icon={KeyRound}
+              title={search ? 'Aucun résultat' : 'Aucun mot de passe'}
+              description={search ? undefined : 'Commencez par ajouter votre premier mot de passe'}
+              action={!search ? <Button icon={Plus} onClick={openCreate}>Créer</Button> : undefined}
+            />
+          ) : (
+            <div className="flex flex-col gap-3">
+              {filtered.map((p) => (
+                <div key={p.id} onClick={() => openEdit(p)} className={`bg-surface sm:border rounded-2xl p-4 sm:p-5 flex flex-col gap-3 transition-all duration-200 cursor-pointer ${editing?.id === p.id ? 'sm:border-accent ring-1 ring-accent/20' : 'sm:border-bd hover:border-accent/50'}`}>
+                  <div className="flex justify-between items-start gap-4">
+                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                      <div className="w-10 h-10 rounded-full bg-accent-muted text-accent-text flex items-center justify-center text-lg font-display shrink-0 mt-0.5">
+                        {p.title.charAt(0).toUpperCase()}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-base font-semibold text-tx-primary font-body break-words">
+                          {p.title}
+                        </p>
+                        {p.username && <p className="text-sm text-tx-secondary font-body mt-0.5 truncate">{p.username}</p>}
+                        {p.url && <p className="text-xs text-tx-muted font-mono mt-0.5 truncate">{p.url}</p>}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {p.category && <Badge size="sm" className="hidden sm:inline-flex">{p.category}</Badge>}
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 'var(--space-1)', flexShrink: 0 }}>
-                    {p.category && <Badge size="sm">{p.category}</Badge>}
+
+                  <div className="pl-0 sm:pl-[52px]" onClick={e => e.stopPropagation()}>
+                    <PasswordField
+                      value={p.password}
+                      revealed={revealed.has(p.id)}
+                      onToggleReveal={() => setRevealed((prev) => { const s = new Set(prev); s.has(p.id) ? s.delete(p.id) : s.add(p.id); return s })}
+                      onCopy={() => handleCopy(p.password, p.id)}
+                      copied={copied === p.id}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 mt-1 border-t border-bd/50 pl-0 sm:pl-[52px]">
+                    <span className="text-xs text-tx-disabled font-body">
+                      {new Date(p.created_at).toLocaleDateString('fr-FR')}
+                    </span>
+                    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                      <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Supprimer "${p.title}" ?`)) deleteMut.mutate(p.id) }} disabled={isReadonly} className="w-8 h-8 p-0 flex items-center justify-center text-danger hover:bg-danger-muted" title="Supprimer">
+                        <Trash2 size={16} />
+                      </Button>
+                    </div>
                   </div>
                 </div>
-
-                <PasswordField
-                  value={p.password}
-                  revealed={revealed.has(p.id)}
-                  onToggleReveal={() => setRevealed((prev) => { const s = new Set(prev); s.has(p.id) ? s.delete(p.id) : s.add(p.id); return s })}
-                  onCopy={() => handleCopy(p.password, p.id)}
-                  copied={copied === p.id}
-                />
-
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', fontFamily: 'var(--font-body)' }}>
-                    {new Date(p.created_at).toLocaleDateString('fr-FR')}
-                  </span>
-                  <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
-                    <Button variant="ghost" size="sm" icon={Edit2} onClick={() => openEdit(p)} disabled={isReadonly}>Modifier</Button>
-                    <Button variant="ghost" size="sm" icon={Trash2} onClick={() => { if (confirm(`Supprimer "${p.title}" ?`)) deleteMut.mutate(p.id) }} disabled={isReadonly} style={{ color: 'var(--danger)' }}>Supprimer</Button>
-                  </div>
-                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        
+        {/* DETAIL PANE (Desktop) */}
+        <div className="hidden md:flex flex-col w-[350px] lg:w-[450px] shrink-0 border-l border-bd bg-surface/50 h-[calc(100vh-2rem)] rounded-r-xl overflow-hidden -mt-4 -mr-4 ml-2">
+          {showModal ? (
+            <div className="flex flex-col h-full bg-surface shadow-[-4px_0_15px_rgba(0,0,0,0.03)]">
+              <div className="flex items-center justify-between p-6 border-b border-bd/50 shrink-0 bg-surface z-10 sticky top-0">
+                <h2 className="text-xl font-display font-semibold text-tx-primary">
+                  {editing ? 'Modifier' : 'Nouveau'}
+                </h2>
+                <button onClick={close} className="p-2 -mr-2 rounded-full hover:bg-elevated text-tx-secondary transition-colors" aria-label="Fermer">
+                  <X size={20} />
+                </button>
               </div>
-            ))}
-          </div>
-        )}
+              <div className="p-6 overflow-y-auto">
+                {renderForm()}
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col h-full items-center justify-center p-8 text-center opacity-60">
+              <KeyRound size={48} className="text-tx-disabled mb-4" />
+              <h3 className="text-lg font-medium text-tx-secondary font-display">Aucun élément sélectionné</h3>
+              <p className="text-sm text-tx-muted mt-2 font-body">Sélectionnez un mot de passe dans la liste ou créez-en un nouveau pour afficher les détails.</p>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Modal */}
-      <Modal open={showModal} onClose={close} title={editing ? 'Modifier le mot de passe' : 'Nouveau mot de passe'}>
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-          <Input label="Titre" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: Gmail" required />
-          <Input label="Nom d'utilisateur / Email" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="user@example.com" />
-          <div>
-            <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
-              <div className="flex-1">
-                <Input label="Mot de passe" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mot de passe" required />
-              </div>
-              <Button type="button" variant="secondary" icon={RefreshCw} onClick={generatePassword} style={{ marginBottom: 0 }} className="w-full sm:w-auto">
-                Générer
-              </Button>
-            </div>
-            {/* Password generation options */}
-            <div style={{ marginTop: 'var(--space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-                <label style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', minWidth: 70 }}>
-                  Longueur : {pwLength}
-                </label>
-                <input type="range" min={8} max={64} value={pwLength} onChange={(e) => setPwLength(Number(e.target.value))}
-                  style={{ flex: 1, accentColor: 'var(--accent)' }} />
-              </div>
-              <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
-                {([['A-Z', pwUpper, setPwUpper], ['a-z', pwLower, setPwLower], ['0-9', pwDigits, setPwDigits], ['!@#', pwSymbols, setPwSymbols]] as const).map(([label, val, set]) => (
-                  <label key={label} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', cursor: 'pointer' }}>
-                    <input type="checkbox" checked={val as boolean} onChange={() => (set as React.Dispatch<React.SetStateAction<boolean>>)((v: boolean) => !v)} style={{ accentColor: 'var(--accent)' }} />
-                    {label}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div style={{ marginTop: 'var(--space-2)' }}>
-              <PasswordStrength password={password} />
-            </div>
-          </div>
-          <Input label="URL" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com" />
-          <Input label="Catégorie" value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Social, Email, Travail…" />
-          <div>
-            <label style={{ display: 'block', fontSize: 'var(--text-xs)', fontWeight: 500, color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', letterSpacing: 'var(--tracking-wide)', textTransform: 'uppercase', marginBottom: 'var(--space-1)' }}>
-              Notes
-            </label>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Notes additionnelles…"
-              rows={3}
-              style={{
-                width: '100%',
-                background: 'var(--bg-input)',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-md)',
-                padding: '10px 12px',
-                color: 'var(--text-primary)',
-                fontFamily: 'var(--font-body)',
-                fontSize: 'var(--text-sm)',
-                resize: 'vertical',
-                outline: 'none',
-              }}
-            />
-          </div>
-          <div style={{ display: 'flex', gap: 'var(--space-3)', paddingTop: 'var(--space-2)' }}>
-            <Button type="submit" fullWidth loading={createMut.isPending || updateMut.isPending}>
-              {editing ? 'Modifier' : 'Créer'}
-            </Button>
-            <Button type="button" variant="secondary" fullWidth onClick={close}>Annuler</Button>
-          </div>
-        </form>
-      </Modal>
+      {/* MOBILE DETAIL PANE (Modal) */}
+      <div className="md:hidden">
+        <Modal open={showModal} onClose={close} title={editing ? 'Modifier le mot de passe' : 'Nouveau mot de passe'}>
+          {renderForm()}
+        </Modal>
+      </div>
 
       {/* ═══ Import CSV Modal ═══ */}
       <Modal open={showImportModal} onClose={closeImport} title="Importer des mots de passe" width={680}>

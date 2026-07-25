@@ -59,60 +59,60 @@ export function AppShell({ children }: AppShellProps) {
       {isMobile && !isAuthPage && (
         <>
           {/* Overlay backdrop */}
-          {fabOpen && (
-            <div
-              onClick={() => setFabOpen(false)}
-              className="fixed inset-0 bg-black/50 z-[998] animate-fadeIn"
-            />
-          )}
+          <div
+            onClick={() => setFabOpen(false)}
+            className={`fixed inset-0 bg-black/60 z-[998] transition-opacity duration-300 ${fabOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}
+          />
 
-          {/* Action items */}
-          {fabOpen && fabActions.map((action, i) => {
-            const Icon = action.icon
-            const offset = (i + 1) * 64
-            return (
-              <div
-                key={action.label}
-                onClick={() => handleFabAction(action)}
-                className="fixed right-5 z-[999] flex items-center gap-3 cursor-pointer"
-                style={{
-                  bottom: `calc(var(--mobile-bottom-nav-height) + 20px + ${offset}px)`,
-                  animation: `slideUp 200ms cubic-bezier(0.34, 1.56, 0.64, 1) ${i * 50}ms both`,
-                }}
-              >
-                <span className="px-2.5 py-1 rounded-lg text-xs font-medium whitespace-nowrap shadow-md" style={{
-                  background: 'var(--bg-elevated)',
-                  border: '1px solid var(--border)',
-                  color: 'var(--text-primary)',
-                  fontFamily: 'var(--font-body)',
-                }}>
-                  {action.label}
-                </span>
-                <div className="w-11 h-11 rounded-full flex items-center justify-center" style={{
-                  background: action.color,
-                  boxShadow: `0 4px 14px ${action.color}44`,
-                }}>
-                  <Icon size={20} className="text-white" />
-                </div>
-              </div>
-            )
-          })}
+          {/* Bottom Sheet */}
+          <div
+            className={`fixed inset-x-0 bottom-0 z-[999] bg-surface border-t border-bd rounded-t-[32px] p-6 pb-8 transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${fabOpen ? 'translate-y-0' : 'translate-y-full'}`}
+            style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 32px)' }}
+          >
+            <div className="w-12 h-1.5 bg-bd rounded-full mx-auto mb-6" />
+            
+            <div className="flex items-center justify-between mb-8">
+              <h3 className="text-xl font-semibold text-tx-primary font-display">Ajouter</h3>
+              <button onClick={() => setFabOpen(false)} className="p-2 rounded-full bg-elevated text-tx-secondary">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              {fabActions.map((action) => {
+                const Icon = action.icon
+                return (
+                  <div
+                    key={action.label}
+                    onClick={() => handleFabAction(action)}
+                    className="flex flex-col items-center gap-3 cursor-pointer group"
+                  >
+                    <div className="w-16 h-16 rounded-2xl flex items-center justify-center transition-transform active:scale-95 border border-bd/50" style={{
+                      background: `color-mix(in srgb, ${action.color} 15%, var(--bg-surface))`,
+                    }}>
+                      <Icon size={28} style={{ color: action.color }} />
+                    </div>
+                    <span className="text-xs font-medium text-tx-secondary font-body text-center leading-tight">
+                      {action.label}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
 
           {/* Main FAB button */}
           <button
-            onClick={() => setFabOpen((v) => !v)}
-            aria-label={fabOpen ? 'Fermer le menu' : 'Actions rapides'}
-            className="fixed right-5 z-[999] w-14 h-14 rounded-full border-none text-white flex items-center justify-center cursor-pointer transition-all duration-300"
+            onClick={() => setFabOpen(true)}
+            aria-label="Actions rapides"
+            className={`fixed right-5 z-[997] w-14 h-14 rounded-full border-none text-white flex items-center justify-center cursor-pointer transition-all duration-300 ${fabOpen ? 'scale-0 opacity-0' : 'scale-100 opacity-100'}`}
             style={{
               bottom: `calc(var(--mobile-bottom-nav-height) + 20px)`,
-              background: fabOpen ? 'var(--danger)' : 'var(--accent)',
-              boxShadow: fabOpen
-                ? '0 4px 16px rgba(239, 68, 68, 0.4)'
-                : 'var(--shadow-glow)',
-              transform: fabOpen ? 'rotate(45deg)' : 'rotate(0deg)',
+              background: 'var(--accent)',
+              boxShadow: 'var(--shadow-glow)',
             }}
           >
-            {fabOpen ? <X size={24} /> : <Plus size={24} />}
+            <Plus size={24} />
           </button>
         </>
       )}
