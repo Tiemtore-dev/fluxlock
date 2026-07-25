@@ -860,7 +860,7 @@ dependencies = [
  "pkcs8 0.11.0-rc.11",
  "rand_core 0.10.0",
  "sha3 0.11.0",
- "signature 3.0.0-rc.10",
+ "signature 3.0.0",
  "zeroize",
 ]
 
@@ -879,9 +879,9 @@ dependencies = [
 
 [[package]]
 name = "module-lattice"
-version = "0.2.0"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cbdc2ac6ead7d0889a5d96e70b7f11a8812702a100ca7c65c5c71fdf076e182"
+checksum = "0c61b87c9683ab7cb1c6871d261ad5479b6b10ceb52c4352aaca3b5d35a8febe"
 dependencies = [
  "ctutils",
  "hybrid-array",
@@ -1298,6 +1298,7 @@ dependencies = [
  "hmac",
  "ml-dsa",
  "ml-kem",
+ "pkcs8 0.11.0-rc.11",
  "proptest",
  "quickcheck",
  "rand 0.8.5",
@@ -1411,9 +1412,9 @@ dependencies = [
 
 [[package]]
 name = "signature"
-version = "3.0.0-rc.10"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f1880df446116126965eeec169136b2e0251dba37c6223bcc819569550edea3"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
 dependencies = [
  "digest 0.11.2",
  "rand_core 0.10.0",
