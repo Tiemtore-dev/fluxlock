@@ -83,14 +83,36 @@ jobs:
         run: npm ci
 
       - name: Decode Tauri Private Key
-        shell: bash
+        shell: python
+        env:
+          SECRET: ${{ secrets.TAURI_PRIVATE_KEY }}
         run: |
-          # Try to decode from base64 if it is base64 encoded, otherwise keep the original
-          DECODED_KEY=$(echo "${{ secrets.TAURI_PRIVATE_KEY }}" | base64 --decode 2>/dev/null || echo "${{ secrets.TAURI_PRIVATE_KEY }}")
-          
-          # Write the key to a file to avoid any multiline environment variable parsing issues across OS
-          echo "$DECODED_KEY" > tauri_private.key
-          echo "TAURI_SIGNING_PRIVATE_KEY=${GITHUB_WORKSPACE}/tauri_private.key" >> $GITHUB_ENV
+          import os, base64
+
+          secret = os.environ.get("SECRET", "")
+          try:
+              decoded = base64.b64decode(secret).decode('utf-8')
+          except Exception:
+              decoded = secret
+
+          if "untrusted comment:" in decoded:
+              lines = decoded.split("untrusted comment:")
+              if len(lines) > 1:
+                  key_part = lines[1].strip()
+                  if key_part.startswith("rsign encrypted secret key"):
+                      key_part = key_part[len("rsign encrypted secret key"):].strip()
+                  
+                  final_key = f"untrusted comment: rsign encrypted secret key\n{key_part}\n"
+                  with open("tauri_private.key", "w") as f:
+                      f.write(final_key)
+          else:
+              final_key = f"untrusted comment: rsign encrypted secret key\n{secret.strip()}\n"
+              with open("tauri_private.key", "w") as f:
+                  f.write(final_key)
+
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              abs_path = os.path.abspath("tauri_private.key")
+              f.write(f"TAURI_SIGNING_PRIVATE_KEY={abs_path}\n")
 
       - name: Build Tauri app (draft release dans repo privé)
         uses: tauri-apps/tauri-action@v0
