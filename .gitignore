@@ -60,3 +60,4 @@ __pycache__/
 # Documentation temporary files
 *.old.md
 scripts/build/jiml33t
+tauri-desktop/fluxlock.key*
