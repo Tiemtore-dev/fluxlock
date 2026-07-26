@@ -88,17 +88,15 @@ jobs:
           # Try to decode from base64 if it is base64 encoded, otherwise keep the original
           DECODED_KEY=$(echo "${{ secrets.TAURI_PRIVATE_KEY }}" | base64 --decode 2>/dev/null || echo "${{ secrets.TAURI_PRIVATE_KEY }}")
           
-          # Since the decoded key is multi-line, we must use EOF delimiter to write to GITHUB_ENV
-          EOF_DELIM="EOF_${RANDOM}"
-          echo "DECODED_TAURI_PRIVATE_KEY<<${EOF_DELIM}" >> $GITHUB_ENV
-          echo "$DECODED_KEY" >> $GITHUB_ENV
-          echo "${EOF_DELIM}" >> $GITHUB_ENV
+          # Write the key to a file to avoid any multiline environment variable parsing issues across OS
+          echo "$DECODED_KEY" > tauri_private.key
+          echo "TAURI_SIGNING_PRIVATE_KEY=${GITHUB_WORKSPACE}/tauri_private.key" >> $GITHUB_ENV
 
       - name: Build Tauri app (draft release dans repo privé)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ env.DECODED_TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         with:
           projectPath: "./tauri-desktop"
