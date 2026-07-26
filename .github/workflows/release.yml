@@ -131,8 +131,8 @@ jobs:
           projectPath: "./tauri-desktop"
           tagName: ${{ github.ref_name }}
           releaseName: "FluXlock ${{ github.ref_name }}"
-          releaseBody: "Draft interne — assets copiés vers fluxlock-releases."
-          releaseDraft: true
+          releaseBody: "Release interne — assets copiés vers fluxlock-releases."
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
 

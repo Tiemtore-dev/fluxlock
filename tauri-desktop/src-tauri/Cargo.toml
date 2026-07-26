@@ -1,6 +1,6 @@
 [package]
 name = "fluxlock"
-version = "2.2.14"
+version = "2.2.15"
 description = "SecureVault - Gestionnaire de mots de passe sécurisé avec backend intégré"
 authors = ["SecureVault Team"]
 license = "MIT"
