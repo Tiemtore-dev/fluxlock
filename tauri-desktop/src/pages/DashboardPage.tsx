@@ -1,11 +1,23 @@
+import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { KeyRound, Files, Shield, AlertTriangle } from 'lucide-react'
+import { getVersion } from '@tauri-apps/api/app'
 import { passwords, files, security } from '../lib/vault-service'
 import { AppShell } from '../design-system/layouts'
 import { StatCard, EmptyState } from '../design-system/molecules'
 import { Badge } from '../design-system/atoms'
 
 export default function DashboardPage() {
+  const [appVersion, setAppVersion] = useState<string>('2.2.16')
+
+  useEffect(() => {
+    getVersion()
+      .then((ver) => setAppVersion(ver))
+      .catch(() => {
+        // En mode navigateur ou si l'API n'est pas disponible, on garde la valeur par défaut
+      })
+  }, [])
+
   const { data: pwList = [] } = useQuery({ queryKey: ['passwords'], queryFn: passwords.list })
   const { data: fileList = [] } = useQuery({ queryKey: ['secureFiles'], queryFn: files.list })
   const { data: events = [] } = useQuery({ queryKey: ['security-events'], queryFn: security.getEvents })
@@ -20,7 +32,7 @@ export default function DashboardPage() {
           <h1 className="font-display text-2xl sm:text-3xl text-tx-primary m-0">
             Tableau de bord
           </h1>
-          <Badge variant="success">application version 2.2.2.1</Badge>
+          <Badge variant="success">application version {appVersion}</Badge>
           <p className="text-xs sm:text-sm text-tx-muted font-body mt-1 m-0">
             Vue d'ensemble de votre coffre-fort sécurisé
           </p>
