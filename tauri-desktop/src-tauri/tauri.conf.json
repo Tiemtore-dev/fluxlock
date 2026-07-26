@@ -26,11 +26,11 @@
   },
   "productName": "FluXlock",
   "mainBinaryName": "FluXlock",
-  "version": "2.2.6",
+  "version": "2.2.7",
   "identifier": "com.fluxlock.app",
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk1QjMxNTA4RUI5MEVGNzgKUldSNDc1RHJDQld6bGJsOTB5Y0ZjbTVvc3MwN29DVmZvamgxUm4zT2k1eEZjaTNGM3VXcTlhb1MK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg3QUMwMDJDRThDMkI4QTEKUldTaHVNTG9MQUNzaC9sM1JRZVlnVkRQOVNPK1ZYejNXblJmSEpCSnRWUEVMK24rMW90TG9JTHoK",
       "endpoints": [
         "https://github.com/Tiemtore-dev/fluxlock-releases/releases/latest/download/latest.json"
       ]
