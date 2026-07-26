@@ -26,7 +26,7 @@
   },
   "productName": "FluXlock",
   "mainBinaryName": "FluXlock",
-  "version": "2.2.14",
+  "version": "2.2.15",
   "identifier": "com.fluxlock.app",
   "plugins": {
     "updater": {
