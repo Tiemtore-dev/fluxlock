@@ -87,30 +87,39 @@ jobs:
         env:
           SECRET: ${{ secrets.TAURI_PRIVATE_KEY }}
         run: |
-          import os, base64, uuid
+          import os, base64
 
           secret = os.environ.get("SECRET", "")
+          is_base64 = False
           try:
               decoded = base64.b64decode(secret).decode('utf-8')
+              if "untrusted comment:" in decoded:
+                  is_base64 = True
           except Exception:
-              decoded = secret
+              pass
 
-          if "untrusted comment:" in decoded:
-              lines = decoded.split("untrusted comment:")
-              if len(lines) > 1:
-                  key_part = lines[1].strip()
-                  if key_part.startswith("rsign encrypted secret key"):
-                      key_part = key_part[len("rsign encrypted secret key"):].strip()
-                  elif key_part.startswith("minisign encrypted secret key"):
-                      key_part = key_part[len("minisign encrypted secret key"):].strip()
-                  
-                  final_key = f"untrusted comment: rsign encrypted secret key\n{key_part}"
+          if is_base64:
+              final_key = secret.strip()
           else:
-              final_key = f"untrusted comment: rsign encrypted secret key\n{secret.strip()}"
+              if "untrusted comment:" in secret:
+                  lines = secret.split("untrusted comment:")
+                  if len(lines) > 1:
+                      key_part = lines[1].strip()
+                      if key_part.startswith("rsign encrypted secret key"):
+                          key_part = key_part[len("rsign encrypted secret key"):].strip()
+                      elif key_part.startswith("minisign encrypted secret key"):
+                          key_part = key_part[len("minisign encrypted secret key"):].strip()
+                      
+                      proper_multiline = f"untrusted comment: rsign encrypted secret key\n{key_part}"
+                  else:
+                      proper_multiline = f"untrusted comment: rsign encrypted secret key\n{secret.strip()}"
+              else:
+                  proper_multiline = f"untrusted comment: rsign encrypted secret key\n{secret.strip()}"
+              
+              final_key = base64.b64encode(proper_multiline.encode('utf-8')).decode('utf-8')
 
-          delim = f"EOF_{uuid.uuid4().hex}"
           with open(os.environ["GITHUB_ENV"], "a") as f:
-              f.write(f"\nTAURI_SIGNING_PRIVATE_KEY<<{delim}\n{final_key}\n{delim}\n")
+              f.write(f"\nTAURI_SIGNING_PRIVATE_KEY={final_key}\n")
 
       - name: Build Tauri app (draft release dans repo privé)
         uses: tauri-apps/tauri-action@v0
