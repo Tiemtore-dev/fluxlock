@@ -87,7 +87,7 @@ jobs:
         env:
           SECRET: ${{ secrets.TAURI_PRIVATE_KEY }}
         run: |
-          import os, base64
+          import os, base64, uuid
 
           secret = os.environ.get("SECRET", "")
           try:
@@ -101,18 +101,16 @@ jobs:
                   key_part = lines[1].strip()
                   if key_part.startswith("rsign encrypted secret key"):
                       key_part = key_part[len("rsign encrypted secret key"):].strip()
+                  elif key_part.startswith("minisign encrypted secret key"):
+                      key_part = key_part[len("minisign encrypted secret key"):].strip()
                   
-                  final_key = f"untrusted comment: rsign encrypted secret key\n{key_part}\n"
-                  with open("tauri_private.key", "w") as f:
-                      f.write(final_key)
+                  final_key = f"untrusted comment: rsign encrypted secret key\n{key_part}"
           else:
-              final_key = f"untrusted comment: rsign encrypted secret key\n{secret.strip()}\n"
-              with open("tauri_private.key", "w") as f:
-                  f.write(final_key)
+              final_key = f"untrusted comment: rsign encrypted secret key\n{secret.strip()}"
 
+          delim = f"EOF_{uuid.uuid4().hex}"
           with open(os.environ["GITHUB_ENV"], "a") as f:
-              abs_path = os.path.abspath("tauri_private.key")
-              f.write(f"TAURI_SIGNING_PRIVATE_KEY={abs_path}\n")
+              f.write(f"\nTAURI_SIGNING_PRIVATE_KEY<<{delim}\n{final_key}\n{delim}\n")
 
       - name: Build Tauri app (draft release dans repo privé)
         uses: tauri-apps/tauri-action@v0
