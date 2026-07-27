@@ -207,7 +207,7 @@ jobs:
 
           cat > latest.json << EOF
           {
-            "version": "${TAG}",
+            "version": "${VERSION}",
             "notes": "FluXlock ${TAG}",
             "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "platforms": {

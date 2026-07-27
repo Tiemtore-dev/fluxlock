@@ -20,29 +20,37 @@ export function AutoUpdater() {
           let downloaded = 0
           let contentLength: number | undefined = 0
           
-          // Téléchargement et installation en arrière-plan
-          await update.downloadAndInstall((event) => {
-            switch (event.event) {
-              case 'Started':
-                contentLength = event.data.contentLength
-                console.log(`[Updater] Started downloading ${contentLength} bytes`)
-                break
-              case 'Progress':
-                downloaded += event.data.chunkLength
-                console.log(`[Updater] Downloaded ${downloaded} from ${contentLength}`)
-                break
-              case 'Finished':
-                console.log('[Updater] Download finished')
-                break
-            }
-          })
+          try {
+            // Téléchargement et installation en arrière-plan
+            await update.downloadAndInstall((event) => {
+              switch (event.event) {
+                case 'Started':
+                  contentLength = event.data.contentLength
+                  console.log(`[Updater] Started downloading ${contentLength} bytes`)
+                  break
+                case 'Progress':
+                  downloaded += event.data.chunkLength
+                  console.log(`[Updater] Downloaded ${downloaded} from ${contentLength}`)
+                  break
+                case 'Finished':
+                  console.log('[Updater] Download finished')
+                  break
+              }
+            })
 
-          if (mounted) {
-            toast('Mise à jour installée avec succès. Veuillez redémarrer l\'application pour l\'appliquer.', 'success')
+            if (mounted) {
+              toast('Mise à jour installée avec succès. Veuillez redémarrer l\'application pour l\'appliquer.', 'success')
+            }
+          } catch (installErr: any) {
+            console.error('[Updater] Erreur lors de l\'installation de la mise à jour:', installErr)
+            if (mounted) {
+              toast(`Échec de la mise à jour : ${installErr?.message || installErr}`, 'danger')
+            }
           }
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error('[Updater] Erreur lors de la vérification des mises à jour:', error)
+        // Ne pas afficher de toast pour les simples échecs réseau ou mode dev non-app bundle
       }
     }
 
