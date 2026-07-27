@@ -8,7 +8,7 @@ import { StatCard, EmptyState } from '../design-system/molecules'
 import { Badge } from '../design-system/atoms'
 
 export default function DashboardPage() {
-  const [appVersion, setAppVersion] = useState<string>('2.2.16')
+  const [appVersion, setAppVersion] = useState<string>('2.2.17')
 
   useEffect(() => {
     getVersion()
@@ -32,7 +32,7 @@ export default function DashboardPage() {
           <h1 className="font-display text-2xl sm:text-3xl text-tx-primary m-0">
             Tableau de bord
           </h1>
-          <Badge variant="success">application version {appVersion}</Badge>
+          <Badge variant="success" size="md">Version {appVersion}</Badge>
           <p className="text-xs sm:text-sm text-tx-muted font-body mt-1 m-0">
             Vue d'ensemble de votre coffre-fort sécurisé
           </p>
