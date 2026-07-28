@@ -10,6 +10,7 @@ export function AutoUpdater() {
 
     const checkForUpdates = async () => {
       try {
+        console.log('[Updater] Vérification de la disponibilité d\'une mise à jour...')
         // Le plugin updater est uniquement disponible sur Desktop
         // S'il n'est pas supporté (ex: navigateur), ça va throw, on catch silencieusement
         const update = await check()
