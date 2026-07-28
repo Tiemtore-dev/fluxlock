@@ -44,7 +44,7 @@ export function AutoUpdater() {
           } catch (installErr: any) {
             console.error('[Updater] Erreur lors de l\'installation de la mise à jour:', installErr)
             if (mounted) {
-              toast(`Échec de la mise à jour : ${installErr?.message || installErr}`, 'danger')
+              toast(`Échec de la mise à jour : ${installErr?.message || installErr}`, 'error')
             }
           }
         }
