@@ -1,11 +1,15 @@
 import { useEffect } from 'react'
 import { check } from '@tauri-apps/plugin-updater'
 import { useToast } from '../design-system/organisms'
+import { hasAndroidUpdater } from '../lib/android-updater'
 
 export function AutoUpdater() {
   const { toast } = useToast()
 
   useEffect(() => {
+    // Android : géré nativement par AndroidUpdater (le plugin updater est desktop-only)
+    if (hasAndroidUpdater()) return
+
     let mounted = true
 
     const checkForUpdates = async () => {

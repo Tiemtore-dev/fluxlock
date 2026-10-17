@@ -47,7 +47,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Recent Activity */}
-        <div className="bg-surface border border-bd rounded-2xl p-4 sm:p-6 shadow-sm">
+        {/* <div className="bg-surface border border-bd rounded-2xl p-4 sm:p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4 sm:mb-5">
             <h2 className="text-base sm:text-lg font-semibold text-tx-primary font-body m-0">
               Activités récentes
@@ -93,7 +93,7 @@ export default function DashboardPage() {
           ) : (
             <EmptyState icon={Shield} title="Aucune activité récente" description="Les événements de sécurité apparaîtront ici" />
           )}
-        </div>
+        </div> */}
       </div>
     </AppShell>
   )

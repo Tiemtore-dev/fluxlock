@@ -251,9 +251,9 @@ export default function SettingsPage() {
         setPasskeyLoading(false)
         return
       }
-      
+
       const enableResult = await passkey.register()
-      
+
       // On Android: Rust returns JSON with key_b64 — store it in Android Keystore (TEE/StrongBox)
       if (hasAndroidKeystore()) {
         try {
@@ -480,14 +480,14 @@ export default function SettingsPage() {
               </div>
               <Toggle on={isDark} onToggle={toggleDarkMode} />
             </div>
-            
+
             <div className={row}>
               <div>
                 <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Thème de couleur</p>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }}>Personnalisez l'accent principal</p>
               </div>
-              <select 
-                value={colorTheme} 
+              <select
+                value={colorTheme}
                 onChange={(e) => changeColorTheme(e.target.value)}
                 style={{
                   padding: '8px 12px',
@@ -788,11 +788,11 @@ export default function SettingsPage() {
 
                 <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', lineHeight: 1.6 }}>
                   <p style={{ margin: '0 0 var(--space-3) 0' }}>
-                    <strong>Ce que la passkey fait :</strong> Elle remplace la saisie de votre mot de passe à l'ouverture du coffre, 
+                    <strong>Ce que la passkey fait :</strong> Elle remplace la saisie de votre mot de passe à l'ouverture du coffre,
                     <strong> même au premier lancement de l'application ou après une longue inactivité</strong>.
                   </p>
                   <p style={{ margin: '0 0 var(--space-3) 0' }}>
-                    La sécurité est assurée par un chiffrement hybride local post-quantique. 
+                    La sécurité est assurée par un chiffrement hybride local post-quantique.
                     Toutefois, pour votre sécurité, <strong>votre mot de passe maître sera exigé tous les 14 jours</strong> pour s'assurer que vous ne l'avez pas oublié.
                   </p>
                 </div>
@@ -892,7 +892,7 @@ export default function SettingsPage() {
         </div>
 
         {/* Synchronisation — always visible */}
-        <div style={card}>
+        {/* <div style={card}>
           <div style={cardHeader}>
             <RefreshCw size={20} style={{ color: 'var(--accent)' }} />
             <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Synchronisation</h2>
@@ -911,7 +911,7 @@ export default function SettingsPage() {
             </div>
           ) : (
             <div style={{ ...cardBody, display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
-              {/* Enable/disable sync */}
+              // Enable/disable sync
               <div className={row}>
                 <div>
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Activer la synchronisation</p>
@@ -922,13 +922,13 @@ export default function SettingsPage() {
                 <Toggle on={syncSettings.enabled} onToggle={syncLoading ? () => { } : toggleSync} />
               </div>
 
-              {/* ── Pairing section ── */}
+              // ── Pairing section ──
               {syncSettings.enabled && pairingStep === 'idle' && (
                 <div style={{
                   padding: 'var(--space-4)', borderRadius: 'var(--radius-lg)',
                   background: 'color-mix(in srgb, var(--accent) 6%, transparent)',
                   border: '1px solid color-mix(in srgb, var(--accent) 20%, transparent)',
-                  display: 'flex', flexDirection: 'column', gap: 'var(--space-4)',
+                  display: 'flex', flexDirection: 'column', gap: 'var(--space-4)'
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
                     <Link size={16} style={{ color: 'var(--accent)' }} />
@@ -941,10 +941,10 @@ export default function SettingsPage() {
                     pour échanger automatiquement les clés ML-DSA-65 via un canal chiffré.
                   </p>
 
-                  {/* Cross-network toggle */}
+                  // Cross-network toggle
                   <label style={{
                     display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
-                    cursor: 'pointer', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+                    cursor: 'pointer', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)'
                   }}>
                     <input
                       type="checkbox"
@@ -962,7 +962,7 @@ export default function SettingsPage() {
                     </Button>
                   </div>
 
-                  {/* Join section */}
+                  // Join section
                   <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--space-3)' }}>
                     <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: '0 0 var(--space-2) 0' }}>
                       Ou entrez le code affiché sur l'autre appareil :
@@ -976,7 +976,7 @@ export default function SettingsPage() {
                           flex: 1, padding: 'var(--space-2) var(--space-3)',
                           borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
                           background: 'var(--bg-base)', color: 'var(--text-primary)',
-                          fontFamily: 'var(--font-mono, monospace)', fontSize: 'var(--text-sm)',
+                          fontFamily: 'var(--font-mono, monospace)', fontSize: 'var(--text-sm)'
                         }}
                       />
                       <Button onClick={joinPairing} disabled={!joinCode.trim()}>
@@ -987,12 +987,12 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              {/* Pairing: waiting for joiner (initiator) */}
+              // Pairing: waiting for joiner (initiator)
               {pairingStep === 'starting' && (
                 <div style={{
                   padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
                   background: 'var(--bg-surface)', border: '1px solid var(--accent)',
-                  textAlign: 'center',
+                  textAlign: 'center'
                 }}>
                   <RefreshCw size={24} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite' }} />
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 'var(--space-3) 0 0 0' }}>
@@ -1005,7 +1005,7 @@ export default function SettingsPage() {
                 <div style={{
                   padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
                   background: 'var(--bg-surface)', border: '1px solid var(--accent)',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-4)',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-4)'
                 }}>
                   <Wifi size={28} style={{ color: 'var(--accent)' }} />
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0, fontSize: 'var(--text-base)' }}>
@@ -1017,12 +1017,12 @@ export default function SettingsPage() {
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
                     padding: 'var(--space-3) var(--space-4)', borderRadius: 'var(--radius-lg)',
-                    background: 'var(--bg-base)', border: '2px solid var(--accent)',
+                    background: 'var(--bg-base)', border: '2px solid var(--accent)'
                   }}>
                     <code style={{
                       fontSize: 'var(--text-lg)', fontWeight: 700, color: 'var(--accent)',
                       fontFamily: 'var(--font-mono, monospace)', letterSpacing: '0.05em',
-                      wordBreak: 'break-all',
+                      wordBreak: 'break-all'
                     }}>
                       {pairingCode}
                     </code>
@@ -1032,7 +1032,7 @@ export default function SettingsPage() {
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                         width: 32, height: 32, borderRadius: 'var(--radius-md)',
                         border: '1px solid var(--border)', background: 'var(--bg-surface)',
-                        cursor: 'pointer', color: 'var(--text-secondary)', flexShrink: 0,
+                        cursor: 'pointer', color: 'var(--text-secondary)', flexShrink: 0
                       }}
                       title="Copier le code"
                     >
@@ -1046,12 +1046,12 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              {/* Pairing: joining (joiner side) */}
+              // Pairing: joining (joiner side)
               {pairingStep === 'joining' && (
                 <div style={{
                   padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
                   background: 'var(--bg-surface)', border: '1px solid var(--accent)',
-                  textAlign: 'center',
+                  textAlign: 'center'
                 }}>
                   <RefreshCw size={24} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite' }} />
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 'var(--space-3) 0 0 0' }}>
@@ -1063,13 +1063,13 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              {/* Pairing: success */}
+              // Pairing: success
               {pairingStep === 'success' && (
                 <div style={{
                   padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
                   background: 'color-mix(in srgb, var(--success, #22c55e) 10%, transparent)',
                   border: '1px solid var(--success, #22c55e)',
-                  textAlign: 'center',
+                  textAlign: 'center'
                 }}>
                   <Check size={28} style={{ color: 'var(--success, #22c55e)' }} />
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 'var(--space-3) 0 0 0' }}>
@@ -1084,12 +1084,12 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              {/* Pairing: error */}
+              // Pairing: error
               {pairingStep === 'error' && (
                 <div style={{
                   padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
                   background: 'var(--danger-muted)', border: '1px solid var(--danger)',
-                  textAlign: 'center',
+                  textAlign: 'center'
                 }}>
                   <AlertTriangle size={28} style={{ color: 'var(--danger)' }} />
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 'var(--space-3) 0 0 0' }}>
@@ -1104,7 +1104,7 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              {/* Sync devices list
+              // Sync devices list
               {syncSettings.enabled && (
                 <div>
                   <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 var(--space-3) 0', fontSize: 'var(--text-sm)' }}>
@@ -1123,7 +1123,7 @@ export default function SettingsPage() {
                       style={{
                         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                         padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
-                        border: '1px solid var(--border)', marginBottom: 'var(--space-2)',
+                        border: '1px solid var(--border)', marginBottom: 'var(--space-2)'
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
@@ -1145,7 +1145,7 @@ export default function SettingsPage() {
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
                           width: 32, height: 32, borderRadius: 'var(--radius-md)',
                           border: '1px solid var(--danger)', background: 'var(--danger-muted)',
-                          cursor: 'pointer', color: 'var(--danger)',
+                          cursor: 'pointer', color: 'var(--danger)'
                         }}
                         title="Supprimer"
                       >
@@ -1154,10 +1154,10 @@ export default function SettingsPage() {
                     </div>
                   ))}
                 </div>
-              )} */}
+              )}
             </div>
           )}
-        </div>
+        </div> */}
 
         {/* Mode Isolation */}
         <div style={card}>
@@ -1189,7 +1189,7 @@ export default function SettingsPage() {
                 display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
                 padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
                 background: 'var(--warning-muted)', border: '1px solid var(--warning)',
-                fontSize: 'var(--text-xs)', color: 'var(--warning)',
+                fontSize: 'var(--text-xs)', color: 'var(--warning)'
               }}>
                 <AlertTriangle size={14} />
                 Les transferts et la synchronisation sont désactivés en mode isolation.
@@ -1199,7 +1199,7 @@ export default function SettingsPage() {
         </div>
 
         {/* Logs Signés */}
-        <div style={card}>
+        {/* <div style={card}>
           <div style={cardHeader}>
             <FileText size={20} style={{ color: 'var(--accent)' }} />
             <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Logs Signés</h2>
@@ -1224,7 +1224,7 @@ export default function SettingsPage() {
               }} />
             </div>
           </div>
-        </div>
+        </div> */}
 
         {/* Enclave Sécurisée */}
         {/* {enclaveStatus && (
