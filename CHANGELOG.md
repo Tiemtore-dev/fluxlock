@@ -7,6 +7,15 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.2.19] - 2026-10-17
+
+### Ajouté
+
+- Android : mise à jour in-app via les releases GitHub (détection, téléchargement en arrière-plan, vérification de l'APK, bouton « Installer »)
+- CI : build, signature et publication de l'APK Android avec les autres installeurs
+
+---
+
 ## [2.0.0] - 2026-04-10
 
 ### Ajouté

@@ -13,6 +13,7 @@ import PasswordsPage from './pages/PasswordsPage'
 import FilesPage from './pages/FilesPage'
 import KeysPage from './pages/KeysPage'
 import { AutoUpdater } from './components/AutoUpdater'
+import { AndroidUpdater } from './components/AndroidUpdater'
 import SecurityPage from './pages/SecurityPage'
 import SystemSecurityPage from './pages/SystemSecurityPage'
 import SettingsPage from './pages/SettingsPage'
@@ -95,6 +96,7 @@ function App() {
     <BrowserRouter>
       <ToastProvider>
         <AutoUpdater />
+        <AndroidUpdater />
         <AppRoutes />
       </ToastProvider>
     </BrowserRouter>

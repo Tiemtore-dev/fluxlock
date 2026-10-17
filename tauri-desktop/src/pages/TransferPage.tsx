@@ -119,7 +119,7 @@ function WormholeSend({ onItemsSelected }: { onItemsSelected: (type: string, ids
 
   const items = selectedType === 'passwords' ? passwords
     : selectedType === 'files' ? secureFiles
-    : secureKeys
+      : secureKeys
 
   const toggleItem = (id: number) => {
     setSelectedIds(prev =>
@@ -142,9 +142,8 @@ function WormholeSend({ onItemsSelected }: { onItemsSelected: (type: string, ids
             <button
               key={t.key}
               onClick={() => { setSelectedType(t.key); setSelectedIds([]) }}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all duration-200 ${
-                isSelected ? 'bg-surface shadow-sm text-tx-primary' : 'text-tx-secondary hover:text-tx-primary'
-              }`}
+              className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all duration-200 ${isSelected ? 'bg-surface shadow-sm text-tx-primary' : 'text-tx-secondary hover:text-tx-primary'
+                }`}
             >
               <Icon size={16} className={isSelected ? 'text-accent' : 'text-tx-muted'} />
               <span className="hidden sm:inline">{t.label}</span>
@@ -167,13 +166,11 @@ function WormholeSend({ onItemsSelected }: { onItemsSelected: (type: string, ids
                 <div
                   key={id}
                   onClick={() => toggleItem(id)}
-                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all duration-150 border ${
-                    selected ? 'bg-accent-muted border-accent text-accent-text' : 'border-transparent hover:bg-elevated'
-                  }`}
+                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all duration-150 border ${selected ? 'bg-accent-muted border-accent text-accent-text' : 'border-transparent hover:bg-elevated'
+                    }`}
                 >
-                  <div className={`w-5 h-5 rounded flex items-center justify-center border-2 transition-colors ${
-                    selected ? 'bg-accent border-accent text-white' : 'border-tx-muted'
-                  }`}>
+                  <div className={`w-5 h-5 rounded flex items-center justify-center border-2 transition-colors ${selected ? 'bg-accent border-accent text-white' : 'border-tx-muted'
+                    }`}>
                     {selected && <Check size={14} />}
                   </div>
                   <span className={`text-sm font-medium font-body truncate ${selected ? 'text-tx-primary' : 'text-tx-secondary'}`}>{name}</span>
@@ -358,7 +355,7 @@ function WormholeReceive() {
 /* ─── SecurityBadge ─── */
 function SecurityBadge({ method }: { method: string }) {
   const isSecure = method.includes('IPv6') || method.includes('mDNS') || method.includes('Local') || method.includes('TLS') || method.includes('PQC')
-  
+
   return (
     <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full w-fit border ${isSecure ? 'bg-success-muted border-success/30 text-success' : 'bg-warning-muted border-warning/30 text-warning'}`}>
       {isSecure ? <ShieldCheck size={16} /> : <WifiOff size={16} />}
@@ -734,42 +731,42 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
         ) : (
           <div className="flex flex-col gap-2">
             {discovered.map((p, i) => (
-              
-              
-                <div key={i} className="px-3 py-2.5 rounded-lg bg-elevated border border-transparent transition-all duration-150 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-bd/50">
-                  <div className="flex items-center gap-2 flex-1 min-w-0 w-full">
-                    <Radio size={14} className="text-accent shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <span className="text-tx-primary text-sm font-medium break-all">{p.name}</span>
-                      <div className="flex flex-wrap gap-2 items-center mt-1">
-                        <Badge variant="info" size="sm">{p.method}</Badge>
-                        <span className="text-tx-muted text-xs font-mono break-all">{p.addr}</span>
-                      </div>
+
+
+              <div key={i} className="px-3 py-2.5 rounded-lg bg-elevated border border-transparent transition-all duration-150 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-bd/50">
+                <div className="flex items-center gap-2 flex-1 min-w-0 w-full">
+                  <Radio size={14} className="text-accent shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <span className="text-tx-primary text-sm font-medium break-all">{p.name}</span>
+                    <div className="flex flex-wrap gap-2 items-center mt-1">
+                      <Badge variant="info" size="sm">{p.method}</Badge>
+                      <span className="text-tx-muted text-xs font-mono break-all">{p.addr}</span>
                     </div>
                   </div>
-                  {pendingItems && !offer && (
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      icon={Send}
-                      onClick={() => {
-                        setPeerName(p.name)
-                        createOfferMut.mutate(false)
-                      }}
-                      loading={createOfferMut.isPending}
-                      className="w-full sm:w-auto flex-shrink-0"
-                    >
-                      Envoyer à
-                    </Button>
-                  )}
                 </div>
+                {pendingItems && !offer && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={Send}
+                    onClick={() => {
+                      setPeerName(p.name)
+                      createOfferMut.mutate(false)
+                    }}
+                    loading={createOfferMut.isPending}
+                    className="w-full sm:w-auto flex-shrink-0"
+                  >
+                    Envoyer à
+                  </Button>
+                )}
+              </div>
             ))}
           </div>
         )}
       </div>
 
-      {/* Cross-network / manual send option */}
-      {pendingItems && !offer && (
+      {/* Cross-network / manual send option*/}
+      {/* {pendingItems && !offer && (
         <div className="bg-surface border border-dashed border-bd rounded-xl p-4 flex flex-col gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             <Globe size={18} className="text-tx-secondary shrink-0 hidden sm:block" />
@@ -793,7 +790,7 @@ function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: 
             </Button>
           </div>
         </div>
-      )}
+      )} */}
 
       {/* ML-DSA-65 Security info */}
       <div className="bg-accent-muted border border-accent rounded-xl p-4 flex items-start sm:items-center gap-3">
@@ -905,9 +902,8 @@ export default function TransferPage() {
               <button
                 key={t.key}
                 onClick={() => setTab(t.key)}
-                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 text-xs sm:text-sm rounded-lg font-body transition-all duration-200 ${
-                  active ? 'bg-elevated text-tx-primary font-medium shadow-sm' : 'bg-transparent text-tx-muted hover:text-tx-secondary'
-                }`}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 text-xs sm:text-sm rounded-lg font-body transition-all duration-200 ${active ? 'bg-elevated text-tx-primary font-medium shadow-sm' : 'bg-transparent text-tx-muted hover:text-tx-secondary'
+                  }`}
               >
                 <Icon size={16} />
                 <span className="hidden min-[380px]:inline">{t.label}</span>

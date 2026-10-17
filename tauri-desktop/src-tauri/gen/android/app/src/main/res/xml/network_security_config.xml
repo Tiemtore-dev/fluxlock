@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network Security Config for FluXlock.
+  Allows cleartext traffic on the local network for UDP beacon discovery
+  and mDNS peer-to-peer communication (port 52821, 5353).
+  All actual data transfer uses TLS + SPAKE2 mutual authentication.
+-->
+<network-security-config>
+    <!-- Trust system CAs for HTTPS (updates, etc.) -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Allow cleartext for local/private network discovery only -->
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- RFC 1918 private ranges used by local discovery -->
+        <domain includeSubdomains="true">10.0.0.0</domain>
+        <domain includeSubdomains="true">172.16.0.0</domain>
+        <domain includeSubdomains="true">192.168.0.0</domain>
+        <!-- Link-local -->
+        <domain includeSubdomains="true">169.254.0.0</domain>
+        <!-- mDNS -->
+        <domain includeSubdomains="true">local</domain>
+    </domain-config>
+</network-security-config>

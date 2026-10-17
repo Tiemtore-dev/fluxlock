@@ -9,7 +9,7 @@ tauri-desktop/dist/
 tauri-desktop/src-tauri/target/
 tauri-desktop/src-tauri/Cargo.lock
 tauri-desktop/.vscode/
-tauri-desktop/src-tauri/gen/
+tauri-desktop/src-tauri/gen/schemas/
 
 # Build outputs
 build-output/
@@ -61,3 +61,7 @@ __pycache__/
 *.old.md
 scripts/build/jiml33t
 tauri-desktop/fluxlock.key*
+
+# Clés de signature : ne jamais versionner
+*.keystore
+*.jks
