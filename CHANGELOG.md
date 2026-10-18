@@ -7,11 +7,11 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [2.2.21] - 2026-10-18
+## [2.2.22] - 2026-10-18
 
 ### Modifié
 
-- Version de test du mécanisme de mise à jour Android (2.2.20 → 2.2.21)
+- Version de test du mécanisme de mise à jour Android (2.2.20 → 2.2.22). La 2.2.21 n'a jamais été publiée.
 
 ---
 
