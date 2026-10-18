@@ -21,6 +21,7 @@ class MainActivity : TauriActivity() {
     super.onWebViewCreate(webView)
     webView.addJavascriptInterface(BiometricBridge(this, webView), "AndroidBiometric")
     webView.addJavascriptInterface(AppUpdater(this, webView), "AndroidUpdater")
+    webView.addJavascriptInterface(PublicStorage(this), "AndroidStorage")
   }
 
   /**

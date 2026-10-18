@@ -7,6 +7,17 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.2.23] - 2026-10-18
+
+### Corrigé
+
+- Android : la bannière de mise à jour n'est plus masquée par la barre de navigation du bas.
+- Android : les backups sont désormais copiés dans `Documents/FluXlock/` (hors du dossier de l'application) et survivent à une désinstallation. La restauration d'un backup se fait via le sélecteur de fichiers.
+- Android : la création et la restauration de backup utilisent le dossier de données réel de l'application.
+- Export CSV : le fichier est enregistré dans `Documents/FluXlock/` (Android) ou dans le dossier Téléchargements (bureau), et son emplacement exact est affiché à l'utilisateur.
+
+---
+
 ## [2.2.22] - 2026-10-18
 
 ### Modifié

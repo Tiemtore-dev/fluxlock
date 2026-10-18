@@ -495,6 +495,8 @@ pub fn run() {
             // Backup & Restore commands
             create_backup,
             search_backups,
+            import_backup_content,
+            export_text_to_downloads,
             restore_backup,
             get_backup_metadata,
             // Vault reset command

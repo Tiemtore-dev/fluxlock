@@ -145,6 +145,11 @@ body {
   pointer-events: none;
 }
 
+/* Android update banner: sits above the bottom nav on mobile so it is never hidden by it */
+.android-updater-banner {
+  bottom: calc(12px + env(safe-area-inset-bottom));
+}
+
 /* ── Mobile responsive ── */
 @media (max-width: 768px) {
   /* Hide desktop sidebar on mobile */
@@ -242,6 +247,10 @@ body {
     left: max(var(--mobile-gutter), env(safe-area-inset-left));
     right: max(var(--mobile-gutter), env(safe-area-inset-right));
     bottom: calc(var(--mobile-bottom-nav-height) + max(var(--space-3), env(safe-area-inset-bottom)));
+  }
+
+  .android-updater-banner {
+    bottom: calc(var(--mobile-bottom-nav-height) + max(var(--space-3), env(safe-area-inset-bottom)) + var(--space-3));
   }
 
   .toast-item {

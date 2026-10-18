@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Plus, Edit2, Trash2, KeyRound, RefreshCw, AlertCircle, ShieldAlert, Download, Upload, Fingerprint, Eye, EyeOff, FileText, CheckCircle2, XCircle, ArrowRightLeft, X } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
+import { hasAndroidStorage, saveTextToPublic } from '../lib/public-storage'
 import { passwords, csvIO, type Password, type ParsedCsvEntry, type EntryAction, type ImportCsvResponse } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
 import { AppShell } from '../design-system/layouts'
@@ -65,6 +66,7 @@ export default function PasswordsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   // Export-specific
   const [exportDone, setExportDone] = useState(false)
+  const [exportLocation, setExportLocation] = useState('')
 
   const { data: list = [], isLoading, isError, error: queryError, refetch } = useQuery({
     queryKey: ['passwords'],
@@ -200,7 +202,7 @@ export default function PasswordsPage() {
   }
 
   // ── CSV Export helpers ──
-  const openExport = () => { setCsvAuthPw(''); setCsvAuthVisible(false); setCsvError(''); setExportDone(false); setCsvLoading(false); setShowExportModal(true) }
+  const openExport = () => { setCsvAuthPw(''); setCsvAuthVisible(false); setCsvError(''); setExportDone(false); setExportLocation(''); setCsvLoading(false); setShowExportModal(true) }
   const closeExport = () => { setShowExportModal(false); setCsvAuthPw(''); setCsvError('') }
 
   const handleCsvExport = async () => {
@@ -208,16 +210,11 @@ export default function PasswordsPage() {
     try {
       const masterPw = csvAuthPw.trim() || null
       const result = await csvIO.export(masterPw)
-      // Trigger browser download via Blob
-      const blob = new Blob([result.csv_content], { type: 'text/csv;charset=utf-8;' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `fluxlock-export-${new Date().toISOString().slice(0, 10)}.csv`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      const fileName = `fluxlock-export-${new Date().toISOString().slice(0, 10)}.csv`
+      const location = hasAndroidStorage()
+        ? saveTextToPublic(result.csv_content, fileName, 'text/csv')
+        : await invoke<string>('export_text_to_downloads', { filename: fileName, content: result.csv_content })
+      setExportLocation(location)
       setExportDone(true)
       toast(`${result.count} mots de passe exportés`, 'success')
     } catch (err) {
@@ -657,7 +654,13 @@ export default function PasswordsPage() {
               <CheckCircle2 size={48} style={{ color: 'var(--success)' }} />
               <p style={{ fontSize: 'var(--text-lg)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>Export réussi</p>
               <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', textAlign: 'center' }}>
-                Le fichier CSV a été téléchargé. <strong>Supprimez-le</strong> dès que l'import est terminé.
+                Le fichier CSV a été enregistré ici :
+              </p>
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', textAlign: 'center', wordBreak: 'break-all', margin: 0 }}>
+                {exportLocation}
+              </p>
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', textAlign: 'center' }}>
+                <strong>Supprimez-le</strong> dès que l'import est terminé.
               </p>
               <Button onClick={closeExport} fullWidth>Fermer</Button>
             </div>
