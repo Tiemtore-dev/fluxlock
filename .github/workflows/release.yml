@@ -178,7 +178,7 @@ jobs:
       - name: Install Rust stable (cibles Android)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -210,7 +210,8 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: npx tauri android build --apk
+        # arm64 + armv7 seulement (téléphones) : x86/x86_64 (émulateurs) alourdissaient l'APK de ~100 Mo
+        run: npx tauri android build --apk --target aarch64 armv7
 
       - name: Verify signature + rename APK
         run: |
@@ -219,8 +220,8 @@ jobs:
           [ -n "$APK" ] || { echo "::error::Aucun APK produit"; exit 1; }
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK"
           mkdir -p android-release
-          # "universal" : AppUpdater.kt choisit l'APK selon l'ABI, sinon le universal
-          cp "$APK" "android-release/FluXlock_${VERSION}_universal.apk"
+          # Un seul APK multi-ABI (arm64-v8a + armeabi-v7a) : AppUpdater.kt prend le premier .apk
+          cp "$APK" "android-release/FluXlock_${VERSION}_android.apk"
           ls -lh android-release/
 
       - name: Upload APK artifact
@@ -287,7 +288,7 @@ jobs:
           | macOS Intel | \`FluXlock_*_x64.dmg\` |
           | Windows 10/11 (64-bit) | \`FluXlock_*_x64-setup.exe\` |
           | Linux (AppImage) | \`FluXlock_*_amd64.AppImage\` |
-          | Android (mise à jour in-app ou installation manuelle) | \`FluXlock_*_universal.apk\` |" \
+          | Android (mise à jour in-app ou installation manuelle) | \`FluXlock_*_android.apk\` |" \
             --latest \
             release-assets/*
 
