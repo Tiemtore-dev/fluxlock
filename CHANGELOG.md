@@ -7,6 +7,14 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.2.20] - 2026-10-18
+
+### Modifié
+
+- Android : APK limité aux architectures arm64 et armv7 (taille réduite d'environ 100 Mo)
+
+---
+
 ## [2.2.19] - 2026-10-17
 
 ### Ajouté
