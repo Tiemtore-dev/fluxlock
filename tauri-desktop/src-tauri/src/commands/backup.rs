@@ -10,6 +10,24 @@ use sqlx::SqlitePool;
 
 // ========== COMMANDES BACKUP & RESTORE ==========
 
+/// Resolves the data directory (Android: app_data_dir stored at init; desktop: hidden storage).
+async fn resolve_data_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
+    if let Some(dir) = state.data_dir.lock().await.as_ref() {
+        return Ok(dir.clone());
+    }
+    hidden_storage::get_hidden_database_dir()
+}
+
+/// Directory where backups are created. On Android this is a private staging area; the
+/// frontend then copies the file to public storage so it survives an uninstall.
+async fn resolve_backup_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
+    if cfg!(target_os = "android") {
+        Ok(resolve_data_dir(state).await?.join("backups"))
+    } else {
+        hidden_storage::get_default_backup_dir()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateBackupRequest {
     pub master_password: Option<String>,
@@ -66,8 +84,10 @@ pub async fn create_backup(
     };
 
     // Obtenir les chemins
-    let db_path = hidden_storage::get_hidden_database_path()?;
-    let files_dir = hidden_storage::get_hidden_files_dir()?;
+    let data_dir = resolve_data_dir(&state).await?;
+    let db_path = data_dir.join("sv.db");
+    let files_dir = data_dir.join("files");
+    let backup_dir = resolve_backup_dir(&state).await?;
 
     // Créer le backup
     let backup_path = backup_manager::create_backup(
@@ -75,6 +95,7 @@ pub async fn create_backup(
         &files_dir,
         &master_password_for_backup,
         &user.username,
+        &backup_dir,
     )
     .await?;
 
@@ -91,9 +112,65 @@ pub struct SearchBackupsResponse {
 }
 
 #[tauri::command]
-pub async fn search_backups() -> Result<SearchBackupsResponse, String> {
-    let backups = backup_manager::find_all_backups();
+pub async fn search_backups(state: State<'_, AppState>) -> Result<SearchBackupsResponse, String> {
+    let extra_dirs = vec![resolve_backup_dir(&state).await?];
+    let backups = backup_manager::find_all_backups(&extra_dirs);
     Ok(SearchBackupsResponse { backups })
+}
+
+/// Stores backup content picked by the user (Android file picker) so it can be restored.
+#[tauri::command]
+pub async fn import_backup_content(
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let backup_dir = resolve_backup_dir(&state).await?;
+    let path = backup_manager::import_backup_content(&content, &backup_dir)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Writes exported text (e.g. CSV) to the user's Downloads folder (desktop) and returns the path.
+#[tauri::command]
+pub async fn export_text_to_downloads(filename: String, content: String) -> Result<String, String> {
+    let safe_name: String = filename
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-' | '.'))
+        .collect();
+    if safe_name.is_empty() || safe_name.starts_with('.') {
+        return Err("Nom de fichier invalide".to_string());
+    }
+    let dir = dirs::download_dir()
+        .or_else(dirs::document_dir)
+        .ok_or("Dossier Téléchargements introuvable")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Erreur création dossier: {}", e))?;
+
+    let (stem, ext) = match safe_name.rsplit_once('.') {
+        Some((s, e)) => (s.to_string(), format!(".{}", e)),
+        None => (safe_name.clone(), String::new()),
+    };
+    let mut path = dir.join(&safe_name);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{} ({}){}", stem, n, ext));
+        n += 1;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("Erreur écriture fichier: {}", e))?;
+        f.write_all(content.as_bytes()).map_err(|e| format!("Erreur écriture fichier: {}", e))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&path, content).map_err(|e| format!("Erreur écriture fichier: {}", e))?;
+
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,8 +198,9 @@ pub async fn restore_backup(
     *state.db.lock().await = None;
 
     let backup_path = std::path::PathBuf::from(&request.backup_path);
-    let db_path = hidden_storage::get_hidden_database_path()?;
-    let files_dir = hidden_storage::get_hidden_files_dir()?;
+    let data_dir = resolve_data_dir(&state).await?;
+    let db_path = data_dir.join("sv.db");
+    let files_dir = data_dir.join("files");
 
     // Restaurer le backup
     let metadata = backup_manager::restore_backup(

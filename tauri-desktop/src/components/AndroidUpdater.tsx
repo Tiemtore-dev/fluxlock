@@ -106,11 +106,11 @@ export function AndroidUpdater() {
   return (
     <div
       role="status"
+      className="android-updater-banner"
       style={{
         position: 'fixed',
         left: 12,
         right: 12,
-        bottom: 'calc(12px + env(safe-area-inset-bottom))',
         zIndex: 1000,
         display: 'flex',
         alignItems: 'center',

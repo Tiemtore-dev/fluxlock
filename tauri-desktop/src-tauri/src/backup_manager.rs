@@ -70,6 +70,7 @@ pub async fn create_backup(
     files_dir: &Path,
     master_password: &str,
     username: &str,
+    backup_dir: &Path,
 ) -> Result<PathBuf, String> {
     debug_log!("📦 Création du backup...");
     
@@ -175,8 +176,8 @@ pub async fn create_backup(
     let json = serde_json::to_string_pretty(&backup_data)
         .map_err(|e| format!("Erreur sérialisation: {}", e))?;
     
-    // Créer le répertoire de backup par défaut
-    let backup_dir = crate::hidden_storage::get_default_backup_dir()?;
+    fs::create_dir_all(backup_dir)
+        .map_err(|e| format!("Erreur création répertoire backup: {}", e))?;
     
     // Générer le nom du fichier backup
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
@@ -353,8 +354,9 @@ pub fn read_backup_metadata(backup_path: &Path) -> Result<BackupMetadata, String
 }
 
 /// Recherche tous les fichiers de backup disponibles
-pub fn find_all_backups() -> Vec<BackupInfo> {
-    let locations = crate::hidden_storage::get_backup_search_locations();
+pub fn find_all_backups(extra_dirs: &[PathBuf]) -> Vec<BackupInfo> {
+    let mut locations = crate::hidden_storage::get_backup_search_locations();
+    locations.extend(extra_dirs.iter().cloned());
     let backup_paths = crate::hidden_storage::search_backup_files(locations);
     
     let mut backups = Vec::new();
@@ -397,4 +399,23 @@ mod tests {
         // Ce test nécessiterait une DB réelle, donc skip en CI
         // Test manuel recommandé
     }
+}
+
+/// Validates raw backup JSON and stores it in `backup_dir`, returning the stored path.
+/// Used on Android where the file picker returns content (not a readable filesystem path).
+pub fn import_backup_content(content: &str, backup_dir: &Path) -> Result<PathBuf, String> {
+    let backup_data: BackupData = serde_json::from_str(content)
+        .map_err(|_| "Fichier invalide : ce n'est pas un backup .svbackup".to_string())?;
+    fs::create_dir_all(backup_dir)
+        .map_err(|e| format!("Erreur création répertoire backup: {}", e))?;
+    let safe_user: String = backup_data
+        .metadata
+        .username
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+    let path = backup_dir.join(format!("SecureVault_{}_imported_{}.svbackup", safe_user, timestamp));
+    fs::write(&path, content).map_err(|e| format!("Erreur écriture backup importé: {}", e))?;
+    Ok(path)
 }

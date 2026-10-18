@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { HardDrive, Search, FolderOpen, RefreshCw, Upload, AlertTriangle } from 'lucide-react'
@@ -6,6 +6,7 @@ import { AppShell } from '../design-system/layouts'
 import { Button, Input, Spinner, Badge } from '../design-system/atoms'
 import { Modal, EmptyState } from '../design-system/molecules'
 import { useToast } from '../design-system/organisms'
+import { hasAndroidStorage, saveFileToPublic } from '../lib/public-storage'
 
 interface BackupMetadata {
   version: string
@@ -30,6 +31,9 @@ export default function BackupRestorePage() {
   const [showRestore, setShowRestore] = useState(false)
   const [restorePw, setRestorePw] = useState('')
   const [restorePath, setRestorePath] = useState<string | null>(null)
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const isAndroid = hasAndroidStorage()
 
   const searchBackups = async () => {
     setSearching(true)
@@ -48,7 +52,22 @@ export default function BackupRestorePage() {
     setLoading(true)
     try {
       const r: CreateBackupResponse = await invoke('create_backup', { request: { master_password: masterPw } })
-      if (r.success) { toast('Backup créé avec succès', 'success'); setMasterPw(''); await searchBackups() }
+      if (r.success) {
+        let location = r.backup_path ?? null
+        if (isAndroid && r.backup_path) {
+          // Copy outside the app sandbox so the backup survives an uninstall.
+          const name = r.backup_path.split('/').pop() ?? 'backup.svbackup'
+          try {
+            location = saveFileToPublic(r.backup_path, name, 'application/octet-stream')
+          } catch (e: any) {
+            toast('Backup créé, mais copie vers Documents impossible : ' + (e?.message ?? e), 'error')
+            location = null
+          }
+        }
+        setLastSavedAt(location)
+        if (location) toast(`Backup enregistré : ${location}`, 'success')
+        setMasterPw(''); await searchBackups()
+      }
       else toast(r.message, 'error')
     } catch (e: any) { toast('Erreur : ' + e, 'error') }
     finally { setLoading(false) }
@@ -66,7 +85,22 @@ export default function BackupRestorePage() {
     setRestorePw(''); setRestorePath(null)
   }
 
+  // Android: the system picker returns content, not a path, so read it and hand it to the backend.
+  const onAndroidFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    try {
+      const content = await file.text()
+      const path: string = await invoke('import_backup_content', { content })
+      const meta: BackupMetadata = await invoke('get_backup_metadata', { request: { backup_path: path } })
+      setBackups(prev => [{ path, metadata: meta }, ...prev.filter(b => b.path !== path)])
+      toast('Backup importé — vous pouvez le restaurer', 'success')
+    } catch (err: any) { toast('Erreur fichier : ' + err, 'error') }
+  }
+
   const selectCustom = async () => {
+    if (isAndroid) { fileInputRef.current?.click(); return }
     try {
       const sel = await open({ multiple: false, filters: [{ name: 'SecureVault Backup', extensions: ['svbackup'] }] })
       if (sel && typeof sel === 'string') {
@@ -102,7 +136,14 @@ export default function BackupRestorePage() {
               {loading ? 'Création…' : 'Créer'}
             </Button>
           </div>
-          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)' }}>Sauvegardé dans Documents/SecureVault Backups/</p>
+          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)' }}>{isAndroid
+              ? 'Enregistré dans Documents/FluXlock/ (conservé même si vous désinstallez l\'application)'
+              : 'Sauvegardé dans Documents/SecureVault Backups/'}
+          </p>
+          {lastSavedAt && (
+            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--success)', marginTop: 'var(--space-1)', wordBreak: 'break-all' }}>Dernier backup : {lastSavedAt}</p>
+          )}
+          <input ref={fileInputRef} type="file" style={{ display: 'none' }} onChange={onAndroidFilePicked} />
         </div>
 
         {/* Backup list */}
