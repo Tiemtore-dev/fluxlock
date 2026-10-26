@@ -140,6 +140,12 @@ Vos données ne sont jamais stockées en clair. Le mot de passe maître est dér
 
 <br>
 
+## 📚 Guide utilisateur
+
+Pour apprendre à utiliser FluXlock en détail, consultez le **[Guide utilisateur](docs/USER_GUIDE.md)** — installation, premiers pas, et mode d'emploi de chaque fonctionnalité.
+
+<br>
+
 ## 🗺️ Roadmap
 
 - [x] Gestion des mots de passe avec chiffrement ChaCha20-Poly1305

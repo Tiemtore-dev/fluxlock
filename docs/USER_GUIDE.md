@@ -14,14 +14,13 @@
 6. [Clés cryptographiques](#clés-cryptographiques)
 7. [Partage sécurisé](#partage-sécurisé)
 8. [Transfert entre appareils](#transfert-entre-appareils)
-9. [Authentification à deux facteurs (2FA)](#authentification-à-deux-facteurs-2fa)
-10. [Biométrie](#biométrie)
-11. [Sauvegarde et restauration](#sauvegarde-et-restauration)
-12. [Sécurité système](#sécurité-système)
-13. [Journal d'audit](#journal-daudit)
-14. [Paramètres](#paramètres)
-15. [Réinitialisation du coffre](#réinitialisation-du-coffre)
-16. [Questions fréquentes](#questions-fréquentes)
+9. [Biométrie](#biométrie)
+10. [Sauvegarde et restauration](#sauvegarde-et-restauration)
+11. [Sécurité système](#sécurité-système)
+12. [Journal d'audit](#journal-daudit)
+13. [Paramètres](#paramètres)
+14. [Réinitialisation du coffre](#réinitialisation-du-coffre)
+15. [Questions fréquentes](#questions-fréquentes)
 
 ---
 
@@ -103,7 +102,7 @@ Une fois connecté, vous arrivez sur le **tableau de bord** qui affiche :
 - Le nombre de mots de passe stockés
 - Le nombre de fichiers chiffrés
 - L'état de la sécurité de votre système
-- Le statut de la biométrie et du 2FA
+- Le nombre d'alertes de sécurité
 
 ---
 
@@ -270,34 +269,6 @@ Vous pouvez ajouter des appareils dans votre liste de confiance pour simplifier 
 3. Les prochains transferts avec cet appareil seront automatiquement reconnus
 
 Pour révoquer la confiance : allez dans **Transfert** → **Appareils de confiance** → **Révoquer**.
-
----
-
-## Authentification à deux facteurs (2FA)
-
-Le 2FA ajoute une couche de protection supplémentaire : même si quelqu'un connaît votre mot de passe maître, il ne pourra pas se connecter sans le code 2FA.
-
-### Activer le TOTP
-
-1. Allez dans **Sécurité** dans la barre latérale
-2. Cliquez sur **Configurer la 2FA**
-3. Scannez le QR code avec une application d'authentification (Google Authenticator, Authy, etc.)
-4. Saisissez le code à 6 chiffres pour confirmer
-5. Le 2FA est maintenant actif
-
-### Se connecter avec le 2FA
-
-1. Entrez votre email et mot de passe maître
-2. Saisissez le code à 6 chiffres affiché dans votre application d'authentification
-3. Le code change toutes les 30 secondes
-
-### Désactiver le 2FA
-
-1. Allez dans **Sécurité**
-2. Cliquez sur **Désactiver la 2FA**
-3. Confirmez avec votre mot de passe maître
-
-> **Attention** : Sécurisez l'accès à votre application d'authentification. Si vous perdez votre téléphone sans backup des codes 2FA, vous pourriez perdre l'accès à votre coffre.
 
 ---
 
