@@ -94,7 +94,7 @@ Téléchargez la dernière version de FluXlock directement depuis la page des re
 
 <div align="center">
 
-### **[⬇️ Télécharger FluXlock](https://github.com/Tiemtore-dev/fluxlock/releases/latest)**
+### **[⬇️ Télécharger FluXlock]([https://github.com/Tiemtore-dev/fluxlock/releases/latest](https://github.com/Tiemtore-dev/fluxlock-releases/releases))**
 
 </div>
 
