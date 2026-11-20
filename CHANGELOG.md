@@ -7,6 +7,22 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.3.0] - 2026-11-20
+
+### Modifié
+
+- Interface revue sur ordinateur et Android, avec une vue d’ensemble des mots de passe, des fichiers et des clés.
+- Pour ouvrir un coffre existant, seul le mot de passe maître est demandé. La biométrie native s’active depuis un coffre déjà déverrouillé. Les anciennes passkeys sont retirées.
+- Les transferts valident l’ordre et la taille des blocs. Le registre de confiance est échangé et vérifié lors de l’appairage. Pour utiliser le nouveau protocole de transfert et d’appairage, mettez à jour les deux appareils.
+- Les nouveaux fichiers sont chiffrés avec le format SENC v2. FluXlock continue de lire les fichiers SENC v1.
+
+### Corrigé
+
+- La restauration accepte les sauvegardes authentifiées qui contiennent les anciens fichiers de métadonnées. Sur Windows, elle réessaie la publication en cas de verrouillage temporaire.
+- L’import de mots de passe prend en charge les exports CSV Brave et Chromium, Firefox, Apple et Bitwarden, en conservant les espaces et les caractères Unicode des mots de passe.
+
+---
+
 ## [2.2.23] - 2026-10-18
 
 ### Corrigé

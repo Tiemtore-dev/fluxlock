@@ -262,6 +262,59 @@ jobs:
           echo "=== Assets téléchargés ==="
           ls -lh release-assets/
 
+      - name: Validate packages and build the update manifest
+        env:
+          TAG: ${{ github.ref_name }}
+          PUBLIC_REPO: ${{ env.PUBLIC_REPO }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${PUBLIC_REPO}/releases/download/${TAG}"
+
+          for asset in \
+            "FluXlock_${VERSION}_aarch64.dmg" \
+            "FluXlock_${VERSION}_x64.dmg" \
+            "FluXlock_${VERSION}_x64-setup.exe" \
+            "FluXlock_${VERSION}_amd64.AppImage" \
+            "FluXlock_${VERSION}_android.apk"; do
+            test -s "release-assets/$asset" || { echo "::error::Paquet manquant : $asset"; exit 1; }
+          done
+
+          for asset in FluXlock_aarch64.app.tar.gz FluXlock_x64.app.tar.gz \
+            "FluXlock_${VERSION}_amd64.AppImage.tar.gz" "FluXlock_${VERSION}_x64_en-US.msi.zip"; do
+            if [ ! -s "release-assets/$asset" ] || [ ! -s "release-assets/$asset.sig" ]; then
+              echo "::error::Paquet de mise à jour ou signature manquante : $asset"
+              exit 1
+            fi
+          done
+
+          cat > release-assets/latest.json << EOF
+          {
+            "version": "${VERSION}",
+            "notes": "FluXlock ${TAG}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "$(cat "release-assets/FluXlock_aarch64.app.tar.gz.sig")",
+                "url": "${BASE_URL}/FluXlock_aarch64.app.tar.gz"
+              },
+              "darwin-x86_64": {
+                "signature": "$(cat "release-assets/FluXlock_x64.app.tar.gz.sig")",
+                "url": "${BASE_URL}/FluXlock_x64.app.tar.gz"
+              },
+              "linux-x86_64": {
+                "signature": "$(cat "release-assets/FluXlock_${VERSION}_amd64.AppImage.tar.gz.sig")",
+                "url": "${BASE_URL}/FluXlock_${VERSION}_amd64.AppImage.tar.gz"
+              },
+              "windows-x86_64": {
+                "signature": "$(cat "release-assets/FluXlock_${VERSION}_x64_en-US.msi.zip.sig")",
+                "url": "${BASE_URL}/FluXlock_${VERSION}_x64_en-US.msi.zip"
+              }
+            }
+          }
+          EOF
+
+          jq -e . release-assets/latest.json >/dev/null
+
       - name: Create release in public repo + upload assets
         env:
           GH_TOKEN: ${{ secrets.RELEASES_PAT }}
@@ -291,51 +344,3 @@ jobs:
           | Android (mise à jour in-app ou installation manuelle) | \`FluXlock_*_android.apk\` |" \
             --latest \
             release-assets/*
-
-      - name: Build and upload latest.json manifest
-        env:
-          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
-          TAG: ${{ github.ref_name }}
-          PUBLIC_REPO: ${{ env.PUBLIC_REPO }}
-        run: |
-          VERSION="${TAG#v}"
-          BASE_URL="https://github.com/${PUBLIC_REPO}/releases/download/${TAG}"
-
-          get_sig() {
-            local f
-            f=$(ls release-assets/$1 2>/dev/null | head -1)
-            [ -f "$f" ] && cat "$f" || echo ""
-          }
-
-          cat > latest.json << EOF
-          {
-            "version": "${VERSION}",
-            "notes": "FluXlock ${TAG}",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": {
-              "darwin-aarch64": {
-                "signature": "$(get_sig "FluXlock_aarch64.app.tar.gz.sig")",
-                "url": "${BASE_URL}/FluXlock_aarch64.app.tar.gz"
-              },
-              "darwin-x86_64": {
-                "signature": "$(get_sig "FluXlock_x64.app.tar.gz.sig")",
-                "url": "${BASE_URL}/FluXlock_x64.app.tar.gz"
-              },
-              "linux-x86_64": {
-                "signature": "$(get_sig "FluXlock_${VERSION}_amd64.AppImage.tar.gz.sig")",
-                "url": "${BASE_URL}/FluXlock_${VERSION}_amd64.AppImage.tar.gz"
-              },
-              "windows-x86_64": {
-                "signature": "$(get_sig "FluXlock_${VERSION}_x64_en-US.msi.zip.sig")",
-                "url": "${BASE_URL}/FluXlock_${VERSION}_x64_en-US.msi.zip"
-              }
-            }
-          }
-          EOF
-
-          echo "=== latest.json ==="
-          cat latest.json
-
-          gh release upload "$TAG" latest.json \
-            --repo "$PUBLIC_REPO" \
-            --clobber

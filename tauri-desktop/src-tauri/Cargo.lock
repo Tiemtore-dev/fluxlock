@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "fluxlock"
-version = "2.2.23"
+version = "2.3.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
