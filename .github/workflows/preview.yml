@@ -71,7 +71,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
+            gnome-keyring dbus-daemon
       - run: npm ci
       - name: Build test application
         shell: bash
@@ -105,8 +106,17 @@ jobs:
           if-no-files-found: error
       - name: Run application tests
         working-directory: tauri-desktop/src-tauri
-        if: matrix.target != 'x86_64-apple-darwin'
+        if: runner.os != 'Linux' && matrix.target != 'x86_64-apple-darwin'
         run: cargo test --locked --target ${{ matrix.target }}
+      - name: Run Linux application tests with Secret Service
+        working-directory: tauri-desktop/src-tauri
+        if: runner.os == 'Linux'
+        run: |
+          export XDG_DATA_HOME="$(mktemp -d)"
+          dbus-run-session -- bash -e -o pipefail -c '
+            printf "fluxlock-ci\n" | gnome-keyring-daemon --unlock --components=secrets
+            exec cargo test --locked --target "$1"
+          ' _ "${{ matrix.target }}"
 
   android:
     name: Android ARM64 + ARMv7
