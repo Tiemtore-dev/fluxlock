@@ -254,6 +254,24 @@ pub async fn create_backup(
     Ok(backup_path)
 }
 
+async fn rename_restore_path(from: &Path, to: &Path) -> std::io::Result<()> {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let mut result = fs::rename(from, to);
+    if cfg!(windows) {
+        // Windows can temporarily deny rename while another handle is open.
+        for delay_ms in [25, 50, 100, 200, 400] {
+            if result.as_ref().err().and_then(std::io::Error::raw_os_error)
+                != Some(ERROR_SHARING_VIOLATION)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            result = fs::rename(from, to);
+        }
+    }
+    result
+}
+
 /// Restaure un backup du coffre-fort
 pub async fn restore_backup(
     backup_path: &Path,
@@ -377,23 +395,29 @@ Ce backup a été créé avec une ancienne version et son intégrité ne peut pa
     let previous_files = workspace.path().join("previous-files");
     let had_files = target_files_dir.exists();
     if had_files {
-        fs::rename(target_files_dir, &previous_files).map_err(|e| e.to_string())?;
+        rename_restore_path(target_files_dir, &previous_files).await
+            .map_err(|e| format!("Impossible de déplacer les fichiers du coffre actuel : {e}"))?;
     }
-    if let Err(error) = fs::rename(&staged_files, target_files_dir) {
-        if had_files {
-            let _ = fs::rename(&previous_files, target_files_dir);
+    let publication = match rename_restore_path(&staged_files, target_files_dir).await {
+        Ok(()) => match rename_restore_path(&staged_db, target_db_path).await {
+            Ok(()) => return Ok(backup_data.metadata),
+            Err(error) => {
+                let _ = rename_restore_path(target_files_dir, &staged_files).await;
+                format!("Impossible de publier la base restaurée : {error}")
+            }
+        },
+        Err(error) => format!("Impossible de publier les fichiers restaurés : {error}"),
+    };
+    if had_files {
+        if let Err(error) = rename_restore_path(&previous_files, target_files_dir).await {
+            let recovery_dir = workspace.keep().join("previous-files");
+            return Err(format!(
+                "{publication}. Impossible de remettre les fichiers du coffre actuel ({error}). +Ils sont conservés dans {}",
+                recovery_dir.display()
+            ));
         }
-        return Err(error.to_string());
     }
-    if let Err(error) = fs::rename(&staged_db, target_db_path) {
-        let _ = fs::rename(target_files_dir, &staged_files);
-        if had_files {
-            let _ = fs::rename(&previous_files, target_files_dir);
-        }
-        return Err(error.to_string());
-    }
-
-    Ok(backup_data.metadata)
+    Err(publication)
 }
 
 /// Lit les métadonnées d'un fichier backup sans le déchiffrer complètement
@@ -469,6 +493,29 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use base64::{engine::general_purpose::STANDARD, Engine};
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn restore_rename_retries_when_windows_sharing_lock_is_released() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::Duration;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("before.db");
+        let target = workspace.path().join("after.db");
+        fs::write(&source, b"database").unwrap();
+        let handle = fs::OpenOptions::new().read(true).share_mode(0).open(&source).unwrap();
+        assert_eq!(fs::rename(&source, &target).unwrap_err().raw_os_error(), Some(32));
+
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            drop(handle);
+        });
+        rename_restore_path(&source, &target).await.unwrap();
+        release.await.unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"database");
+        assert!(!source.exists());
+    }
 
     #[tokio::test]
     async fn restores_legacy_archive_with_platform_metadata_and_rejects_other_hidden_entries() {
@@ -560,8 +607,20 @@ mod tests {
         let destination = dir.path().join("destination.db");
         let restored_files = dir.path().join("destination-files");
         fs::write(&destination, b"preserved").unwrap();
+        fs::create_dir(&restored_files).unwrap();
+        let original_file = restored_files.join("existing.enc");
+        fs::write(&original_file, b"original vault file").unwrap();
+
         assert!(restore_backup(&archive, "incorrect", &destination, &restored_files).await.is_err());
         assert_eq!(fs::read(&destination).unwrap(), b"preserved");
+
+        let blocked_destination = dir.path().join("blocked.db");
+        fs::create_dir(&blocked_destination).unwrap();
+        let error = restore_backup(&archive, "mot de passe de test", &blocked_destination, &restored_files)
+            .await.unwrap_err();
+        assert!(error.contains("Impossible de publier la base restaurée"));
+        assert_eq!(fs::read(&original_file).unwrap(), b"original vault file");
+
         restore_backup(&archive, "mot de passe de test", &destination, &restored_files).await.unwrap();
         let restored = Database::new(&destination).await.unwrap();
         assert_eq!(restored.get_passwords(id).await.unwrap().len(), 1);
