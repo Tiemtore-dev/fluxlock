@@ -112,7 +112,7 @@ try {
             case 'get_system_security_status': return {}
             case 'get_isolation_mode': return isolation
             case 'toggle_isolation_mode': isolation = args.enabled; return 'Mode isolation modifié'
-            case 'plugin:app|version': return '2.3.3'
+            case 'plugin:app|version': return '2.3.4'
             case 'plugin:event|listen': return 1
             default: return []
           }
