@@ -48,27 +48,27 @@ FluXlock utilise des algorithmes de chiffrement parmi les plus robustes existant
 
 ### macOS
 
-1. Téléchargez le fichier `.dmg` depuis la [page des releases](https://github.com/Tiemtore-dev/fluxlock/releases/latest)
+1. Téléchargez le fichier `.dmg` depuis la [dernière version officielle](https://github.com/Tiemtore-dev/fluxlock-releases/releases/latest)
 2. Ouvrez le fichier `.dmg`
 3. Glissez FluXlock dans votre dossier Applications
 4. Au premier lancement, faites clic droit → **Ouvrir** (nécessaire car l'application n'est pas signée Apple)
 
 ### Windows
 
-1. Téléchargez le fichier `_x64-setup.exe` depuis la [page des releases](https://github.com/Tiemtore-dev/fluxlock/releases/latest)
+1. Téléchargez le fichier `_x64-setup.exe` depuis la [dernière version officielle](https://github.com/Tiemtore-dev/fluxlock-releases/releases/latest)
 2. Lancez l'installeur
 3. Suivez les instructions à l'écran
 
 ### Linux
 
-1. Téléchargez le fichier `.deb`, `.rpm` ou `.AppImage` selon votre distribution depuis la [page des releases](https://github.com/Tiemtore-dev/fluxlock/releases/latest)
+1. Téléchargez le fichier `.deb`, `.rpm` ou `.AppImage` selon votre distribution depuis la [dernière version officielle](https://github.com/Tiemtore-dev/fluxlock-releases/releases/latest)
 2. Pour `.deb` : `sudo dpkg -i FluXlock_*.deb`
 3. Pour `.rpm` : `sudo rpm -i FluXlock-*.rpm`
 4. Pour `.AppImage` : rendez le fichier exécutable (`chmod +x`) et lancez-le
 
 ### Android
 
-1. Téléchargez le fichier `.apk` depuis la [page des releases](https://github.com/Tiemtore-dev/fluxlock/releases/latest)
+1. Téléchargez le fichier `.apk` depuis la [dernière version officielle](https://github.com/Tiemtore-dev/fluxlock-releases/releases/latest)
 2. Autorisez l'installation depuis des sources inconnues si nécessaire
 3. Installez et ouvrez l'application
 

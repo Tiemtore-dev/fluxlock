@@ -1,180 +1,108 @@
-<div align="center">
+<p align="center">
+  <img src="docs/images/logo-256.png" width="88" height="88" alt="">
+</p>
 
-<img src="docs/images/logo-256.png" width="120" alt="FluXlock Logo">
+<h1 align="center">FluXlock</h1>
 
-# FluXlock
+<p align="center">
+  Un coffre local pour vos mots de passe, vos fichiers et vos clés cryptographiques.
+</p>
 
-**Coffre-fort numérique de nouvelle génération**
+<p align="center">
+  <a href="https://github.com/Tiemtore-dev/fluxlock-releases/releases/latest"><strong>Télécharger FluXlock</strong></a>
+  · <a href="docs/USER_GUIDE.md">Guide utilisateur</a>
+  · <a href="CHANGELOG.md">Notes de version</a>
+</p>
 
-Gérez vos mots de passe, chiffrez vos fichiers et transférez vos données en toute sécurité — même face aux futures menaces quantiques.
+FluXlock fonctionne sur **macOS, Windows, Linux et Android**. Vous déverrouillez votre coffre avec un mot de passe maître. Les données sont chiffrées sur l’appareil. Pour passer d’un appareil à l’autre, vous pouvez restaurer une sauvegarde ou lancer un transfert chiffré sur votre réseau local.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-Edition%202021-E57324?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.3+-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tauri](https://img.shields.io/badge/Tauri-v2-FFC131?logo=tauri&logoColor=white)](https://v2.tauri.app/)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20·%20Windows%20·%20Linux%20·%20Android-888888)](#-plateformes-supportées)
+<p align="center">
+  <img src="docs/images/dashboard-screenshot.png" width="900" alt="Vue d’ensemble de FluXlock en mode sombre sur ordinateur, avec le nombre de mots de passe, de fichiers et de clés, et les raccourcis vers les transferts, les sauvegardes et la sécurité">
+</p>
 
-<br>
-
-[Fonctionnalités](#-fonctionnalités) · [Aperçu](#-aperçu) · [Téléchargement](#-téléchargement) · [Sécurité](#-sécurité)
-
-</div>
-
-<br>
-
-## 📸 Aperçu
-
-<div align="center">
-
-<img src="docs/images/dashboard-screenshot.png" width="900" alt="FluXlock — Tableau de bord">
-
-<sub>Tableau de bord FluXlock — Vue d'ensemble de votre coffre-fort</sub>
-
-</div>
+<details>
+<summary>Voir la vue d’ensemble sur mobile</summary>
 
 <br>
 
-## ✨ Fonctionnalités
+<img src="docs/images/dashboard-mobile.png" width="300" alt="Vue mobile de FluXlock en mode clair, avec les catégories du coffre et la barre de navigation en bas">
 
-### 🔐 Gestion des mots de passe
-Stockez, organisez et générez des mots de passe forts en un clic. Chaque mot de passe est chiffré individuellement avant d'être enregistré. Un indicateur de force vous aide à choisir des mots de passe solides.
+</details>
 
-### 📁 Coffre-fort de fichiers
-Chiffrez n'importe quel fichier, quelle que soit sa taille. Les fichiers importés par chemin sont chiffrés par flux. L’import Android via le sélecteur de documents et les transferts P2P sont limités à 32 Mio par fichier.
+## Installation
 
-### 🔑 Clés cryptographiques
-Générez et gérez des paires de clés de chiffrement — aussi bien classiques (Ed25519, X25519) que post-quantiques (ML-KEM-768, ML-DSA-65).
+Choisissez l’installeur correspondant à votre appareil dans les fichiers de la [dernière version officielle](https://github.com/Tiemtore-dev/fluxlock-releases/releases/latest).
 
-### 🔄 Transfert pair-à-pair
-Transférez votre coffre-fort vers un autre appareil sur le même réseau local, sans passer par un serveur distant. La connexion s'établit par un simple code, et les données sont re-chiffrées à la volée.
+| Plateforme | Fichier à choisir |
+| --- | --- |
+| macOS Apple Silicon | `*_aarch64.dmg` |
+| macOS Intel | `*_x64.dmg` |
+| Windows 64 bits | `*_x64-setup.exe` ou `*_x64_en-US.msi` |
+| Linux 64 bits | `*_amd64.deb`, `*.x86_64.rpm` ou `*_amd64.AppImage` |
+| Android 7 ou ultérieur | `*_android.apk` pour ARM64 et ARMv7 |
 
-### 🛡️ Détection de ransomware
-FluXlock surveille votre système de fichiers en temps réel. Si un comportement suspect est détecté (chiffrement massif, extensions douteuses), votre coffre-fort bascule automatiquement en lecture seule.
+Les paquets « FluXlock Test » de GitHub Actions utilisent un profil de coffre distinct. Pour ouvrir votre coffre habituel, utilisez l’installeur de la version officielle.
 
-### 📱 Biométrie
-Déverrouillez votre coffre-fort avec Touch ID (macOS), Windows Hello ou le capteur biométrique de votre téléphone Android. Le mot de passe maître reste toujours requis au premier démarrage.
+### Premier démarrage
 
-### 📋 Journal d'audit signé
-Le journal signé peut détecter des modifications dans les entrées présentes. Les événements et leur historique sont conservés sur l’appareil.
+1. Créez votre coffre local avec un mot de passe maître d’au moins 12 caractères. Conservez ce mot de passe en lieu sûr. Il est nécessaire pour ouvrir une sauvegarde.
+2. Ajoutez un mot de passe ou ouvrez **Mots de passe → Importer un CSV**. Vous pouvez examiner les entrées et choisir le traitement des doublons avant de confirmer.
+3. Créez une archive chiffrée depuis **Sauvegardes** et conservez-la sur un autre support.
 
-### 💾 Backup & Restauration
-Exportez la base et les fichiers du coffre dans une archive chiffrée. La restauration vérifie les mots de passe de la sauvegarde et du coffre actuel.
+Si vous avez déjà un coffre sur cet appareil, installez la version officielle par-dessus la précédente et déverrouillez-le avec votre mot de passe maître. Pour restaurer sur un autre appareil, créez le coffre de destination, puis ouvrez **Sauvegardes**. La restauration remplace son contenu et demande les mots de passe du coffre actuel et de la sauvegarde. [Guide de sauvegarde et de restauration](docs/USER_GUIDE.md#sauvegarde-et-restauration)
 
-<br>
+## Dans le coffre
 
-## 🏗️ Construit avec
+| Fonction | Ce que vous pouvez faire |
+| --- | --- |
+| **Mots de passe** | Enregistrer, rechercher et générer des mots de passe. Importer des exports CSV de Brave, Chrome, Firefox, Apple, Bitwarden, 1Password, LastPass ou FluXlock. |
+| **Fichiers** | Chiffrer des fichiers en conservant l’original à son emplacement. Exporter une copie déchiffrée vers la destination choisie. |
+| **Clés** | Générer, importer et conserver des clés cryptographiques, dont des clés Ed25519, X25519, ML-KEM-768 et ML-DSA-65. |
+| **Transferts** | Choisir les éléments à envoyer à un autre appareil sur le réseau local et confirmer la connexion par un code. La version 2.3 requiert une mise à jour des deux appareils pour les transferts et l’appairage. |
+| **Sauvegardes** | Archiver la base du coffre et les fichiers protégés. Restaurer l’archive sur un appareil compatible. |
+| **Biométrie** | Activer le déverrouillage avec Windows Hello, Touch ID ou un capteur Android lorsque l’appareil et la signature de l’application le permettent. Le mot de passe maître reste utilisable. |
 
-<div align="center">
+Les CSV exportés contiennent des mots de passe en clair. Les fichiers transitant par le sélecteur Android ou par le transfert local sont limités à **32 Mio par fichier**. Les transferts se lancent depuis l’application et l’appairage sert à échanger le registre de confiance.
 
-| Couche | Technologies |
-|:---:|:---|
-| **Frontend** | React 18 · TypeScript · TailwindCSS · Zustand · React Query · Vite 5 |
-| **Backend** | Rust · Tauri v2 · SQLite (WAL) · Tokio |
-| **Cryptographie** | ChaCha20-Poly1305 · Argon2id · ML-KEM-768 · ML-DSA-65 · BLAKE3 · SHA3 |
-| **Plateformes** | macOS · Windows · Linux · Android |
+## Sécurité et compatibilité
 
-</div>
+- **Coffre local.** Argon2id dérive une clé à partir du mot de passe maître. Les nouveaux enregistrements utilisent le chiffrement authentifié ChaCha20-Poly1305.
+- **Fichiers.** Le format SENC v2 dérive une clé par fichier via HKDF-SHA-256 et chiffre les blocs avec ChaCha20-Poly1305. FluXlock peut lire les fichiers déjà chiffrés au format SENC v1.
+- **Transferts.** Le code temporaire participe à l’établissement de la session via SPAKE2. ML-KEM-768 contribue à la clé de session et ChaCha20-Poly1305 protège les messages.
+- **Sauvegardes.** FluXlock vérifie l’intégrité des archives avant de remplacer le coffre de destination. Les anciens fichiers compagnons sont pris en charge dans les archives authentifiées.
 
-<br>
+## Développement
 
-## 🖥️ Plateformes supportées
+Le dépôt contient l’interface React et TypeScript, l’application native Tauri et le noyau cryptographique Rust. Référez-vous aux [prérequis Tauri](https://v2.tauri.app/start/prerequisites/) pour installer les dépendances de votre plateforme.
 
-| Plateforme | Version minimum | Biométrie |
-|:---|:---|:---|
-| 🍎 **macOS** | Big Sur (11+) | Touch ID |
-| 🪟 **Windows** | Windows 10+ | Windows Hello |
-| 🐧 **Linux** | glibc 2.31+ | — |
-| 🤖 **Android** | API 24+ | TEE / StrongBox |
+Depuis la racine du dépôt, lancez l’application de bureau en développement avec Node.js et Rust stable installés.
 
-<br>
+```sh
+cd tauri-desktop
+npm ci
+npm run tauri -- dev
+```
 
-## 📥 Téléchargement
+Compilez l’interface et exécutez les tests applicatifs depuis `tauri-desktop`.
 
-Téléchargez la dernière version de FluXlock directement depuis la page des releases :
+```sh
+npm run build
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+```
 
-<div align="center">
+Exécutez les tests du noyau cryptographique depuis la racine du dépôt.
 
-### **[⬇️ Télécharger FluXlock](https://github.com/Tiemtore-dev/fluxlock-releases/releases)**
+```sh
+cargo test --locked --manifest-path rust-crypto-core/Cargo.toml
+```
 
-</div>
+| Dossier | Contenu |
+| --- | --- |
+| [`tauri-desktop/src`](tauri-desktop/src) | Interface et parcours utilisateur |
+| [`tauri-desktop/src-tauri`](tauri-desktop/src-tauri) | Application native et projet Android |
+| [`rust-crypto-core`](rust-crypto-core) | Primitives et formats cryptographiques |
+| [`.github/workflows`](.github/workflows) | Validation multiplateforme et publication |
 
-Formats disponibles :
+## Licence
 
-| Plateforme | Format |
-|:---|:---|
-| macOS | `.dmg` |
-| Windows | `.exe` (installeur) |
-| Linux | `.deb` · `.rpm` · `.AppImage` |
-| Android | `.apk` |
-
-> Les mises à jour sont automatiques une fois l'application installée.
-
-<br>
-
-## 🔒 Sécurité
-
-FluXlock est conçu pour protéger vos données aujourd'hui **et** demain.
-
-### Protection post-quantique
-
-Les ordinateurs quantiques menaceront un jour les algorithmes de chiffrement classiques. FluXlock intègre dès maintenant les standards post-quantiques du NIST :
-- **ML-KEM-768** (FIPS 203) pour l'échange de clés
-- **ML-DSA-65** (FIPS 204) pour les signatures numériques
-
-### Chiffrement de bout en bout
-
-Vos données ne sont jamais stockées en clair. Le mot de passe maître est dérivé via **Argon2id** (résistant aux attaques GPU), puis utilisé pour chiffrer chaque élément avec **ChaCha20-Poly1305**.
-
-### Protection des clés en session
-
-- Les buffers de clés protégés sont effacés lors de leur destruction
-- Le verrouillage mémoire est tenté sur les plateformes Unix
-- La comparaison du vérificateur de mot de passe se fait en temps constant
-- Pas de serveur central — vos données restent sur votre appareil
-
-### Défense active
-
-- **Anti-brute-force** : délai exponentiel entre les tentatives, verrouillage du compte après trop d'échecs
-- **Anti-ransomware** : surveillance de 50+ extensions suspectes, bascule automatique en lecture seule
-- **Anti-traversée de chemin** : validation stricte de tous les chemins de fichiers
-
-<br>
-
-## 📚 Guide utilisateur
-
-Pour apprendre à utiliser FluXlock en détail, consultez le **[Guide utilisateur](docs/USER_GUIDE.md)** — installation, premiers pas, et mode d'emploi de chaque fonctionnalité.
-
-<br>
-
-## 🗺️ Roadmap
-
-- [x] Gestion des mots de passe avec chiffrement ChaCha20-Poly1305
-- [x] Coffre-fort de fichiers (chiffrement streaming)
-- [x] Transfert P2P chiffré (SPAKE2 + ML-KEM hybride)
-- [x] Biométrie (Touch ID, Windows Hello, Android TEE)
-- [x] Détection de ransomware en temps réel
-- [x] Journal d'audit signé (ML-DSA-65)
-- [x] Backup & restauration chiffrés
-- [x] Mise à jour automatique signée
-- [ ] Authentification à deux facteurs (TOTP)
-- [ ] Partage de fichiers chiffré avec révocation
-
-<br>
-
-## 📄 Licence
-
-Distribué sous licence **MIT** — voir le fichier [LICENSE](LICENSE) pour plus de détails.
-
-<br>
-
----
-
-<div align="center">
-
-<img src="docs/images/logo-256.png" width="40" alt="FluXlock">
-
-**FluXlock** — Sécurité redéfinie.
-
-Conçu par [Tiemtore Fahim](https://github.com/Tiemtore-dev)
-
-</div>
+FluXlock est conçu par [Tiemtore Fahim](https://github.com/Tiemtore-dev) et distribué sous [licence MIT](LICENSE).
