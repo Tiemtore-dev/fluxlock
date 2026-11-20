@@ -7,11 +7,12 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [2.3.2] - 2026-11-20
+## [2.3.3] - 2026-11-20
 
 ### Corrigé
 
 - Windows accepte les connexions de transfert IPv4 et IPv6 sur le même port.
+- Les transferts utilisent le port annoncé par l’appareil. L’appairage reste compatible avec la 2.2.23 et les appareils appairés resynchronisent leurs registres signés sur le réseau local.
 - Sur macOS, la clé de session reste uniquement en mémoire protégée et est effacée au verrouillage. FluXlock supprime l’ancienne entrée de session du trousseau au démarrage et à la connexion.
 - Le mode compatibilité Touch ID est disponible dans les paquets macOS de distribution compilés sans profil Developer ID.
 
