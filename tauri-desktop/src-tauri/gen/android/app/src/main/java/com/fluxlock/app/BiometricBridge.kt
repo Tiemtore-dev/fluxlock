@@ -133,7 +133,14 @@ class BiometricBridge(
                 val secretKey = keyStore.getKey(alias, null) as SecretKey
 
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+                try {
+                    cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+                } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+                    if (!deleteKey(account)) throw e
+                    ensureKeystoreKey(alias)
+                    keyStore.load(null)
+                    cipher.init(Cipher.ENCRYPT_MODE, keyStore.getKey(alias, null) as SecretKey)
+                }
 
                 val cryptoObject = BiometricPrompt.CryptoObject(cipher)
                 val executor = ContextCompat.getMainExecutor(activity)
@@ -195,6 +202,19 @@ class BiometricBridge(
      * Triggers a BiometricPrompt — the CryptoObject ensures the decryption key
      * can only be used after successful biometric authentication (auth-per-use).
      */
+    @JavascriptInterface
+    fun hasStoredKey(account: String): Boolean {
+        val prefs = activity.getSharedPreferences("fluxlock_bio_keys", 0)
+        if (!prefs.contains("${account}_iv") || !prefs.contains("${account}_data")) return false
+        return try {
+            val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER)
+            keyStore.load(null)
+            keyStore.containsAlias(KEY_ALIAS_PREFIX + account)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     @JavascriptInterface
     fun retrieveKey(account: String, callbackId: String) {
         activity.runOnUiThread {
@@ -258,6 +278,9 @@ class BiometricBridge(
                     .build()
 
                 prompt.authenticate(promptInfo, cryptoObject)
+            } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+                deleteKey(account)
+                resolveKeystoreCallback(callbackId, false, "Biométrie modifiée. Saisissez le mot de passe maître pour la réactiver.", null)
             } catch (e: Exception) {
                 Log.e(TAG, "retrieveKey init failed: ${e.message}")
                 resolveKeystoreCallback(callbackId, false, e.message, null)

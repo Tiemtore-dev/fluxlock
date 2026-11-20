@@ -113,11 +113,17 @@ pub fn validate_file_path(file_path: &str, base_dir: Option<&Path>) -> Result<Pa
                     ));
                 }
             } else {
-                // Créer les répertoires parents si nécessaire
+                let ancestor = parent.ancestors().find(|candidate| candidate.exists())
+                    .ok_or_else(|| PathValidationError::InvalidPath("Ancêtre du chemin introuvable".into()))?;
+                let ancestor = ancestor.canonicalize()
+                    .map_err(|e| PathValidationError::CanonicalizeError(e.to_string()))?;
+                if !ancestor.starts_with(&canonical_base) {
+                    return Err(PathValidationError::UnauthorizedDirectory(
+                        "Le répertoire parent est hors du répertoire autorisé".into(),
+                    ));
+                }
                 fs::create_dir_all(parent)
-                    .map_err(|e| PathValidationError::InvalidPath(
-                        format!("Impossible de créer le répertoire parent: {}", e)
-                    ))?;
+                    .map_err(|e| PathValidationError::InvalidPath(e.to_string()))?;
                 let canonical_parent = parent.canonicalize()
                     .map_err(|e| PathValidationError::CanonicalizeError(
                         format!("Impossible de canonicaliser après création: {}", e)
@@ -200,6 +206,16 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn validation_never_creates_parents_outside_the_allowed_directory() {
+        let allowed = TempDir::new().unwrap();
+        let forbidden = TempDir::new().unwrap();
+        let parent = forbidden.path().join("must-not-exist");
+        let path = parent.join("output");
+        assert!(validate_file_path(path.to_str().unwrap(), Some(allowed.path())).is_err());
+        assert!(!parent.exists());
+    }
 
     #[test]
     fn test_path_traversal_detection() {

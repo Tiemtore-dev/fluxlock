@@ -29,7 +29,7 @@ const variantStyles: Record<ButtonVariant, string> = {
   `,
   danger: `
     background: var(--danger);
-    color: var(--text-primary);
+    color: var(--danger-fg);
   `,
 }
 
@@ -56,7 +56,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       justifyContent: 'center',
       fontFamily: 'var(--font-body)',
       fontWeight: 500,
-      letterSpacing: 'var(--tracking-wide)',
+      letterSpacing: 'var(--tracking-normal)',
       border: 'none',
       cursor: disabled || loading ? 'not-allowed' : 'pointer',
       opacity: disabled ? 0.5 : 1,
@@ -69,7 +69,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     }
 
     // Parse CSS text into style overrides
-    const cssText = hovered && !disabled ? variantHoverStyles[variant] : variantStyles[variant]
+    const cssText = variantStyles[variant] + (hovered && !disabled ? variantHoverStyles[variant] : '')
     const parsedStyle = cssText.split(';').reduce((acc, rule) => {
       const [prop, val] = rule.split(':').map(s => s.trim())
       if (prop && val) {
@@ -120,7 +120,7 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
     const dimension = size === 'sm' ? 28 : size === 'md' ? 36 : 44
     const iconSize = size === 'sm' ? 14 : size === 'md' ? 16 : 20
 
-    const cssText = hovered && !disabled ? variantHoverStyles[variant] : variantStyles[variant]
+    const cssText = variantStyles[variant] + (hovered && !disabled ? variantHoverStyles[variant] : '')
     const parsedStyle = cssText.split(';').reduce((acc, rule) => {
       const [prop, val] = rule.split(':').map(s => s.trim())
       if (prop && val) {

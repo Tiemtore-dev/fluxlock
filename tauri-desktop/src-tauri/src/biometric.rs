@@ -1,26 +1,16 @@
-/// ═══════════════════════════════════════════════════════════════
-/// FluXlock — Desktop Biometric Authentication Module
-/// ═══════════════════════════════════════════════════════════════
-///
-/// # Security Philosophy
-/// The biometric NEVER replaces the master password. It unlocks an
-/// intermediate key stored in the OS keychain. The fingerprint/face
-/// never derives the vault key directly.
-///
-/// # Rules
-/// - Cold start always requires master password
-/// - Biometric is only for quick-unlock (app was in background)
-/// - 3 consecutive failures → fall back to password
-/// - Configurable timeout (default 15 min)
-/// - Emergency lock disables biometric instantly
+//! Unlocks a previously enrolled vault with the device's biometric authenticator.
+//! A successful master-password check is required for enrollment.
 
 use serde::{Serialize, Deserialize};
 use base64::{Engine as _, engine::general_purpose};
-use zeroize::Zeroize;
+use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
+#[cfg(not(any(target_os = "macos", target_os = "android")))]
+use std::time::Instant;
+
 const MAX_FAILED_ATTEMPTS: u32 = 3;
-const DEFAULT_TIMEOUT_SECS: u64 = 15 * 60; // 15 minutes
+const NATIVE_KEYCHAIN_FORMAT: u8 = 1;
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
@@ -30,35 +20,25 @@ macro_rules! debug_log {
     };
 }
 
-// ═══════════════════════════════════════════════════════
-// Runtime state (in-memory, resets on app restart = cold start)
-// ═══════════════════════════════════════════════════════
-
+#[derive(Default)]
 struct BiometricRuntime {
-    /// Number of consecutive biometric failures this session
     failed_attempts: u32,
-    /// Timestamp of last successful master-password login (session key derivation)
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
     last_password_login: Option<Instant>,
-    /// Whether emergency lock was triggered this session
-    emergency_locked: bool,
-    /// Configured timeout in seconds
-    timeout_secs: u64,
 }
 
-static RUNTIME: Mutex<Option<BiometricRuntime>> = Mutex::new(None);
+static RUNTIME: Mutex<BiometricRuntime> = Mutex::new(BiometricRuntime {
+    failed_attempts: 0,
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    last_password_login: None,
+});
 
 fn with_runtime<F, R>(f: F) -> R
 where
     F: FnOnce(&mut BiometricRuntime) -> R,
 {
-    let mut guard = RUNTIME.lock().unwrap();
-    let rt = guard.get_or_insert_with(|| BiometricRuntime {
-        failed_attempts: 0,
-        last_password_login: None,
-        emergency_locked: false,
-        timeout_secs: DEFAULT_TIMEOUT_SECS,
-    });
-    f(rt)
+    let mut runtime = RUNTIME.lock().unwrap();
+    f(&mut runtime)
 }
 
 // ═══════════════════════════════════════════════════════
@@ -71,7 +51,7 @@ pub struct BiometricStatus {
     pub biometric_type: String,
     pub enrolled: bool,
     pub enrolled_username: Option<String>,
-    /// true → user must enter master password (cold start, timeout, emergency lock, 3 failures)
+    /// The authenticator is enrolled but the vault requires password verification.
     pub requires_password: bool,
     /// Human-readable reason when requires_password is true
     pub password_reason: Option<String>,
@@ -83,22 +63,51 @@ pub struct BiometricStatus {
 struct BiometricEnrollment {
     user_id: i64,
     username: String,
-    // ⚠️ encryption_key_b64 supprimé — la clé est stockée dans le Keychain OS via `keyring`
-    /// epoch secs when enrollment was created
-    enrolled_at: u64,
+    /// Version of the native Keychain enrollment on macOS.
+    #[serde(default)]
+    keychain_format: u8,
+    #[serde(default)]
+    restriction: Option<PasswordRestriction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum PasswordRestriction {
+    Emergency,
+    TooManyAttempts,
+}
+
+impl PasswordRestriction {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Emergency => "Verrouillage d’urgence. Saisissez votre mot de passe maître.",
+            Self::TooManyAttempts => "Trop de tentatives biométriques. Saisissez votre mot de passe maître.",
+        }
+    }
 }
 
 /// Nom du service Keychain pour stocker la clé biométrique
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 const KEYCHAIN_SERVICE: &str = "com.fluxlock.biometric";
 
-/// Stocke la clé de chiffrement dans le Keychain OS avec protection biométrique
-/// Sur macOS : utilise SecAccessControl via ObjC FFI (= Secure Enclave + Touch ID)
-/// Sur Android : fichier sécurisé dans le répertoire app-privé
+#[cfg(not(target_os = "android"))]
+fn keychain_account(user_id: i64, test_build: bool) -> String {
+    let prefix = if test_build { "test_user_" } else { "user_" };
+    format!("{prefix}{user_id}")
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+#[test]
+fn test_build_uses_separate_keychain_accounts() {
+    assert_eq!(keychain_account(1, true), "test_user_1");
+    assert_eq!(keychain_account(1, false), "user_1");
+}
+
+/// Stores the enrolled key in the platform credential store.
+#[cfg(not(target_os = "android"))]
 fn store_key_in_keychain(user_id: i64, key_b64: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let account = std::ffi::CString::new(format!("user_{}", user_id))
+        let account = std::ffi::CString::new(keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
             .map_err(|_| "Invalid account string".to_string())?;
         let status = unsafe {
             biometric_keychain_store(
@@ -108,46 +117,35 @@ fn store_key_in_keychain(user_id: i64, key_b64: &str) -> Result<(), String> {
             )
         };
         if status != 0 {
-            return Err(format!("Secure Enclave keychain store failed (OSStatus {})", status));
+            return Err(keychain_error(status));
         }
-        debug_log!("🔐 Key stored in biometric-protected Keychain (Secure Enclave)");
+        debug_log!("Biometric key stored in the Data Protection Keychain");
         Ok(())
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("user_{}", user_id))
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
             .map_err(|e| format!("Keychain entry error: {}", e))?;
         entry.set_password(key_b64)
             .map_err(|e| format!("Keychain store error: {}", e))?;
         Ok(())
     }
-    #[cfg(target_os = "android")]
-    {
-        // On Android, keyring crate doesn't work. Store in app-private file.
-        let path = biometric_key_file_path(user_id)?;
-        std::fs::write(&path, key_b64.as_bytes())
-            .map_err(|e| format!("Failed to store biometric key: {}", e))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    }
+
 }
 
 /// Récupère la clé de chiffrement depuis le Keychain OS avec vérification biométrique
 /// Sur macOS : SecItemCopyMatching déclenche automatiquement Touch ID
+#[cfg(not(target_os = "android"))]
 fn get_key_from_keychain(user_id: i64) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let account = std::ffi::CString::new(format!("user_{}", user_id))
+        let account = std::ffi::CString::new(keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
             .map_err(|_| "Invalid account string".to_string())?;
         let reason = std::ffi::CString::new("Déverrouillez FluXlock avec Touch ID")
             .map_err(|_| "Invalid reason string".to_string())?;
 
-        // 4KB buffer should be plenty for a base64-encoded encryption key
-        let mut buffer = vec![0u8; 4096];
+        // A base64-encoded 32-byte vault key occupies 44 bytes including padding.
+        let mut buffer = Zeroizing::new(vec![0u8; 44]);
         let result = unsafe {
             biometric_keychain_retrieve(
                 account.as_ptr(),
@@ -157,34 +155,30 @@ fn get_key_from_keychain(user_id: i64) -> Result<String, String> {
             )
         };
         if result < 0 {
-            return Err(format!("Secure Enclave keychain retrieve failed (OSStatus {})", result));
+            return Err(keychain_error(result));
         }
         let len = result as usize;
-        let key_str = String::from_utf8(buffer[..len].to_vec())
+        let key_str = std::str::from_utf8(&buffer[..len]).map(str::to_owned)
             .map_err(|e| format!("Keychain key is not valid UTF-8: {}", e))?;
         debug_log!("🔐 Key retrieved from biometric-protected Keychain (Touch ID verified)");
         Ok(key_str)
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("user_{}", user_id))
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
             .map_err(|e| format!("Keychain entry error: {}", e))?;
         entry.get_password()
             .map_err(|e| format!("Keychain retrieve error: {}", e))
     }
-    #[cfg(target_os = "android")]
-    {
-        let path = biometric_key_file_path(user_id)?;
-        std::fs::read_to_string(&path)
-            .map_err(|e| format!("Keychain retrieve error: {}", e))
-    }
+
 }
 
 /// Supprime la clé de chiffrement du Keychain OS
+#[cfg(not(target_os = "android"))]
 fn delete_key_from_keychain(user_id: i64) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let account = std::ffi::CString::new(format!("user_{}", user_id))
+        let account = std::ffi::CString::new(keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
             .map_err(|_| "Invalid account string".to_string())?;
         let status = unsafe { biometric_keychain_delete(account.as_ptr()) };
         if status != 0 {
@@ -194,24 +188,12 @@ fn delete_key_from_keychain(user_id: i64) -> Result<(), String> {
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("user_{}", user_id))
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
             .map_err(|e| format!("Keychain entry error: {}", e))?;
         let _ = entry.delete_password();
         Ok(())
     }
-    #[cfg(target_os = "android")]
-    {
-        let path = biometric_key_file_path(user_id)?;
-        let _ = std::fs::remove_file(&path);
-        Ok(())
-    }
-}
 
-/// Returns the path for storing biometric key on Android
-#[cfg(target_os = "android")]
-fn biometric_key_file_path(user_id: i64) -> Result<std::path::PathBuf, String> {
-    let dir = crate::hidden_storage::get_hidden_database_dir()?;
-    Ok(dir.join(format!(".biometric_key_{}", user_id)))
 }
 
 // ═══════════════════════════════════════════════════════
@@ -236,7 +218,6 @@ fn platform_is_available() -> bool {
         let mut error_code: i32 = 0;
         let available = unsafe { biometric_is_available_ex(&mut error_code) };
         if !available {
-            // LAError codes: -5 = passcodeNotSet, -6 = biometryNotAvailable, -7 = biometryNotEnrolled
             debug_log!("⚠️ biometric_is_available_ex returned false, LAError code = {}", error_code);
         } else {
             debug_log!("✅ biometric_is_available_ex = true");
@@ -432,26 +413,10 @@ fn platform_authenticate(_reason: &str) -> Result<(), String> {
 // via the Kotlin BiometricBridge (window.AndroidBiometric JS interface).
 // The Rust backend trusts the frontend's authentication result.
 //
-// ⚠️ KEY STORAGE SECURITY NOTE (Android):
-// Currently the biometric key is stored in an app-private file protected
-// by Android's filesystem sandbox (mode 0600). For maximum security,
-// this should be migrated to Android Keystore with:
-//   - KeyGenParameterSpec.Builder(...).setUserAuthenticationRequired(true)
-//   - setInvalidatedByBiometricEnrollment(true)
-//   - BiometricPrompt.CryptoObject for biometric-gated decryption
-// This requires a custom Kotlin Tauri plugin exposing JNI to the Rust side.
-// See: https://developer.android.com/privacy-and-security/keystore
-
 #[cfg(target_os = "android")]
-fn platform_is_available() -> bool { true }  // Actual check done by frontend via AndroidBiometric JS bridge
+fn platform_is_available() -> bool { true }  // Verified by the Android Keystore bridge.
 #[cfg(target_os = "android")]
 fn platform_get_type() -> String { "fingerprint".to_string() }
-#[cfg(target_os = "android")]
-fn platform_authenticate(_reason: &str) -> Result<(), String> {
-    // On Android, authentication is done by the frontend via BiometricPrompt (AndroidBiometric JS bridge).
-    // When this function is called, the frontend has already verified the user's fingerprint.
-    Ok(())
-}
 
 #[cfg(target_os = "ios")]
 fn platform_is_available() -> bool { false }
@@ -462,371 +427,225 @@ fn platform_authenticate(_reason: &str) -> Result<(), String> {
     Err("Use tauri-plugin-biometric on mobile".to_string())
 }
 
-// ═══════════════════════════════════════════════════════
-// File-based storage for biometric enrollment
-// (Avoids keyring prompts on macOS Keychain at app startup)
-// ═══════════════════════════════════════════════════════
-
-fn enrollment_file_path() -> Result<std::path::PathBuf, String> {
-    let dir = crate::hidden_storage::get_hidden_database_dir()?;
-    Ok(dir.join(".biometric_enrollment.json"))
-}
-
-fn get_enrollment() -> Option<BiometricEnrollment> {
-    let path = enrollment_file_path().ok()?;
-    let data = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&data).ok()
-}
-
-fn store_enrollment(enrollment: &BiometricEnrollment) -> Result<(), String> {
-    let path = enrollment_file_path()?;
-    let json = serde_json::to_string(enrollment)
-        .map_err(|e| format!("Serialization error: {}", e))?;
-    std::fs::write(&path, json.as_bytes())
-        .map_err(|e| format!("Failed to store biometric enrollment: {}", e))?;
-    // Restrict permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+#[cfg(target_os = "macos")]
+fn keychain_error(status: i32) -> String {
+    match status {
+        -34018 => "Cette version macOS ne dispose pas des autorisations de signature pour Touch ID. Utilisez votre mot de passe maître.".into(),
+        -128 => "Authentification biométrique annulée.".into(),
+        -25300 | -26275 => "Clé biométrique indisponible. Déverrouillez le coffre au mot de passe, puis réactivez la biométrie dans Paramètres.".into(),
+        -25293 => "Touch ID a refusé l’authentification. Utilisez votre mot de passe maître si le capteur est verrouillé.".into(),
+        _ => format!("Le trousseau macOS a refusé l’opération biométrique ({status})."),
     }
+}
+
+fn enrollment_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(".biometric_enrollment.json")
+}
+
+fn get_enrollment(dir: &Path) -> Option<BiometricEnrollment> {
+    let data = std::fs::read(enrollment_path(dir)).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+fn store_enrollment(dir: &Path, enrollment: &BiometricEnrollment) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut file, enrollment).map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())?;
+    file.as_file().sync_all().map_err(|e| e.to_string())?;
+    file.persist(enrollment_path(dir)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-fn delete_enrollment() -> Result<(), String> {
-    let path = match enrollment_file_path() {
-        Ok(p) => p,
-        Err(_) => return Ok(()),
-    };
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("Failed to delete biometric enrollment: {}", e))?;
+fn is_current_enrollment(enrollment: &BiometricEnrollment) -> bool {
+    !cfg!(target_os = "macos") || enrollment.keychain_format == NATIVE_KEYCHAIN_FORMAT
+}
+
+fn password_requirement(enrollment: &BiometricEnrollment) -> Option<&'static str> {
+    if let Some(restriction) = enrollment.restriction {
+        return Some(restriction.message());
     }
-    Ok(())
-}
-
-fn now_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-// ═══════════════════════════════════════════════════════
-// Cold-start & timeout logic
-// ═══════════════════════════════════════════════════════
-
-/// Determine whether the biometric quick-unlock is blocked and why.
-/// Returns (requires_password, reason).
-fn evaluate_biometric_gate() -> (bool, Option<String>) {
-    with_runtime(|rt| {
-        // Emergency lock
-        if rt.emergency_locked {
-            return (true, Some("Verrouillage d'urgence activé — mot de passe requis".into()));
+    with_runtime(|runtime| {
+        if runtime.failed_attempts >= MAX_FAILED_ATTEMPTS {
+            return Some(PasswordRestriction::TooManyAttempts.message());
         }
-        // 3 consecutive failures
-        if rt.failed_attempts >= MAX_FAILED_ATTEMPTS {
-            return (true, Some("Biométrie non reconnue — mot de passe requis".into()));
+        #[cfg(not(any(target_os = "macos", target_os = "android")))]
+        if runtime.last_password_login.is_none_or(|instant| instant.elapsed().as_secs() >= 15 * 60) {
+            return Some("Ouvrez le coffre au mot de passe maître pour réactiver la biométrie.");
         }
-        // Cold start (no password login happened in this process lifetime)
-        let last = match rt.last_password_login {
-            Some(t) => t,
-            None => return (true, Some("Premier lancement — mot de passe requis".into())),
-        };
-        // Timeout
-        let elapsed = last.elapsed().as_secs();
-        if elapsed >= rt.timeout_secs {
-            return (true, Some(format!(
-                "Délai d'inactivité dépassé ({} min) — mot de passe requis",
-                rt.timeout_secs / 60
-            )));
-        }
-        (false, None)
+        None
     })
 }
 
-// ═══════════════════════════════════════════════════════
-// Public API
-// ═══════════════════════════════════════════════════════
-
-/// Called by the login command after a successful master-password verification.
-/// Records the timestamp so that biometric quick-unlock becomes available.
-pub fn notify_password_login_success() {
-    with_runtime(|rt| {
-        rt.last_password_login = Some(Instant::now());
-        rt.failed_attempts = 0;
-        rt.emergency_locked = false;
-        debug_log!("🔐 Biometric: master-password login recorded, quick-unlock available");
+/// Clear a restriction only after the wallet password has been verified.
+pub fn notify_password_login_success(dir: &Path) -> Result<(), String> {
+    if let Some(mut enrollment) = get_enrollment(dir) {
+        if enrollment.restriction.take().is_some() {
+            store_enrollment(dir, &enrollment)?;
+        }
+    }
+    with_runtime(|runtime| {
+        runtime.failed_attempts = 0;
+        #[cfg(not(any(target_os = "macos", target_os = "android")))]
+        { runtime.last_password_login = Some(Instant::now()); }
     });
-}
-
-/// Emergency lock: instantly disable biometric until next password login.
-pub fn emergency_lock() {
-    with_runtime(|rt| {
-        rt.emergency_locked = true;
-        debug_log!("🚨 Biometric: emergency lock activated");
-    });
-}
-
-/// Check biometric hardware availability, enrollment status, and whether
-/// the user must enter the master password (cold start / timeout / etc.).
-pub fn check_biometric_status() -> BiometricStatus {
-    let available = platform_is_available();
-    // Always call platform_get_type() — on macOS it uses the fallback policy
-    // so it can detect Touch ID hardware even when strict biometric-only fails
-    let biometric_type = platform_get_type();
-    // If we detected a valid biometric type, override available to true
-    let available = available || (biometric_type != "none");
-
-    debug_log!("🔍 Biometric check: available={}, type={}", available, biometric_type);
-
-    let enrollment = get_enrollment();
-    let enrolled = enrollment.is_some();
-    let enrolled_username = enrollment.map(|e| e.username);
-
-    let (requires_password, password_reason) = if enrolled {
-        evaluate_biometric_gate()
-    } else {
-        (true, None)
-    };
-
-    let failed_attempts = with_runtime(|rt| rt.failed_attempts);
-
-    BiometricStatus {
-        available,
-        biometric_type,
-        enrolled,
-        enrolled_username,
-        requires_password,
-        password_reason,
-        failed_attempts,
-    }
-}
-
-/// Enable biometric authentication for the given user.
-/// Requires: user is already authenticated (has encryption key in session).
-///
-/// Returns `Ok(None)` on desktop platforms (key stored in OS keychain).
-/// Returns `Ok(Some(key_b64))` on Android — the frontend must store this key
-/// in the Android Keystore (TEE/StrongBox) via the BiometricBridge.
-pub fn enable_biometric(user_id: i64, username: &str, encryption_key: &[u8]) -> Result<Option<String>, String> {
-    if !platform_is_available() {
-        return Err("Biométrie non disponible sur cet appareil".to_string());
-    }
-
-    platform_authenticate("Activez la biométrie pour FluXlock")?;
-    debug_log!("✅ Biometric authentication succeeded for enrollment");
-
-    let mut key_b64 = general_purpose::STANDARD.encode(encryption_key);
-
-    // On Android, skip OS keychain — the frontend will use Android Keystore (TEE/StrongBox)
-    // via BiometricBridge.kt which provides hardware-backed AES-256-GCM encryption.
-    #[cfg(not(target_os = "android"))]
-    {
-        store_key_in_keychain(user_id, &key_b64)?;
-    }
-    
-    // Ne stocker que les métadonnées dans le fichier JSON (sans la clé)
-    let enrollment = BiometricEnrollment {
-        user_id,
-        username: username.to_string(),
-        enrolled_at: now_epoch(),
-    };
-    store_enrollment(&enrollment)?;
-
-    // On Android, return the key so the frontend can store it in Android Keystore
-    #[cfg(target_os = "android")]
-    let result = {
-        debug_log!("🔐 Biometric enrollment stored for user {} ({}) — key returned for Android Keystore", user_id, username);
-        let key_copy = key_b64.clone();
-        unsafe { key_b64.as_bytes_mut().zeroize(); }
-        Ok(Some(key_copy))
-    };
-
-    #[cfg(not(target_os = "android"))]
-    let result = {
-        unsafe { key_b64.as_bytes_mut().zeroize(); }
-        debug_log!("🔐 Biometric enrollment stored for user {} ({})", user_id, username);
-        Ok(None)
-    };
-
-    result
-}
-
-/// Disable biometric authentication (remove enrollment).
-pub fn disable_biometric() -> Result<(), String> {
-    // Supprimer la clé du Keychain avant de supprimer l'enrollment
-    if let Some(enrollment) = get_enrollment() {
-        let _ = delete_key_from_keychain(enrollment.user_id);
-    }
-    delete_enrollment()?;
-    debug_log!("🔓 Biometric enrollment removed");
     Ok(())
 }
 
-/// Perform biometric login for the given username.
-/// Validates that (1) enrollment exists for that username,
-/// (2) quick-unlock is allowed, (3) biometric succeeds.
-/// Returns (user_id, username, encryption_key_bytes).
-pub fn biometric_login(target_username: &str) -> Result<(i64, String, Vec<u8>), String> {
-    // 1. Check enrollment
-    let enrollment = get_enrollment()
-        .ok_or("Biométrie non configurée. Veuillez vous connecter avec votre mot de passe.")?;
-
-    // 2. Verify username matches
-    if !enrollment.username.eq_ignore_ascii_case(target_username) {
-        return Err("Biométrie non configurée pour cet utilisateur.".to_string());
-    }
-
-    // 3. Check gate (cold start / timeout / emergency / 3 failures)
-    let (blocked, reason) = evaluate_biometric_gate();
-    if blocked {
-        return Err(reason.unwrap_or_else(|| "Mot de passe requis".into()));
-    }
-
-    // 4. Authenticate with biometric
-    match platform_authenticate("Déverrouillez FluXlock") {
-        Ok(()) => {
-            with_runtime(|rt| rt.failed_attempts = 0);
-            debug_log!("✅ Biometric login authenticated for user {}", enrollment.username);
-        }
-        Err(e) => {
-            let attempts = with_runtime(|rt| {
-                rt.failed_attempts += 1;
-                rt.failed_attempts
-            });
-            debug_log!("❌ Biometric attempt failed ({}/{})", attempts, MAX_FAILED_ATTEMPTS);
-            if attempts >= MAX_FAILED_ATTEMPTS {
-                return Err("Biométrie non reconnue — mot de passe requis".into());
-            }
-            return Err(e);
-        }
-    }
-
-    // 5. Récupérer la clé de chiffrement depuis le Keychain OS
-    let key_b64 = match get_key_from_keychain(enrollment.user_id) {
-        Ok(k) => k,
-        Err(_) => {
-            // Key was lost (vault reset, keychain cleared, etc.) — auto-disable biometric
-            let _ = delete_enrollment();
-            return Err(
-                "La clé biométrique a été perdue (réinitialisation du coffre ?). \
-                 Veuillez vous connecter avec votre mot de passe puis réactiver la biométrie dans les paramètres."
-                    .to_string(),
-            );
-        }
-    };
-    let key_bytes = general_purpose::STANDARD
-        .decode(&key_b64)
-        .map_err(|e| format!("Erreur décodage clé biométrique: {}", e))?;
-
-    Ok((enrollment.user_id, enrollment.username, key_bytes))
+pub fn emergency_lock(dir: &Path) -> Result<(), String> {
+    let mut enrollment = get_enrollment(dir).ok_or("Biométrie non configurée.")?;
+    enrollment.restriction = Some(PasswordRestriction::Emergency);
+    store_enrollment(dir, &enrollment)
 }
 
-/// Biometric login for Android: the frontend already retrieved the key
-/// from Android Keystore (via BiometricPrompt + CryptoObject), so we
-/// skip the OS keychain read and biometric platform authentication.
-///
-/// The biometric gate (cold start, timeout, emergency lock, 3 failures)
-/// is still enforced to maintain the security invariants.
-pub fn biometric_login_with_key(target_username: &str, key_b64: &str) -> Result<(i64, String, Vec<u8>), String> {
-    // 1. Check enrollment
-    let enrollment = get_enrollment()
-        .ok_or("Biométrie non configurée. Veuillez vous connecter avec votre mot de passe.")?;
+pub fn check_biometric_status(dir: &Path) -> BiometricStatus {
+    let enrollment = get_enrollment(dir).filter(is_current_enrollment);
+    let reason = enrollment.as_ref().and_then(password_requirement);
+    let enrolled = enrollment.is_some();
+    BiometricStatus {
+        available: platform_is_available(),
+        biometric_type: platform_get_type(),
+        enrolled,
+        enrolled_username: enrollment.map(|entry| entry.username),
+        requires_password: reason.is_some() || !enrolled,
+        password_reason: reason.map(str::to_owned),
+        failed_attempts: with_runtime(|runtime| runtime.failed_attempts),
+    }
+}
 
-    // 2. Verify username matches
+pub fn enable_biometric(dir: &Path, user_id: i64, username: &str, encryption_key: &[u8]) -> Result<Option<String>, String> {
+    if !platform_is_available() {
+        return Err("Biométrie indisponible sur cet appareil. Vérifiez son état dans les réglages système.".into());
+    }
+
+    let key_b64 = Zeroizing::new(general_purpose::STANDARD.encode(encryption_key));
+    #[cfg(not(target_os = "android"))]
+    {
+        platform_authenticate("Activez la biométrie pour FluXlock")?;
+        store_key_in_keychain(user_id, &key_b64)?;
+    }
+
+    let enrollment = BiometricEnrollment {
+        user_id,
+        username: username.to_string(),
+        keychain_format: NATIVE_KEYCHAIN_FORMAT,
+        restriction: None,
+    };
+    store_enrollment(dir, &enrollment)?;
+    with_runtime(|runtime| runtime.failed_attempts = 0);
+
+    #[cfg(target_os = "android")]
+    return Ok(Some(key_b64.to_string()));
+    #[cfg(not(target_os = "android"))]
+    Ok(None)
+}
+
+pub fn disable_biometric(dir: &Path) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    if let Some(enrollment) = get_enrollment(dir) {
+        let _ = delete_key_from_keychain(enrollment.user_id);
+    }
+    match std::fs::remove_file(enrollment_path(dir)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+        _ => Ok(()),
+    }
+}
+
+fn authorized_enrollment(dir: &Path, target_username: &str) -> Result<BiometricEnrollment, String> {
+    let enrollment = get_enrollment(dir).filter(is_current_enrollment)
+        .ok_or("Activez d’abord la biométrie avec votre mot de passe maître.")?;
     if !enrollment.username.eq_ignore_ascii_case(target_username) {
-        return Err("Biométrie non configurée pour cet utilisateur.".to_string());
+        return Err("Biométrie non configurée pour ce compte.".into());
+    }
+    if let Some(reason) = password_requirement(&enrollment) {
+        return Err(reason.into());
+    }
+    Ok(enrollment)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn biometric_login(dir: &Path, target_username: &str) -> Result<(i64, String, Vec<u8>), String> {
+    let enrollment = authorized_enrollment(dir, target_username)?;
+
+    // The macOS keychain prompts once when it releases the protected item.
+    #[cfg(not(target_os = "macos"))]
+    if let Err(error) = platform_authenticate("Déverrouillez FluXlock") {
+        let attempts = with_runtime(|runtime| {
+            runtime.failed_attempts += 1;
+            runtime.failed_attempts
+        });
+        if attempts >= MAX_FAILED_ATTEMPTS {
+            let mut enrollment = enrollment;
+            enrollment.restriction = Some(PasswordRestriction::TooManyAttempts);
+            store_enrollment(dir, &enrollment)?;
+            return Err(PasswordRestriction::TooManyAttempts.message().into());
+        }
+        return Err(error);
     }
 
-    // 3. Check gate (cold start / timeout / emergency / 3 failures)
-    let (blocked, reason) = evaluate_biometric_gate();
-    if blocked {
-        return Err(reason.unwrap_or_else(|| "Mot de passe requis".into()));
-    }
+    let key_b64 = Zeroizing::new(get_key_from_keychain(enrollment.user_id)?);
+    let key = general_purpose::STANDARD.decode(key_b64.as_bytes())
+        .map_err(|_| "Clé biométrique invalide.".to_string())?;
+    with_runtime(|runtime| runtime.failed_attempts = 0);
+    Ok((enrollment.user_id, enrollment.username, key))
+}
 
-    // 4. No platform_authenticate needed — biometric was already verified
-    //    by Android Keystore CryptoObject (auth-per-use).
-    with_runtime(|rt| rt.failed_attempts = 0);
-    debug_log!("✅ Biometric login (Android Keystore) for user {}", enrollment.username);
-
-    // 5. Decode the key received from the frontend
-    let key_bytes = general_purpose::STANDARD
-        .decode(key_b64)
-        .map_err(|e| format!("Erreur décodage clé biométrique: {}", e))?;
-
-    Ok((enrollment.user_id, enrollment.username, key_bytes))
+#[cfg(target_os = "android")]
+pub fn biometric_login_with_key(dir: &Path, target_username: &str, key_b64: &str) -> Result<(i64, String, Vec<u8>), String> {
+    let enrollment = authorized_enrollment(dir, target_username)?;
+    let key = general_purpose::STANDARD.decode(key_b64)
+        .map_err(|_| "Clé biométrique invalide.".to_string())?;
+    Ok((enrollment.user_id, enrollment.username, key))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
 
-    /// Serialize biometric tests that depend on the global RUNTIME state
-    static TEST_MUTEX: StdMutex<()> = StdMutex::new(());
-
-    #[test]
-    fn test_check_status_returns_valid_structure() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        *RUNTIME.lock().unwrap() = None;
-        let status = check_biometric_status();
-        assert!(["touchid", "faceid", "windows_hello", "none"].contains(&status.biometric_type.as_str()));
-        // On cold start, requires_password must be true
-        assert!(status.requires_password);
+    fn enrollment() -> BiometricEnrollment {
+        BiometricEnrollment {
+            user_id: 1,
+            username: "fixture".into(),
+            keychain_format: NATIVE_KEYCHAIN_FORMAT,
+            restriction: None,
+        }
     }
 
     #[test]
-    fn test_enrollment_roundtrip() {
-        let enrollment = BiometricEnrollment {
-            user_id: 999,
-            username: "test_user".to_string(),
-            enrolled_at: 0,
-        };
-        let json = serde_json::to_string(&enrollment).unwrap();
-        let decoded: BiometricEnrollment = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.user_id, 999);
-        assert_eq!(decoded.username, "test_user");
+    fn enrollment_is_bound_to_the_vault_directory_and_account() {
+        let vault = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        store_enrollment(vault.path(), &enrollment()).unwrap();
+        notify_password_login_success(vault.path()).unwrap();
+        assert!(authorized_enrollment(vault.path(), "fixture").is_ok());
+        assert!(authorized_enrollment(vault.path(), "other").is_err());
+        assert!(authorized_enrollment(other.path(), "fixture").is_err());
     }
 
     #[test]
-    fn test_cold_start_requires_password() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        // Reset runtime to simulate cold start
-        *RUNTIME.lock().unwrap() = None;
-        let (blocked, reason) = evaluate_biometric_gate();
-        assert!(blocked);
-        assert!(reason.unwrap().contains("Premier lancement"));
+    #[cfg(any(target_os = "macos", target_os = "android"))]
+    fn enrolled_native_authenticator_is_ready_at_cold_start() {
+        assert_eq!(password_requirement(&enrollment()), None);
     }
 
     #[test]
-    fn test_password_login_enables_biometric() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        *RUNTIME.lock().unwrap() = None;
-        notify_password_login_success();
-        let (blocked, _) = evaluate_biometric_gate();
-        assert!(!blocked);
+    fn emergency_lock_persists_and_only_password_login_clears_it() {
+        let vault = tempfile::tempdir().unwrap();
+        store_enrollment(vault.path(), &enrollment()).unwrap();
+        emergency_lock(vault.path()).unwrap();
+        assert_eq!(get_enrollment(vault.path()).unwrap().restriction, Some(PasswordRestriction::Emergency));
+        assert!(authorized_enrollment(vault.path(), "fixture").unwrap_err().contains("urgence"));
+        notify_password_login_success(vault.path()).unwrap();
+        assert!(authorized_enrollment(vault.path(), "fixture").is_ok());
     }
 
     #[test]
-    fn test_emergency_lock() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        *RUNTIME.lock().unwrap() = None;
-        notify_password_login_success();
-        emergency_lock();
-        let (blocked, reason) = evaluate_biometric_gate();
-        assert!(blocked);
-        assert!(reason.unwrap().contains("urgence"));
-    }
-
-    #[test]
-    fn test_failed_attempts_lockout() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        *RUNTIME.lock().unwrap() = None;
-        notify_password_login_success();
-        with_runtime(|rt| rt.failed_attempts = MAX_FAILED_ATTEMPTS);
-        let (blocked, reason) = evaluate_biometric_gate();
-        assert!(blocked);
-        assert!(reason.unwrap().contains("non reconnue"));
+    #[cfg(target_os = "macos")]
+    fn macos_requires_reenrollment_for_old_keychain_entries() {
+        let legacy: BiometricEnrollment = serde_json::from_str(r#"{"user_id":1,"username":"fixture","enrolled_at":0}"#).unwrap();
+        assert!(!is_current_enrollment(&legacy));
+        assert!(is_current_enrollment(&enrollment()));
+        assert!(keychain_error(-34018).contains("signature"));
+        assert!(keychain_error(-128).contains("annulée"));
     }
 }

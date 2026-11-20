@@ -1,0 +1,155 @@
+name: FluXlock Test
+
+on:
+  push:
+    branches:
+      - 'preview/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '1'
+  CARGO_PROFILE_TEST_DEBUG: '1'
+
+jobs:
+  crypto:
+    name: Crypto core tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+        working-directory: rust-crypto-core
+
+  desktop:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundle: app
+          - name: macOS Intel
+            runner: macos-15
+            target: x86_64-apple-darwin
+            bundle: app
+          - name: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+          - name: Linux x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundle: deb
+    env:
+      FLUXLOCK_TEST_BUILD: '1'
+    defaults:
+      run:
+        working-directory: tauri-desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tauri-desktop/package-lock.json
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - name: Build test application
+        shell: bash
+        run: |
+          cat > tauri.preview.conf.json <<'JSON'
+          {
+            "productName": "FluXlock Test",
+            "identifier": "com.fluxlock.app.test",
+            "bundle": { "createUpdaterArtifacts": false },
+            "app": { "windows": [{
+              "title": "FluXlock Test", "width": 1200, "height": 800,
+              "minWidth": 800, "minHeight": 600, "useHttpsScheme": true
+            }] }
+          }
+          JSON
+          npm run tauri -- build --debug --ci --target ${{ matrix.target }} \
+            --bundles ${{ matrix.bundle }} --config tauri.preview.conf.json
+      - name: Verify and archive macOS application
+        if: runner.os == 'macOS'
+        run: |
+          app="src-tauri/target/${{ matrix.target }}/debug/bundle/macos/FluXlock Test.app"
+          test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = com.fluxlock.app.test
+          ditto -c -k --keepParent "$app" "FluXlock-Test-${{ matrix.target }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FluXlock-Test-${{ matrix.target }}
+          path: |
+            tauri-desktop/FluXlock-Test-${{ matrix.target }}.zip
+            tauri-desktop/src-tauri/target/${{ matrix.target }}/debug/bundle/nsis/*.exe
+            tauri-desktop/src-tauri/target/${{ matrix.target }}/debug/bundle/deb/*.deb
+          if-no-files-found: error
+      - name: Run application tests
+        working-directory: tauri-desktop/src-tauri
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --locked --target ${{ matrix.target }}
+
+  android:
+    name: Android ARM64 + ARMv7
+    runs-on: ubuntu-24.04
+    env:
+      FLUXLOCK_TEST_BUILD: '1'
+    defaults:
+      run:
+        working-directory: tauri-desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tauri-desktop/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;26.3.11579264'
+      - run: echo "NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+      - run: npm ci
+      - name: Build debug APK
+        run: npm run tauri -- android build --debug --apk --target aarch64 armv7 --ci
+      - name: Verify test APK
+        run: |
+          apks=(src-tauri/gen/android/app/build/outputs/apk/*/debug/*.apk)
+          test "${#apks[@]}" -eq 1
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          "$tools/apksigner" verify "${apks[0]}"
+          test "$("$tools/aapt2" dump packagename "${apks[0]}")" = com.fluxlock.app.test
+          for abi in arm64-v8a armeabi-v7a; do
+            unzip -Z1 "${apks[0]}" "lib/$abi/*.so"
+          done
+          cp "${apks[0]}" FluXlock-Test-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FluXlock-Test-android
+          path: tauri-desktop/FluXlock-Test-android.apk
+          if-no-files-found: error

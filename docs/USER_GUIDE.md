@@ -92,9 +92,8 @@ Au premier lancement, FluXlock vous demande de créer un compte local :
 
 Après la création du compte, vous pourrez vous connecter avec :
 
-- **Email + mot de passe maître** : la méthode classique
+- **Mot de passe maître** : l’application sélectionne le compte local.
 - **Biométrie** : Touch ID (macOS), Windows Hello, ou capteur Android — si vous l'avez activée dans les paramètres
-- **Passkey** : connexion par clé cryptographique Ed25519 — si vous l'avez configurée
 
 Si vous échouez plusieurs fois, un **délai progressif** s'applique (protection anti-brute-force) et peut aller jusqu'à 2 minutes entre les tentatives.
 
@@ -155,7 +154,7 @@ Cliquez sur le bouton de **régénération** pour obtenir un nouveau mot de pass
 
 ### Import / Export CSV
 
-- **Importer** : importez des mots de passe depuis un fichier CSV (format auto-détecté, compatible Chrome, Firefox, Bitwarden, etc.). Un écran de prévisualisation vous permet de choisir pour chaque entrée si vous souhaitez l'importer, l'ignorer ou écraser l'existant.
+- **Importer**. Ouvrez **Mots de passe → Importer un CSV**. La détection automatique reconnaît les exports d’identifiants Brave et Chrome, Firefox, Bitwarden, 1Password, LastPass et FluXlock. L’aperçu affiche les champs importables avec les mots de passe masqués. Vous pouvez inclure les nouvelles fiches et choisir le traitement de chaque doublon avant de confirmer.
 - **Exporter** : exportez vos mots de passe en CSV. Votre mot de passe maître est requis pour autoriser l'export (sécurité).
 
 > **Mode lecture seule** : si le système de détection de ransomware a détecté une menace, les modifications sont temporairement bloquées. Vous pourrez uniquement consulter vos mots de passe.
@@ -327,7 +326,7 @@ Depuis la barre latérale, cliquez sur **Paramètres**.
 ### Apparence
 
 - **Thème** : basculer entre le mode sombre et le mode clair
-- **Couleur d'accentuation** : choisissez parmi plusieurs thèmes de couleur (défaut, Emerald, Violet, Rose, Amber, Sapphire, Crimson, etc.)
+- **Couleur d'accentuation** : choisissez entre la couleur par défaut, Océan, Améthyste et Crépuscule.
 
 ### Sécurité
 
@@ -336,37 +335,25 @@ Depuis la barre latérale, cliquez sur **Paramètres**.
 
 ### Biométrie
 
-Activez la connexion par empreinte digitale ou reconnaissance faciale :
+Sur l’écran de connexion, sélectionnez l’empreinte à côté du logo. Lors de la première activation, saisissez votre mot de passe maître puis confirmez dans l’invite du système. Vous pouvez aussi lancer l’activation depuis **Paramètres → Biométrie**.
 
-1. Cliquez sur **Activer la biométrie**
-2. Lisez les informations de sécurité
-3. Cochez la case de consentement
-4. Confirmez avec votre mot de passe maître
-5. Authentifiez-vous avec votre empreinte/visage
+Après l’activation, l’empreinte permet de déverrouiller le coffre à l’ouverture sur macOS et Android. Le mot de passe reste utilisable si le capteur est indisponible. L’action **Exiger le mot de passe** applique ce choix au prochain déverrouillage, même après un redémarrage.
 
-Plateformes supportées :
+| Plateforme | Protection |
+| :--- | :--- |
+| macOS | Touch ID et trousseau de protection des données. L’activation exige une application signée avec les autorisations Apple correspondantes. |
+| Android | Android Keystore et vérification forte à chaque utilisation de la clé. |
+| Windows | Windows Hello après une connexion au mot de passe. |
 
-| Plateforme | Technologie |
-|:---|:---|
-| macOS | Touch ID (Secure Enclave) |
-| Windows | Windows Hello |
-| Android | TEE / StrongBox Keymaster |
-
-### Passkey (Ed25519)
-
-Alternative à la biométrie, la passkey utilise une clé cryptographique Ed25519 :
-
-1. Cliquez sur **Activer la passkey**
-2. Confirmez avec votre mot de passe maître
-3. La clé est générée et stockée dans le Keychain/Keystore de votre appareil
+Après une migration depuis une ancienne version macOS, une restauration ou une modification des empreintes de l’appareil, ouvrez d’abord le coffre au mot de passe et réactivez la biométrie.
 
 ### Synchronisation entre appareils
 
-Jumelez deux appareils FluXlock pour qu'ils se reconnaissent automatiquement lors des transferts :
+Dans **Paramètres**, ouvrez **Synchroniser les appareils de confiance**. Les deux appareils doivent utiliser une version compatible.
 
 1. Sur l'appareil A, cliquez sur **Lancer le jumelage** → un code s'affiche
 2. Sur l'appareil B, saisissez ce code et cliquez sur **Rejoindre**
-3. Les appareils sont maintenant jumelés
+3. Les appareils sont appairés et échangent leurs listes signées de pairs de confiance.
 
 Vous pouvez voir les appareils jumelés et les supprimer si nécessaire.
 

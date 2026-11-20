@@ -13,11 +13,14 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val testBuild = providers.environmentVariable("FLUXLOCK_TEST_BUILD").isPresent
+
 android {
     compileSdk = 36
     namespace = "com.fluxlock.app"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
+        manifestPlaceholders["fluxlockLabel"] = "FluXlock"
         applicationId = "com.fluxlock.app"
         minSdk = 24
         targetSdk = 36
@@ -39,6 +42,10 @@ android {
     }
     buildTypes {
         getByName("debug") {
+            if (testBuild) {
+                applicationIdSuffix = ".test"
+                manifestPlaceholders["fluxlockLabel"] = "FluXlock Test"
+            }
             manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true

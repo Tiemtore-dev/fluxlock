@@ -312,7 +312,8 @@ impl Database {
     // User operations
     pub async fn create_user(&self, username: &str, email: &str, password_hash: &str, crypto_salt: &str) -> Result<i64, sqlx::Error> {
         let result = sqlx::query(
-            "INSERT INTO users (username, email, password_hash, crypto_salt) VALUES (?, ?, ?, ?)"
+            "INSERT INTO users (username, email, password_hash, crypto_salt) \
+             SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)"
         )
         .bind(username)
         .bind(email)
@@ -321,7 +322,20 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        if result.rows_affected() != 1 {
+            return Err(sqlx::Error::Protocol("Un compte existe déjà sur cet appareil".into()));
+        }
         Ok(result.last_insert_rowid())
+    }
+
+    pub async fn get_vault_owner(&self) -> Result<Option<User>, sqlx::Error> {
+        let mut users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY id LIMIT 2")
+            .fetch_all(&self.pool)
+            .await?;
+        if users.len() > 1 {
+            return Err(sqlx::Error::Protocol("Ce coffre contient plusieurs comptes".into()));
+        }
+        Ok(users.pop())
     }
 
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, sqlx::Error> {

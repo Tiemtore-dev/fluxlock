@@ -28,7 +28,7 @@ export function PasswordField({ value, revealed, onToggleReveal, onCopy, copied 
         letterSpacing: revealed ? '0.05em' : '0.2em',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
+        whiteSpace: revealed ? 'pre' : 'nowrap',
         userSelect: revealed ? 'text' : 'none',
       }}>
         {revealed ? value : '••••••••••••'}

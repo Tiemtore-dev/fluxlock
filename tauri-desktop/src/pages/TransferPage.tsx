@@ -1,924 +1,306 @@
-import { useState, useEffect, useRef } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useId, useState, type FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowRight, Check, Download, Files, KeyRound, Send, Smartphone } from 'lucide-react'
+import { WorkspacePage } from '../design-system/layouts'
+import { Button, Input, Spinner } from '../design-system/atoms'
 import {
-  ArrowLeftRight, Send, Download, Wifi, WifiOff,
-  Shield, ShieldCheck, ShieldAlert, Copy, Check,
-  Loader2, X, RefreshCw, Users, Fingerprint, Trash2,
-  KeyRound, Files, Lock, Radio, Globe,
-} from 'lucide-react'
-import { AppShell } from '../design-system/layouts'
-import { Button, Badge, Spinner } from '../design-system/atoms'
-import { EmptyState } from '../design-system/molecules'
-import { useToast } from '../design-system/organisms'
-import {
-  transfer,
-  passwords as passwordsService,
-  files as filesService,
-  keys as keysService,
-  type TransferOffer,
-  type TransferConnection,
-  type DiscoveredPeer,
-  type TrustedPeer,
-  type Password,
-  type SecureFile,
-  type SecureKey,
+  transfer, passwords, files, isolationMode, type TransferOffer, type TransferConnection,
 } from '../lib/vault-service'
+import { TransferDevices } from './TransferDevices'
+import { TemporaryCode } from './TemporaryCode'
 
-type Tab = 'send' | 'receive' | 'peers'
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
 
-/* ─── Shared Helpers ─── */
+function sizeLabel(size: number) {
+  return size >= 1024 * 1024 ? `${(size / (1024 * 1024)).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Mio`
+    : size >= 1024 ? `${Math.round(size / 1024)} Kio` : `${size} octets`
+}
 
-/* ─── SafetyIdenticon — visual hash of the safety number ─── */
-/* Grille 3×3 avec 24 couleurs → 24^9 ≈ 2.6 milliards de combinaisons uniques.
-   L'ORDRE compte : même couleurs + positions différentes = identicon différent.
-   Utilise deux fonctions de hash (FNV-1a + DJB2) pour distribuer l'entropie
-   sur les 9 cellules de la grille. */
-function SafetyIdenticon({ value }: { value: string }) {
-  // FNV-1a hash — complementary to DJB2 for better entropy spread
-  const fnv1a = (s: string): number => {
-    let h = 0x811c9dc5
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i)
-      h = Math.imul(h, 0x01000193)
-    }
-    return h >>> 0
-  }
-  // DJB2 hash
-  const djb2 = (s: string): number => {
-    let h = 5381
-    for (let i = 0; i < s.length; i++) {
-      h = ((h << 5) + h + s.charCodeAt(i)) | 0
-    }
-    return Math.abs(h)
-  }
+function invalidateVault(client: ReturnType<typeof useQueryClient>) {
+  void client.invalidateQueries({ queryKey: ['passwords'] })
+  void client.invalidateQueries({ queryKey: ['secureFiles'] })
+}
 
-  // 24 couleurs hautement distinctes, optimisées pour un fond sombre
-  const palette = [
-    '#EF4444', '#F97316', '#F59E0B', '#EAB308',  // rouges → jaunes
-    '#84CC16', '#22C55E', '#10B981', '#14B8A6',  // verts
-    '#06B6D4', '#22D3EE', '#0EA5E9', '#3B82F6',  // cyans → bleus
-    '#6366F1', '#8B5CF6', '#A855F7', '#D946EF',  // indigos → violets
-    '#EC4899', '#F43F5E', '#FB7185', '#FBBF24',  // roses + doré
-    '#2DD4BF', '#34D399', '#A78BFA', '#C084FC',  // teals + lavandes
-  ]
-
-  const h1 = fnv1a(value)
-  const h2 = djb2(value)
-
-  // 9 cellules : 5 du premier hash, 4 du second (5 bits par cellule)
-  const colors = [
-    palette[h1 % 24],
-    palette[(h1 >> 5) % 24],
-    palette[(h1 >> 10) % 24],
-    palette[(h1 >> 15) % 24],
-    palette[(h1 >> 20) % 24],
-    palette[h2 % 24],
-    palette[(h2 >> 5) % 24],
-    palette[(h2 >> 10) % 24],
-    palette[(h2 >> 15) % 24],
-  ]
-
+function Confirmation({
+  number, peer, direction, pending, onConfirm, onReject, children,
+}: {
+  number: string
+  peer?: string
+  direction: 'envoyer' | 'recevoir'
+  pending: boolean
+  onConfirm: () => void
+  onReject: () => void
+  children?: React.ReactNode
+}) {
+  const headingId = useId()
   return (
-    <div className="inline-grid grid-cols-3 gap-0.5 w-11 h-11 rounded-md overflow-hidden" title="Identicon de vérification — les couleurs ET leur position doivent correspondre">
-      {colors.map((c, i) => (
-        <div key={i} className="rounded-sm" style={{
-          background: c,
-          boxShadow: `inset 0 0 0 0.5px rgba(255,255,255,0.1), 0 0 4px ${c}55`,
-        }} />
-      ))}
-    </div>
+    <section className="workspace-panel workspace-stack" aria-labelledby={headingId}>
+      <h2 id={headingId}>Comparer le code de vérification</h2>
+      {peer && <p className="workspace-label">Appareil distant · {peer}</p>}
+      <p>Comparez la valeur affichée avec celle de l’autre appareil. Si les valeurs diffèrent, refusez le transfert.</p>
+      <output className="verification-code">{number}</output>
+      {children}
+      <div className="workspace-actions">
+        <Button icon={Check} loading={pending} disabled={!number} onClick={onConfirm}>
+          Confirmer et {direction}
+        </Button>
+        <Button variant="secondary" disabled={pending} onClick={onReject}>Refuser</Button>
+      </div>
+    </section>
   )
 }
 
-/* ─── SonarScanner — animated sonar effect for scanning ─── */
-function SonarScanner() {
+function TransferOutcome({ success, onReset, receive, error }: {
+  success: boolean
+  onReset: () => void
+  receive?: boolean
+  error?: string
+}) {
   return (
-    <div className="relative w-12 h-12 flex items-center justify-center">
-      <div className="absolute inset-0 rounded-full border-2 opacity-30 animate-[sonarPulse_2s_ease-out_infinite]" style={{ borderColor: 'var(--accent)' }} />
-      <div className="absolute inset-1 rounded-full border-2 opacity-50 animate-[sonarPulse_2s_ease-out_0.4s_infinite]" style={{ borderColor: 'var(--accent)' }} />
-      <div className="w-3 h-3 rounded-full" style={{ background: 'var(--accent)', boxShadow: 'var(--shadow-glow)' }} />
-      <style>{`
-        @keyframes sonarPulse {
-          0% { transform: scale(0.8); opacity: 0.6; }
-          100% { transform: scale(2); opacity: 0; }
-        }
-      `}</style>
-    </div>
+    <section className="workspace-panel workspace-stack" role={success ? 'status' : 'alert'}>
+      <h2>{success ? (receive ? 'Données reçues' : 'Données envoyées') : 'Transfert interrompu'}</h2>
+      {error && <p>{error}</p>}
+      <div><Button variant="secondary" onClick={onReset}>{success ? 'Nouveau transfert' : 'Recommencer'}</Button></div>
+    </section>
   )
 }
 
-/* ─── WormholeSend ─── */
-function WormholeSend({ onItemsSelected }: { onItemsSelected: (type: string, ids: number[]) => void }) {
-  const [selectedType, setSelectedType] = useState<string>('passwords')
-  const [selectedIds, setSelectedIds] = useState<number[]>([])
+type Kind = 'passwords' | 'files'
+const MAX_FILE_BYTES = 32 * 1024 * 1024
 
-  // Chargement des items sélectionnables
-  const { data: passwords = [] } = useQuery({ queryKey: ['passwords'], queryFn: passwordsService.list })
-  const { data: secureFiles = [] } = useQuery({ queryKey: ['secureFiles'], queryFn: filesService.list })
-  const { data: secureKeys = [] } = useQuery({ queryKey: ['secureKeys'], queryFn: keysService.list })
+function SendTransfer({ disabled }: { disabled: boolean }) {
+  const client = useQueryClient()
+  const [kind, setKind] = useState<Kind>('passwords')
+  const [selected, setSelected] = useState<number[]>([])
+  const [offer, setOffer] = useState<TransferOffer>()
+  const [complete, setComplete] = useState(false)
+  const [error, setError] = useState('')
+  const [crossNetwork, setCrossNetwork] = useState(false)
+  const passwordItems = useQuery({ queryKey: ['passwords'], queryFn: passwords.list, enabled: kind === 'passwords' })
+  const fileItems = useQuery({ queryKey: ['secureFiles'], queryFn: files.list, enabled: kind === 'files' })
+  const query = kind === 'passwords' ? passwordItems : fileItems
+  const items = kind === 'passwords'
+    ? (passwordItems.data ?? []).map((item) => ({ id: item.id, name: item.title, detail: item.username, allowed: true }))
+    : (fileItems.data ?? []).map((item) => ({
+      id: item.id, name: item.filename, detail: sizeLabel(item.file_size), allowed: item.file_size <= MAX_FILE_BYTES,
+    }))
+  const availableSelection = selected.filter((id) => items.some((item) => item.id === id && item.allowed))
 
-  const items = selectedType === 'passwords' ? passwords
-    : selectedType === 'files' ? secureFiles
-      : secureKeys
-
-  const toggleItem = (id: number) => {
-    setSelectedIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    )
-  }
-
-  return (
-    <div className="flex flex-col gap-5">
-      {/* Type selector (Segmented Control) */}
-      <div className="flex p-1 bg-input rounded-xl border border-bd">
-        {[
-          { key: 'passwords', label: 'Mots de passe', icon: KeyRound },
-          { key: 'files', label: 'Fichiers', icon: Files },
-          { key: 'keys', label: 'Clés', icon: Lock },
-        ].map(t => {
-          const Icon = t.icon
-          const isSelected = selectedType === t.key
-          return (
-            <button
-              key={t.key}
-              onClick={() => { setSelectedType(t.key); setSelectedIds([]) }}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-all duration-200 ${isSelected ? 'bg-surface shadow-sm text-tx-primary' : 'text-tx-secondary hover:text-tx-primary'
-                }`}
-            >
-              <Icon size={16} className={isSelected ? 'text-accent' : 'text-tx-muted'} />
-              <span className="hidden sm:inline">{t.label}</span>
-            </button>
-          )
-        })}
-      </div>
-
-      {/* Item list */}
-      <div className="bg-surface border border-bd rounded-xl p-2 max-h-[300px] overflow-y-auto">
-        {items.length === 0 ? (
-          <p className="text-tx-muted text-center py-6 text-sm font-body">Aucun élément disponible</p>
-        ) : (
-          <div className="flex flex-col gap-1">
-            {items.map((item: any) => {
-              const id = item.id as number
-              const name = item.title || item.filename || item.key_name || '—'
-              const selected = selectedIds.includes(id)
-              return (
-                <div
-                  key={id}
-                  onClick={() => toggleItem(id)}
-                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all duration-150 border ${selected ? 'bg-accent-muted border-accent text-accent-text' : 'border-transparent hover:bg-elevated'
-                    }`}
-                >
-                  <div className={`w-5 h-5 rounded flex items-center justify-center border-2 transition-colors ${selected ? 'bg-accent border-accent text-white' : 'border-tx-muted'
-                    }`}>
-                    {selected && <Check size={14} />}
-                  </div>
-                  <span className={`text-sm font-medium font-body truncate ${selected ? 'text-tx-primary' : 'text-tx-secondary'}`}>{name}</span>
-                </div>
-              )
-            })}
-          </div>
-        )}
-      </div>
-
-      <Button
-        icon={Users}
-        onClick={() => onItemsSelected(selectedType, selectedIds)}
-        disabled={selectedIds.length === 0}
-      >
-        Choisir un destinataire {selectedIds.length > 0 ? `(${selectedIds.length})` : ''}
-      </Button>
-    </div>
-  )
-}
-
-/* ─── WormholeReceive ─── */
-function WormholeReceive() {
-  const { toast } = useToast()
-  const qc = useQueryClient()
-  const [code, setCode] = useState('')
-  const [connection, setConnection] = useState<TransferConnection | null>(null)
-  const [receiveStatus, setReceiveStatus] = useState<'idle' | 'connecting' | 'confirming' | 'transferring' | 'completed' | 'failed'>('idle')
-  const pollRef = useRef<number | null>(null)
-
-  // Poll transfer status after confirmation
-  useEffect(() => {
-    if (!connection || receiveStatus !== 'transferring') return
-    pollRef.current = window.setInterval(async () => {
-      try {
-        const status = await transfer.getStatus(connection.transfer_id)
-        if (!status) return
-        if (status.state === 'Completed') {
-          setReceiveStatus('completed')
-          qc.invalidateQueries({ queryKey: ['passwords'] })
-          qc.invalidateQueries({ queryKey: ['secureFiles'] })
-          qc.invalidateQueries({ queryKey: ['secureKeys'] })
-          toast('Données reçues avec succès !', 'success')
-          if (pollRef.current) window.clearInterval(pollRef.current)
-        }
-        if (typeof status.state === 'object' && 'Failed' in status.state) {
-          setReceiveStatus('failed')
-          toast(status.state.Failed.reason || 'Réception échouée', 'error')
-          if (pollRef.current) window.clearInterval(pollRef.current)
-        }
-      } catch { /* ignore */ }
-    }, 2000)
-    return () => { if (pollRef.current) window.clearInterval(pollRef.current) }
-  }, [connection, receiveStatus, toast])
-
-  const connectMut = useMutation({
-    mutationFn: () => transfer.connect(code.trim()),
-    onSuccess: (data) => { setConnection(data); setReceiveStatus('confirming'); toast('Connexion établie', 'success') },
-    onError: (e: any) => { setReceiveStatus('idle'); toast(e?.toString() || 'Erreur connexion — vérifiez que l\'autre appareil a créé une offre', 'error') },
-  })
-
-  const confirmMut = useMutation({
-    mutationFn: (confirmed: boolean) =>
-      transfer.confirmAndExecute(connection!.transfer_id, confirmed),
-    onSuccess: (ok) => {
-      if (ok) { setReceiveStatus('transferring'); toast('Réception en cours…', 'success') }
-      else { setConnection(null); setReceiveStatus('idle'); toast('Transfert annulé', 'info') }
+  const status = useQuery({
+    queryKey: ['transfer-status', offer?.transfer_id],
+    queryFn: () => transfer.getStatus(offer!.transfer_id),
+    enabled: !!offer && !complete && !error,
+    refetchInterval: (query) => {
+      const state = query.state.data?.state
+      return state === 'Completed' || (typeof state === 'object' && 'Failed' in state) ? false : 1200
     },
-    onError: (e: any) => toast(e?.toString() || 'Erreur', 'error'),
+    staleTime: 0,
+    retry: 1,
   })
 
-  const resetState = () => {
-    setConnection(null)
-    setCode('')
-    setReceiveStatus('idle')
+  function reset() {
+    setOffer(undefined)
+    setComplete(false)
+    setSelected([])
+    setError('')
+    createOffer.reset()
+    finish.reset()
   }
 
-  // Completed
-  if (receiveStatus === 'completed') {
-    return (
-      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 text-center">
-        <ShieldCheck size={48} className="text-success mx-auto" />
-        <p className="text-tx-primary font-semibold text-lg">Données reçues !</p>
-        <Button variant="secondary" onClick={resetState}>Recevoir un autre transfert</Button>
-      </div>
-    )
-  }
-
-  // Failed
-  if (receiveStatus === 'failed') {
-    return (
-      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 text-center">
-        <ShieldAlert size={48} className="text-danger mx-auto" />
-        <p className="text-tx-primary font-semibold">Réception échouée</p>
-        <Button variant="secondary" onClick={resetState}>Réessayer</Button>
-      </div>
-    )
-  }
-
-  // Transferring
-  if (receiveStatus === 'transferring') {
-    return (
-      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 items-center">
-        <Loader2 size={36} className="text-accent animate-spin" />
-        <p className="text-tx-primary font-medium">Réception en cours…</p>
-        {connection && <SecurityBadge method={connection.connection_method} />}
-      </div>
-    )
-  }
-
-  // Confirming
-  if (connection && receiveStatus === 'confirming') {
-    return (
-      <div className="flex flex-col gap-5">
-        <SecurityBadge method={connection.connection_method} />
-
-        {/* Safety number */}
-        <div className="bg-warning-muted border border-warning rounded-xl p-6 text-center shadow-[inset_0_0_20px_rgba(245,158,11,0.05)]">
-          <ShieldAlert size={28} className="text-warning mx-auto mb-3" />
-          <p className="text-tx-primary font-semibold">Vérifiez le Safety Number</p>
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-5 my-5 bg-surface/50 p-4 rounded-xl border border-warning/20">
-            <SafetyIdenticon value={connection.safety_number || ''} />
-            <p className="font-mono text-2xl text-tx-primary tracking-[0.2em] font-medium">
-              {connection.safety_number}
-            </p>
-          </div>
-          <p className="text-tx-secondary text-sm">
-            Comparez le code <strong>et</strong> le motif coloré : chaque couleur doit être à la <strong>même position</strong> sur les deux appareils
-          </p>
-        </div>
-
-        {/* Peer info */}
-        <div className="bg-surface border border-bd rounded-xl p-5">
-          <p className="text-tx-secondary text-sm">
-            Pair : <strong className="text-tx-primary">{connection.peer_name}</strong>
-          </p>
-          {connection.items.length > 0 && (
-            <p className="text-tx-secondary text-sm mt-2">
-              {connection.items.length} élément(s) — {formatSize(connection.total_size)}
-            </p>
-          )}
-        </div>
-
-        <div className="flex flex-col sm:flex-row gap-3 w-full">
-          <Button icon={ShieldCheck} onClick={() => confirmMut.mutate(true)} loading={confirmMut.isPending} className="flex-1 w-full">
-            Confirmer et recevoir
-          </Button>
-          <Button variant="danger" icon={X} onClick={() => confirmMut.mutate(false)} className="flex-1 w-full">
-            Refuser
-          </Button>
-        </div>
-      </div>
-    )
-  }
-
-  // Idle
-  return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <span className="text-sm text-tx-secondary mb-2 block font-medium">Code Wormhole reçu du sender</span>
-        <input
-          type="text"
-          value={code}
-          onChange={e => setCode(e.target.value)}
-          placeholder="ex: 42-alpha-beacon-drift"
-          className="w-full px-4 py-3 bg-input border border-bd rounded-lg text-tx-primary font-mono text-base outline-none focus:border-accent transition-colors tracking-wide"
-          onKeyDown={e => { if (e.key === 'Enter' && code.trim()) connectMut.mutate() }}
-        />
-      </div>
-      <Button
-        icon={Download}
-        onClick={() => { setReceiveStatus('connecting'); connectMut.mutate() }}
-        disabled={!code.trim()}
-        loading={connectMut.isPending}
-      >
-        {connectMut.isPending ? 'Connexion en cours…' : 'Se connecter'}
-      </Button>
-    </div>
-  )
-}
-
-/* ─── SecurityBadge ─── */
-function SecurityBadge({ method }: { method: string }) {
-  const isSecure = method.includes('IPv6') || method.includes('mDNS') || method.includes('Local') || method.includes('TLS') || method.includes('PQC')
-
-  return (
-    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full w-fit border ${isSecure ? 'bg-success-muted border-success/30 text-success' : 'bg-warning-muted border-warning/30 text-warning'}`}>
-      {isSecure ? <ShieldCheck size={16} /> : <WifiOff size={16} />}
-      <span className="text-xs font-medium">{method}</span>
-      <Shield size={14} className="ml-1 opacity-70" />
-      <span className="text-xs opacity-90">E2E PQC</span>
-    </div>
-  )
-}
-
-/* ─── TrustedPeers ─── */
-function TrustedPeers({ pendingItems, onClearPending }: { pendingItems: { type: string; ids: number[] } | null; onClearPending: () => void }) {
-  const { toast } = useToast()
-  const qc = useQueryClient()
-  const [syncEnabled, setSyncEnabled] = useState<Record<string, boolean>>({})
-  const autoSyncingRef = useRef<Set<string>>(new Set())
-  const lastAutoSyncRef = useRef<Record<string, number>>({})
-  // Sender flow state: offer created after clicking a discovered peer
-  const [offer, setOffer] = useState<TransferOffer | null>(null)
-  const [copied, setCopied] = useState(false)
-  const [transferStatus, setTransferStatus] = useState<string>('idle')
-  const [safetyNumber, setSafetyNumber] = useState<string | null>(null)
-  const [peerName, setPeerName] = useState<string | null>(null)
-  const pollRef = useRef<number | null>(null)
-
-  const { data: peers = [], isLoading } = useQuery({
-    queryKey: ['trustedPeers'],
-    queryFn: transfer.getTrustedPeers,
+  const createOffer = useMutation({
+    mutationFn: () => transfer.createOffer(kind, availableSelection, crossNetwork),
+    onSuccess: setOffer,
   })
-
-  const { data: discovered = [], refetch: rescan, isFetching: isScanning } = useQuery({
-    queryKey: ['discoveredPeers'],
-    queryFn: transfer.scanLocalNetwork,
-    refetchInterval: 10000,
-  })
-
-  // Visibility state
-  const { data: isVisible = false } = useQuery({
-    queryKey: ['transferVisibility'],
-    queryFn: transfer.getVisibility,
-  })
-
-  const visibilityMut = useMutation({
-    mutationFn: (visible: boolean) => transfer.setVisibility(visible),
-    onSuccess: (visible) => {
-      qc.invalidateQueries({ queryKey: ['transferVisibility'] })
-      toast(visible ? 'Visible sur le réseau' : 'Masqué du réseau', visible ? 'success' : 'info')
-    },
-    onError: () => toast('Erreur changement visibilité', 'error'),
-  })
-
-  const revokeMut = useMutation({
-    mutationFn: (fp: string) => transfer.revokeTrust(fp),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['trustedPeers'] }); toast('Confiance révoquée', 'success') },
-    onError: () => toast('Erreur', 'error'),
-  })
-
-  // ── Sender flow: create offer when clicking a discovered peer ──
-  const createOfferMut = useMutation({
-    mutationFn: (crossNetwork: boolean = false) => {
-      if (!pendingItems) throw new Error('Aucun élément sélectionné')
-      return transfer.createOffer(pendingItems.type, pendingItems.ids, crossNetwork)
-    },
-    onSuccess: (data) => {
-      setOffer(data)
-      setTransferStatus('waiting')
-      setSafetyNumber(null)
-      toast('Offre créée — partagez le code avec le destinataire', 'success')
-    },
-    onError: (e: any) => toast(e?.toString() || 'Erreur création offre', 'error'),
-  })
-
-  const cancelMut = useMutation({
-    mutationFn: (id: string) => transfer.cancel(id),
-    onSuccess: () => {
-      setOffer(null)
-      setTransferStatus('idle')
-      setSafetyNumber(null)
-      setPeerName(null)
-    },
-  })
-
-  const confirmMut = useMutation({
-    mutationFn: (confirmed: boolean) =>
-      transfer.confirmAndExecute(offer!.transfer_id, confirmed),
-    onSuccess: (ok) => {
-      if (ok) { setTransferStatus('transferring'); toast('Transfert en cours…', 'success') }
-      else { setOffer(null); setSafetyNumber(null); setTransferStatus('idle'); toast('Transfert annulé', 'info') }
-    },
-    onError: (e: any) => toast(e?.toString() || 'Erreur', 'error'),
-  })
-
-  // Poll transfer status after creating offer
-  useEffect(() => {
-    if (!offer) return
-    pollRef.current = window.setInterval(async () => {
-      try {
-        const status = await transfer.getStatus(offer.transfer_id)
-        if (!status) return
-        if (status.safety_number && !safetyNumber) {
-          setSafetyNumber(status.safety_number)
-          setPeerName(status.peer_name || null)
-          setTransferStatus('confirming')
-        }
-        if (status.state === 'Completed') {
-          setTransferStatus('completed')
-          qc.invalidateQueries({ queryKey: ['passwords'] })
-          qc.invalidateQueries({ queryKey: ['secureFiles'] })
-          qc.invalidateQueries({ queryKey: ['secureKeys'] })
-          toast('Transfert terminé avec succès !', 'success')
-          if (pollRef.current) window.clearInterval(pollRef.current)
-        }
-        if (typeof status.state === 'object' && 'Failed' in status.state) {
-          setTransferStatus('failed')
-          toast((status.state as any).Failed.reason || 'Transfert échoué', 'error')
-          if (pollRef.current) window.clearInterval(pollRef.current)
-        }
-        if (typeof status.state === 'object' && 'Transferring' in status.state) {
-          setTransferStatus('transferring')
-        }
-      } catch { /* ignore */ }
-    }, 2000)
-    return () => { if (pollRef.current) window.clearInterval(pollRef.current) }
-  }, [offer, safetyNumber, toast])
-
-  const handleCopy = async () => {
-    if (!offer) return
-    try {
-      await navigator.clipboard.writeText(offer.wormhole_code)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch { toast('Erreur copie', 'error') }
-  }
-
-  const resetSenderFlow = () => {
-    setOffer(null)
-    setTransferStatus('idle')
-    setSafetyNumber(null)
-    setPeerName(null)
-    onClearPending()
-  }
-
-  // Fetch sync settings from backend to initialize toggle state
-  const { data: syncSettings } = useQuery({
-    queryKey: ['syncSettings'],
-    queryFn: transfer.getSyncSettings,
-  })
-
-  // Initialize syncEnabled from backend settings
-  useEffect(() => {
-    if (syncSettings?.enabled) {
-      const enabledMap: Record<string, boolean> = {}
-      for (const device of syncSettings.devices) {
-        enabledMap[device.verifying_key] = true
+  const finish = useMutation({
+    mutationFn: (accept: boolean) => accept
+      ? transfer.confirmAndExecute(offer!.transfer_id, true)
+      : transfer.cancel(offer!.transfer_id),
+    onSuccess: (ok, accept) => {
+      if (!accept) {
+        reset()
+      } else if (ok) {
+        setComplete(true)
+        invalidateVault(client)
+      } else {
+        setError('L’autre appareil a refusé le transfert.')
       }
-      setSyncEnabled(prev => ({ ...prev, ...enabledMap }))
+    },
+    onError: (reason, accept) => {
+      if (accept) setError(errorMessage(reason))
+    },
+  })
+
+  if (complete) return <TransferOutcome success onReset={reset} />
+  const transferState = status.data?.state
+  const remoteError = typeof transferState === 'object' && 'Failed' in transferState ? transferState.Failed.reason : ''
+  if (remoteError || error) return <TransferOutcome success={false} error={remoteError || error} onReset={reset} />
+  if (offer) {
+    if (finish.isPending && finish.variables === true) {
+      return <section className="workspace-panel workspace-stack" role="status">
+        <h2>Envoi en cours</h2><p>Laissez les deux appareils connectés jusqu’à la confirmation.</p>
+        <progress aria-label="Envoi en cours" />
+      </section>
     }
-  }, [syncSettings])
-
-  const toggleSync = async (fingerprint: string) => {
-    const newValue = !syncEnabled[fingerprint]
-    setSyncEnabled(prev => ({ ...prev, [fingerprint]: newValue }))
-    try {
-      await transfer.setSyncEnabled(newValue)
-      toast(
-        newValue
-          ? 'Synchronisation activée — les transferts seront signés avec ML-DSA-65'
-          : 'Synchronisation désactivée',
-        newValue ? 'success' : 'info',
-      )
-      qc.invalidateQueries({ queryKey: ['syncSettings'] })
-    } catch {
-      // Revert on error
-      setSyncEnabled(prev => ({ ...prev, [fingerprint]: !newValue }))
-      toast('Erreur changement synchronisation', 'error')
+    if (status.data?.safety_number) {
+      return <Confirmation number={status.data.safety_number} peer={status.data.peer_name} direction="envoyer"
+        pending={finish.isPending} onConfirm={() => finish.mutate(true)} onReject={() => finish.mutate(false)}>
+        {finish.isError && <p role="alert" className="workspace-error">{errorMessage(finish.error)}</p>}
+      </Confirmation>
     }
-  }
-
-  // Auto-sync: when a verified (paired) peer is discovered on the network, sync automatically
-  useEffect(() => {
-    if (!syncSettings?.enabled || discovered.length === 0) return
-
-    const verifiedPeers = discovered.filter(p => p.verified)
-    if (verifiedPeers.length === 0) return
-
-    const AUTO_SYNC_COOLDOWN_MS = 60_000 // 1 minute minimum between auto-syncs per peer
-
-    for (const peer of verifiedPeers) {
-      const peerKey = `${peer.addr}:${peer.port}`
-      const lastSync = lastAutoSyncRef.current[peerKey] || 0
-      const now = Date.now()
-
-      if (now - lastSync < AUTO_SYNC_COOLDOWN_MS) continue
-      if (autoSyncingRef.current.has(peerKey)) continue
-
-      autoSyncingRef.current.add(peerKey)
-      lastAutoSyncRef.current[peerKey] = now
-
-      transfer.autoSyncWithPeer(peer.addr, peer.port)
-        .then(result => {
-          if (result.success && result.merged_count > 0) {
-            toast(`Sync auto avec ${result.peer_name}: ${result.merged_count} entrée(s) fusionnée(s)`, 'success')
-            qc.invalidateQueries({ queryKey: ['trustedPeers'] })
-          }
-        })
-        .catch(() => { /* auto-sync silently fails — will retry next scan cycle */ })
-        .finally(() => {
-          autoSyncingRef.current.delete(peerKey)
-        })
-    }
-  }, [discovered, syncSettings])
-
-  // ── Sender flow overlays (offer created, waiting, confirming, transferring, done) ──
-  if (offer && transferStatus === 'completed') {
     return (
-      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 text-center">
-        <ShieldCheck size={48} className="text-success mx-auto" />
-        <p className="text-tx-primary font-semibold text-lg">Transfert terminé !</p>
-        <Button variant="secondary" onClick={resetSenderFlow}>Nouveau transfert</Button>
-      </div>
-    )
-  }
-
-  if (offer && transferStatus === 'failed') {
-    return (
-      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 text-center">
-        <ShieldAlert size={48} className="text-danger mx-auto" />
-        <p className="text-tx-primary font-semibold">Transfert échoué</p>
-        <Button variant="secondary" onClick={resetSenderFlow}>Réessayer</Button>
-      </div>
-    )
-  }
-
-  if (offer && transferStatus === 'transferring') {
-    return (
-      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5 items-center">
-        <Loader2 size={36} className="text-accent animate-spin" />
-        <p className="text-tx-primary font-medium">Transfert en cours…</p>
-        <SecurityBadge method={offer.connection_method} />
-      </div>
-    )
-  }
-
-  // Safety number confirmation (sender side)
-  if (offer && safetyNumber && transferStatus === 'confirming') {
-    return (
-      <div className="flex flex-col gap-5">
-        <SecurityBadge method={offer.connection_method} />
-        <div className="bg-warning-muted border border-warning rounded-xl p-6 text-center shadow-[inset_0_0_20px_rgba(245,158,11,0.05)]">
-          <ShieldAlert size={28} className="text-warning mx-auto mb-3" />
-          <p className="text-tx-primary font-semibold">Vérifiez le Safety Number</p>
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-5 my-5 bg-surface/50 p-4 rounded-xl border border-warning/20">
-            <SafetyIdenticon value={safetyNumber} />
-            <p className="font-mono text-2xl text-tx-primary tracking-[0.2em] font-medium">
-              {safetyNumber}
-            </p>
-          </div>
-          <p className="text-tx-secondary text-sm">
-            Comparez le code <strong>et</strong> le motif coloré : chaque couleur doit être à la <strong>même position</strong> sur les deux appareils
-          </p>
-          {peerName && (
-            <p className="text-tx-muted text-xs mt-3 bg-surface/50 p-2 rounded-lg inline-block">
-              Pair : <strong>{peerName}</strong>
-            </p>
-          )}
+      <section className="workspace-panel workspace-stack">
+        <h2>Transmettre le code temporaire</h2>
+        <p>Sur l’autre appareil, ouvrez <strong>Transferts → Recevoir</strong> et saisissez ce code.</p>
+        <TemporaryCode code={offer.wormhole_code} />
+        <div className="workspace-actions">
+          <p role="status" className="workspace-label"><Spinner size={15} /> En attente du destinataire</p>
+          <Button variant="secondary" disabled={finish.isPending} onClick={() => finish.mutate(false)}>Annuler l’envoi</Button>
         </div>
-        <div className="flex flex-col sm:flex-row gap-3 w-full">
-          <Button icon={ShieldCheck} onClick={() => confirmMut.mutate(true)} loading={confirmMut.isPending} className="flex-1 w-full">
-            Confirmer et envoyer
-          </Button>
-          <Button variant="danger" icon={X} onClick={() => confirmMut.mutate(false)} className="flex-1 w-full">Refuser</Button>
-        </div>
-      </div>
-    )
-  }
-
-  // Offer created — waiting for receiver to enter the code
-  if (offer && transferStatus === 'waiting') {
-    return (
-      <div className="bg-surface border border-bd rounded-xl p-6 flex flex-col gap-5">
-        <div className="flex items-center gap-3">
-          <Radio size={20} className="text-accent animate-pulse" />
-          <span className="text-tx-primary font-medium">En attente du destinataire…</span>
-        </div>
-        <div>
-          <span className="text-sm text-tx-secondary mb-2 block font-medium">Code Wormhole — partagez-le avec le destinataire</span>
-          <div className="bg-input border border-bd rounded-lg p-4 font-mono text-xl text-center tracking-[0.15em] text-accent-text select-all shadow-inner">
-            {offer.wormhole_code}
-          </div>
-          <p className="text-tx-muted text-xs mt-3 text-center">
-            Le destinataire doit saisir ce code dans l'onglet « Recevoir »
-          </p>
-        </div>
-        <div className="flex flex-col sm:flex-row gap-3">
-          <Button variant="secondary" icon={copied ? Check : Copy} onClick={handleCopy} className="flex-1">
-            {copied ? 'Copié !' : 'Copier le code'}
-          </Button>
-          <Button variant="danger" icon={X} onClick={() => { cancelMut.mutate(offer.transfer_id); resetSenderFlow() }} className="flex-1">
-            Annuler
-          </Button>
-        </div>
-        <SecurityBadge method={offer.connection_method} />
-      </div>
+        {(status.isError || finish.isError) && <p role="alert" className="workspace-error">
+          {errorMessage(status.error || finish.error)}
+        </p>}
+      </section>
     )
   }
 
   return (
-    <div className="flex flex-col gap-5">
-      {/* Visibility toggle */}
-      <div className={`flex items-center justify-between p-4 sm:p-5 rounded-xl border transition-colors ${isVisible ? 'bg-success-muted border-success/30' : 'bg-surface border-bd'}`}>
-        <div className="flex items-center gap-3">
-          {isVisible
-            ? <Wifi size={20} className="text-success shrink-0" />
-            : <WifiOff size={20} className="text-tx-muted shrink-0" />
-          }
-          <div>
-            <div className={`text-sm font-semibold ${isVisible ? 'text-success' : 'text-tx-primary'}`}>
-              {isVisible ? 'Visible sur le réseau' : 'Masqué du réseau'}
-            </div>
-            <div className={`text-xs mt-0.5 ${isVisible ? 'text-success/80' : 'text-tx-secondary'}`}>
-              {isVisible
-                ? 'Les autres appareils peuvent vous découvrir'
-                : 'Activez pour être détectable par les autres appareils'
-              }
-            </div>
-          </div>
-        </div>
-        <button
-          onClick={() => visibilityMut.mutate(!isVisible)}
-          disabled={visibilityMut.isPending}
-          className={`relative w-11 h-6 rounded-full transition-colors focus:outline-none ${visibilityMut.isPending ? 'opacity-60' : ''} ${isVisible ? 'bg-success' : 'bg-input border border-bd'}`}
-        >
-          <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform shadow-sm ${isVisible ? 'translate-x-5' : 'translate-x-0'}`} />
+    <section className="workspace-panel workspace-stack" aria-labelledby="select-transfer-items">
+      <h2 id="select-transfer-items">Éléments à envoyer</h2>
+      <div className="workspace-segments transfer-types" role="group" aria-label="Type d’élément">
+        <button type="button" aria-pressed={kind === 'passwords'} onClick={() => { setKind('passwords'); setSelected([]) }}>
+          <KeyRound size={17} aria-hidden="true" /> Mots de passe
+        </button>
+        <button type="button" aria-pressed={kind === 'files'} onClick={() => { setKind('files'); setSelected([]) }}>
+          <Files size={17} aria-hidden="true" /> Fichiers
         </button>
       </div>
-
-      {/* Pending items banner */}
-      {pendingItems && !offer && (
-        <div className="bg-accent-muted border border-accent rounded-xl p-4 flex items-center gap-3">
-          <Send size={18} className="text-accent shrink-0" />
-          <div className="flex-1">
-            <p className="text-tx-primary text-sm font-semibold m-0">
-              {pendingItems.ids.length} élément(s) sélectionné(s)
-            </p>
-            <p className="text-tx-secondary text-xs mt-1 mb-0">
-              Choisissez un destinataire ci-dessous pour lancer le transfert
-            </p>
-          </div>
-          <Button variant="ghost" size="sm" icon={X} onClick={resetSenderFlow}>Annuler</Button>
-        </div>
+      {query.isPending ? <p role="status">Chargement du coffre…</p> : query.isError ? (
+        <div className="workspace-actions"><p role="alert">Impossible de charger les éléments.</p><Button variant="secondary" onClick={() => void query.refetch()}>Réessayer</Button></div>
+      ) : items.length === 0 ? <p className="workspace-empty">Aucun élément de ce type dans votre coffre.</p> : (
+        <ul className="workspace-list transfer-items">
+          {items.map((item) => <li key={item.id}>
+            <label className="workspace-row transfer-select">
+              <input type="checkbox" checked={selected.includes(item.id)} disabled={!item.allowed || createOffer.isPending || disabled}
+                onChange={(event) => setSelected(event.target.checked ? [...selected, item.id] : selected.filter((id) => id !== item.id))} />
+              <span className="workspace-row-copy">
+                <strong>{item.name}</strong>
+                {item.detail && <span>{item.detail}{!item.allowed && ' · Limite de 32 Mio'}</span>}
+              </span>
+            </label>
+          </li>)}
+        </ul>
       )}
-
-      {/* Discovered on network */}
-      <div className="bg-surface border border-bd rounded-xl p-5 sm:p-6">
-        <div className="flex justify-between items-center mb-4">
-          <h3 className="text-tx-primary text-base font-semibold m-0 flex items-center gap-2">
-            <Wifi size={16} className="text-accent" /> Réseau local
-          </h3>
-          <Button variant="ghost" size="sm" icon={RefreshCw} onClick={() => rescan()} loading={isScanning}>
-            Scanner
-          </Button>
-        </div>
-        {discovered.length === 0 ? (
-          <div className="text-center p-4 flex flex-col items-center gap-3">
-            {isScanning && <SonarScanner />}
-            <p className="text-tx-muted text-sm m-0">
-              {isScanning ? 'Recherche de pairs sur le réseau…' : 'Aucun pair détecté sur le réseau'}
-            </p>
-            <p className="text-tx-muted text-xs mt-2 mb-0">
-              Assurez-vous que l'autre appareil est sur le même réseau Wi-Fi
-            </p>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {discovered.map((p, i) => (
-
-
-              <div key={i} className="px-3 py-2.5 rounded-lg bg-elevated border border-transparent transition-all duration-150 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-bd/50">
-                <div className="flex items-center gap-2 flex-1 min-w-0 w-full">
-                  <Radio size={14} className="text-accent shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <span className="text-tx-primary text-sm font-medium break-all">{p.name}</span>
-                    <div className="flex flex-wrap gap-2 items-center mt-1">
-                      <Badge variant="info" size="sm">{p.method}</Badge>
-                      <span className="text-tx-muted text-xs font-mono break-all">{p.addr}</span>
-                    </div>
-                  </div>
-                </div>
-                {pendingItems && !offer && (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    icon={Send}
-                    onClick={() => {
-                      setPeerName(p.name)
-                      createOfferMut.mutate(false)
-                    }}
-                    loading={createOfferMut.isPending}
-                    className="w-full sm:w-auto flex-shrink-0"
-                  >
-                    Envoyer à
-                  </Button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+      <label className="workspace-choice">
+        <input type="checkbox" checked={crossNetwork} onChange={(event) => setCrossNetwork(event.target.checked)} />
+        L’autre appareil se trouve sur un réseau différent
+      </label>
+      {crossNetwork && <p className="workspace-label">La connexion directe nécessite une adresse IPv6 publique accessible depuis l’autre appareil.</p>}
+      {createOffer.isError && <p className="workspace-error" role="alert">{errorMessage(createOffer.error)}</p>}
+      <div className="workspace-actions">
+        <Button iconRight={ArrowRight} onClick={() => createOffer.mutate()} loading={createOffer.isPending}
+          disabled={!availableSelection.length || disabled}>Générer le code</Button>
+        <span className="workspace-label">{availableSelection.length} sélectionné{availableSelection.length > 1 ? 's' : ''}</span>
       </div>
-
-      {/* Cross-network / manual send option*/}
-      {/* {pendingItems && !offer && (
-        <div className="bg-surface border border-dashed border-bd rounded-xl p-4 flex flex-col gap-3">
-          <div className="flex items-center gap-3 flex-wrap">
-            <Globe size={18} className="text-tx-secondary shrink-0 hidden sm:block" />
-            <div className="flex-1 min-w-[200px]">
-              <p className="text-tx-primary text-sm font-semibold m-0">
-                Envoyer à distance
-              </p>
-              <p className="text-tx-secondary text-xs mt-1 mb-0">
-                Destinataire sur un autre réseau ? Générez un code à partager
-              </p>
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={Send}
-              onClick={() => createOfferMut.mutate(true)}
-              loading={createOfferMut.isPending}
-              className="w-full sm:w-auto"
-            >
-              Générer un code
-            </Button>
-          </div>
-        </div>
-      )} */}
-
-      {/* ML-DSA-65 Security info */}
-      <div className="bg-accent-muted border border-accent rounded-xl p-4 flex items-start sm:items-center gap-3">
-        <Shield size={20} className="text-accent shrink-0 mt-0.5 sm:mt-0" />
-        <div>
-          <p className="text-tx-primary text-sm font-semibold m-0">
-            Sécurité Post-Quantique ML-DSA-65
-          </p>
-          <p className="text-tx-secondary text-xs mt-1 mb-0">
-            Tous les transferts et synchronisations sont signés avec ML-DSA-65 (Dilithium) pour garantir l'intégrité et l'authenticité des données.
-          </p>
-        </div>
-      </div>
-
-      {/* Trusted peers with sync controls */}
-      <div className="bg-surface border border-bd rounded-xl p-5 sm:p-6">
-        <h3 className="text-tx-primary text-base font-semibold m-0 mb-4 flex items-center gap-2">
-          <Fingerprint size={16} className="text-accent" /> Pairs de confiance
-        </h3>
-        {isLoading ? (
-          <div className="flex justify-center p-6"><Spinner size={24} /></div>
-        ) : peers.length === 0 ? (
-          <EmptyState icon={Users} title="Aucun pair de confiance" description="Scannez le réseau et ajoutez des pairs, ou effectuez un transfert réussi" />
-        ) : (
-          <div className="flex flex-col gap-3">
-            {peers.map(p => (
-              <div key={p.fingerprint} className="p-3.5 rounded-xl bg-elevated border border-bd/50">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="min-w-0 flex-1 w-full">
-                    <div className="text-tx-primary text-sm font-semibold break-all">{p.name}</div>
-                    <div className="text-tx-muted text-xs font-mono mt-1 break-all">{p.fingerprint}</div>
-                    <div className="text-tx-muted text-xs mt-1">
-                      {p.transfer_count} transfert(s) · Vu {new Date(p.last_seen).toLocaleDateString('fr-FR')}
-                    </div>
-                  </div>
-                  <div className="flex gap-2 items-center justify-end sm:justify-start w-full sm:w-auto">
-                    <Button variant="ghost" size="sm" icon={Trash2} onClick={() => {
-                      if (confirm(`Révoquer la confiance de ${p.name} ?`)) revokeMut.mutate(p.fingerprint)
-                    }} />
-                  </div>
-                </div>
-                {/* Sync toggle */}
-                <div className="mt-3 pt-3 border-t border-bd/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <RefreshCw size={14} className={syncEnabled[p.fingerprint] ? 'text-accent' : 'text-tx-muted'} />
-                    <span className="text-tx-secondary text-xs font-medium">
-                      Synchronisation automatique
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => toggleSync(p.fingerprint)}
-                    className={`relative w-9 h-5 rounded-full transition-colors focus:outline-none self-end sm:self-auto ${syncEnabled[p.fingerprint] ? 'bg-accent' : 'bg-input border border-bd'}`}
-                  >
-                    <div className={`absolute top-[2px] left-[2px] w-4 h-4 bg-white rounded-full transition-transform shadow-sm ${syncEnabled[p.fingerprint] ? 'translate-x-[16px]' : 'translate-x-0'}`} />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
+    </section>
   )
 }
 
-/* ─── Helpers ─── */
-function formatSize(bytes: number): string {
-  if (bytes === 0) return '0 o'
-  const units = ['o', 'Ko', 'Mo', 'Go']
-  const i = Math.floor(Math.log(bytes) / Math.log(1024))
-  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
-}
+function ReceiveTransfer({ disabled }: { disabled: boolean }) {
+  const client = useQueryClient()
+  const [code, setCode] = useState('')
+  const [connection, setConnection] = useState<TransferConnection>()
+  const [complete, setComplete] = useState(false)
+  const [failure, setFailure] = useState('')
 
-/* ─── TransferPage ─── */
-export default function TransferPage() {
-  const [tab, setTab] = useState<Tab>('send')
-  // Shared sender state: items selected in Send tab, used in Peers tab
-  const [pendingItems, setPendingItems] = useState<{ type: string; ids: number[] } | null>(null)
+  function reset() {
+    setCode('')
+    setConnection(undefined)
+    setComplete(false)
+    setFailure('')
+    connect.reset()
+    finish.reset()
+  }
 
-  const tabs: { key: Tab; label: string; icon: typeof Send }[] = [
-    { key: 'send', label: 'Envoyer', icon: Send },
-    { key: 'receive', label: 'Recevoir', icon: Download },
-    { key: 'peers', label: 'Pairs', icon: Users },
-  ]
+  const connect = useMutation({
+    mutationFn: () => transfer.connect(code.trim()),
+    onSuccess: (response) => { setCode(''); setConnection(response) },
+  })
+  const finish = useMutation({
+    mutationFn: (accept: boolean) => transfer.confirmAndExecute(connection!.transfer_id, accept),
+    onSuccess: (ok, accept) => {
+      if (!accept) return reset()
+      if (ok) {
+        invalidateVault(client)
+        setComplete(true)
+      } else {
+        setFailure('L’autre appareil a refusé le transfert.')
+      }
+    },
+    onError: (reason, accept) => { if (accept) setFailure(errorMessage(reason)) },
+  })
+
+  if (complete || failure) return <TransferOutcome receive success={complete} error={failure} onReset={reset} />
+  if (finish.isPending && finish.variables === true) {
+    return <section className="workspace-panel workspace-stack" role="status">
+      <h2>Réception en cours</h2><progress aria-label="Réception en cours" />
+    </section>
+  }
+  if (connection) {
+    return <Confirmation number={connection.safety_number} peer={connection.peer_name} direction="recevoir"
+      pending={finish.isPending} onConfirm={() => finish.mutate(true)} onReject={() => finish.mutate(false)}>
+      <p>{connection.items.length} élément{connection.items.length === 1 ? '' : 's'} à recevoir.</p>
+      {finish.isError && <p role="alert" className="workspace-error">{errorMessage(finish.error)}</p>}
+    </Confirmation>
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (code.trim() && !disabled && !connect.isPending) connect.mutate()
+  }
 
   return (
-    <AppShell>
-      <div className="page-content flex flex-col gap-6 w-full max-w-4xl mx-auto pb-24 md:pb-6">
-        {/* Header */}
-        <div className="page-header flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="font-display text-2xl sm:text-3xl text-tx-primary flex items-center gap-3 m-0">
-              <ArrowLeftRight size={28} className="text-accent" />
-              Vault Secure Transfer
-            </h1>
-            <p className="text-tx-secondary text-sm mt-1">
-              Transfert P2P chiffré end-to-end · Post-Quantum
-            </p>
-          </div>
-          <SecurityBadge method="PQC ML-KEM-768 + SPAKE2" />
-        </div>
+    <form onSubmit={submit} className="workspace-panel workspace-stack">
+      <h2>Ouvrir un transfert</h2>
+      <p>Demandez à l’expéditeur le code temporaire généré sur son appareil.</p>
+      <Input label="Code de transfert" value={code} onChange={(event) => setCode(event.target.value)}
+        autoComplete="off" autoCapitalize="none" spellCheck={false} required disabled={connect.isPending || disabled} />
+      {connect.isError && <p role="alert" className="workspace-error">{errorMessage(connect.error)}</p>}
+      <div><Button icon={Download} type="submit" loading={connect.isPending} disabled={disabled || !code.trim()}>Rejoindre le transfert</Button></div>
+    </form>
+  )
+}
 
-        {/* Tabs */}
-        <div className="bg-surface p-1 rounded-xl border border-bd flex gap-1 w-full">
-          {tabs.map(t => {
-            const active = tab === t.key
-            const Icon = t.icon
-            return (
-              <button
-                key={t.key}
-                onClick={() => setTab(t.key)}
-                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 text-xs sm:text-sm rounded-lg font-body transition-all duration-200 ${active ? 'bg-elevated text-tx-primary font-medium shadow-sm' : 'bg-transparent text-tx-muted hover:text-tx-secondary'
-                  }`}
-              >
-                <Icon size={16} />
-                <span className="hidden min-[380px]:inline">{t.label}</span>
-              </button>
-            )
-          })}
-        </div>
+const views = [
+  { id: 'send', name: 'Envoyer', icon: Send },
+  { id: 'receive', name: 'Recevoir', icon: Download },
+  { id: 'devices', name: 'Appareils', icon: Smartphone },
+] as const
+type View = typeof views[number]['id']
 
-        {/* Tab content */}
-        <div className="animate-fade-in w-full">
-          {tab === 'send' && <WormholeSend onItemsSelected={(type, ids) => { setPendingItems({ type, ids }); setTab('peers') }} />}
-          {tab === 'receive' && <WormholeReceive />}
-          {tab === 'peers' && <TrustedPeers pendingItems={pendingItems} onClearPending={() => setPendingItems(null)} />}
-        </div>
-      </div>
-    </AppShell>
+export default function TransferPage() {
+  const [params, setParams] = useSearchParams()
+  const view = views.find(({ id }) => id === params.get('vue'))?.id ?? 'send'
+  const [visited, setVisited] = useState<View[]>([view])
+  const isolation = useQuery({ queryKey: ['isolation-mode'], queryFn: isolationMode.get, staleTime: 0 })
+  const disabled = isolation.data === true
+
+  return (
+    <WorkspacePage title="Transférer des données" description="Échangez des fichiers et des identifiants entre vos appareils.">
+      {disabled && <p className="workspace-error" role="status">Le mode isolation bloque les transferts et l’appairage.</p>}
+      <nav aria-label="Parcours de transfert" className="workspace-segments transfer-modes">
+        {views.map(({ id, name, icon: Icon }) => (
+          <button key={id} type="button" aria-current={view === id ? 'page' : undefined} onClick={() => {
+            setVisited((previous) => previous.includes(id) ? previous : [...previous, id])
+            setParams(id === 'send' ? {} : { vue: id }, { replace: true })
+          }}><Icon size={18} aria-hidden="true" />{name}</button>
+        ))}
+      </nav>
+      {(visited.includes('send') || view === 'send') && <div hidden={view !== 'send'}><SendTransfer disabled={disabled} /></div>}
+      {(visited.includes('receive') || view === 'receive') && <div hidden={view !== 'receive'}><ReceiveTransfer disabled={disabled} /></div>}
+      {(visited.includes('devices') || view === 'devices') && <div hidden={view !== 'devices'}><TransferDevices active={view === 'devices'} disabled={disabled} /></div>}
+    </WorkspacePage>
   )
 }

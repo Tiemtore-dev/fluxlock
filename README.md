@@ -40,7 +40,7 @@ Gérez vos mots de passe, chiffrez vos fichiers et transférez vos données en t
 Stockez, organisez et générez des mots de passe forts en un clic. Chaque mot de passe est chiffré individuellement avant d'être enregistré. Un indicateur de force vous aide à choisir des mots de passe solides.
 
 ### 📁 Coffre-fort de fichiers
-Chiffrez n'importe quel fichier, quelle que soit sa taille. Le chiffrement s'effectue par flux (streaming), ce qui permet de traiter même les fichiers volumineux sans surcharger la mémoire.
+Chiffrez n'importe quel fichier, quelle que soit sa taille. Les fichiers importés par chemin sont chiffrés par flux. L’import Android via le sélecteur de documents et les transferts P2P sont limités à 32 Mio par fichier.
 
 ### 🔑 Clés cryptographiques
 Générez et gérez des paires de clés de chiffrement — aussi bien classiques (Ed25519, X25519) que post-quantiques (ML-KEM-768, ML-DSA-65).
@@ -55,10 +55,10 @@ FluXlock surveille votre système de fichiers en temps réel. Si un comportement
 Déverrouillez votre coffre-fort avec Touch ID (macOS), Windows Hello ou le capteur biométrique de votre téléphone Android. Le mot de passe maître reste toujours requis au premier démarrage.
 
 ### 📋 Journal d'audit signé
-Chaque action sensible est enregistrée dans un journal inviolable. Les entrées sont signées numériquement et liées entre elles — toute altération est immédiatement détectable.
+Le journal signé peut détecter des modifications dans les entrées présentes. Les événements et leur historique sont conservés sur l’appareil.
 
 ### 💾 Backup & Restauration
-Sauvegardez l'intégralité de votre coffre-fort dans un fichier chiffré. Restaurez-le en un clic sur n'importe quel appareil.
+Exportez la base et les fichiers du coffre dans une archive chiffrée. La restauration vérifie les mots de passe de la sauvegarde et du coffre actuel.
 
 <br>
 
@@ -125,11 +125,11 @@ Les ordinateurs quantiques menaceront un jour les algorithmes de chiffrement cla
 
 Vos données ne sont jamais stockées en clair. Le mot de passe maître est dérivé via **Argon2id** (résistant aux attaques GPU), puis utilisé pour chiffrer chaque élément avec **ChaCha20-Poly1305**.
 
-### Zéro confiance, zéro trace
+### Protection des clés en session
 
-- Les clés sont effacées de la mémoire dès qu'elles ne sont plus utilisées
-- La mémoire sensible est verrouillée pour ne jamais être paginée sur le disque
-- Les comparaisons de secrets s'effectuent en temps constant
+- Les buffers de clés protégés sont effacés lors de leur destruction
+- Le verrouillage mémoire est tenté sur les plateformes Unix
+- La comparaison du vérificateur de mot de passe se fait en temps constant
 - Pas de serveur central — vos données restent sur votre appareil
 
 ### Défense active

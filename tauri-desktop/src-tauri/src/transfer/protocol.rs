@@ -107,6 +107,7 @@ pub enum TransferMessage {
     SyncPairRequest {
         device_name: String,
         verifying_key_b64: String,
+        trust_data: String,
     },
 
     /// Réponse d'appairage sync : accepte/refuse et renvoie sa propre clé ML-DSA-65
@@ -114,23 +115,7 @@ pub enum TransferMessage {
         device_name: String,
         verifying_key_b64: String,
         accepted: bool,
-    },
-
-    /// Demande de sync automatique : un appareil appairé envoie sa VK + trust store signé
-    AutoSyncRequest {
-        device_name: String,
-        verifying_key_b64: String,
-        /// Trust store signé ML-DSA-65
         trust_data: String,
-    },
-
-    /// Réponse de sync automatique : l'autre appareil renvoie son trust store signé
-    AutoSyncResponse {
-        accepted: bool,
-        device_name: String,
-        verifying_key_b64: String,
-        trust_data: String,
-        merged_count: u32,
     },
 
     /// Erreur
@@ -305,46 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_sync_request_roundtrip() {
-        let msg = TransferMessage::AutoSyncRequest {
-            device_name: "MonPC".to_string(),
-            verifying_key_b64: "dGVzdC1rZXk=".to_string(),
-            trust_data: r#"{"peers":{}}"#.to_string(),
-        };
-        let frame = encode_message(&msg).unwrap();
-        let decoded = decode_message(&frame).unwrap();
-        match decoded {
-            TransferMessage::AutoSyncRequest { device_name, verifying_key_b64, trust_data } => {
-                assert_eq!(device_name, "MonPC");
-                assert_eq!(verifying_key_b64, "dGVzdC1rZXk=");
-                assert!(trust_data.contains("peers"));
-            }
-            _ => panic!("Expected AutoSyncRequest message"),
-        }
-    }
-
-    #[test]
-    fn test_auto_sync_response_roundtrip() {
-        let msg = TransferMessage::AutoSyncResponse {
-            accepted: true,
-            device_name: "Téléphone".to_string(),
-            verifying_key_b64: "a2V5".to_string(),
-            trust_data: "{}".to_string(),
-            merged_count: 3,
-        };
-        let frame = encode_message(&msg).unwrap();
-        let decoded = decode_message(&frame).unwrap();
-        match decoded {
-            TransferMessage::AutoSyncResponse { accepted, device_name, merged_count, .. } => {
-                assert!(accepted);
-                assert_eq!(device_name, "Téléphone");
-                assert_eq!(merged_count, 3);
-            }
-            _ => panic!("Expected AutoSyncResponse message"),
-        }
-    }
-
-    #[test]
     fn test_kem_encapsulation_roundtrip() {
         let msg = TransferMessage::KemEncapsulation {
             ek_bytes: vec![0xAA; 1184], // ML-KEM-768 public key size
@@ -380,11 +325,12 @@ mod tests {
         let msg = TransferMessage::SyncPairRequest {
             device_name: "Desktop".to_string(),
             verifying_key_b64: "dmVyaWZ5aW5nX2tleQ==".to_string(),
+            trust_data: "{}".into(),
         };
         let frame = encode_message(&msg).unwrap();
         let decoded = decode_message(&frame).unwrap();
         match decoded {
-            TransferMessage::SyncPairRequest { device_name, verifying_key_b64 } => {
+            TransferMessage::SyncPairRequest { device_name, verifying_key_b64, .. } => {
                 assert_eq!(device_name, "Desktop");
                 assert_eq!(verifying_key_b64, "dmVyaWZ5aW5nX2tleQ==");
             }

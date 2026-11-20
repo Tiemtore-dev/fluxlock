@@ -53,8 +53,17 @@ pub struct SignedLogManager {
 const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Service Keychain pour la KEK du log signé
-const LOG_KEK_SERVICE: &str = "com.fluxlock.signed-log";
+fn log_kek_service(test_build: bool) -> &'static str {
+    if test_build { "com.fluxlock.signed-log.test" } else { "com.fluxlock.signed-log" }
+}
 const LOG_KEK_ACCOUNT: &str = "signing_key_kek";
+
+#[cfg(test)]
+#[test]
+fn test_build_uses_separate_log_keyring() {
+    assert_eq!(log_kek_service(true), "com.fluxlock.signed-log.test");
+    assert_eq!(log_kek_service(false), "com.fluxlock.signed-log");
+}
 
 /// VULN-005: Récupère ou génère la KEK (Key Encryption Key) pour protéger la clé de signature.
 /// La KEK est stockée dans le Keychain OS, pas sur le disque.
@@ -71,7 +80,7 @@ fn get_or_create_log_kek() -> Result<[u8; 32], String> {
         return Ok(key);
     }
     
-    let entry = keyring::Entry::new(LOG_KEK_SERVICE, LOG_KEK_ACCOUNT)
+    let entry = keyring::Entry::new(log_kek_service(crate::hidden_storage::TEST_BUILD), LOG_KEK_ACCOUNT)
         .map_err(|e| format!("Keyring entry error: {}", e))?;
     
     // Essayer de lire la KEK existante

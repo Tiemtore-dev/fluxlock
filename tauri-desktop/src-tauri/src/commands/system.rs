@@ -134,7 +134,14 @@ pub async fn get_enclave_status() -> Result<secure_storage::EnclaveStatus, Strin
 /// Active ou désactive le mode isolation réseau
 #[tauri::command]
 pub async fn toggle_isolation_mode(state: State<'_, AppState>, enabled: bool) -> Result<String, String> {
+    crate::validate_session(&state).await?;
     *state.isolation_mode.lock().await = enabled;
+    if enabled {
+        if let Some(manager) = state.transfer_manager.lock().await.as_ref() {
+            *manager.visible.lock().await = false;
+            manager.discovery.unregister_mdns_service().await;
+        }
+    }
     let status = if enabled {
         "Mode isolation activé — toutes les fonctionnalités réseau sont désactivées"
     } else {

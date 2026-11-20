@@ -24,7 +24,9 @@ macro_rules! debug_log {
     };
 }
 
-const SERVICE_NAME: &str = "com.fluxlock.app";
+fn service_name(test_build: bool) -> &'static str {
+    if test_build { "com.fluxlock.app.test" } else { "com.fluxlock.app" }
+}
 
 /// Erreurs possibles lors des opérations de stockage sécurisé
 #[derive(Debug)]
@@ -65,13 +67,8 @@ impl From<KeyringError> for SecureStorageError {
 /// - Chiffrement hardware si disponible (Secure Enclave)
 /// - Pas de stockage en RAM non protégée
 pub fn store_encryption_key(user_id: i64, encryption_key: &[u8]) -> Result<(), SecureStorageError> {
-    // On mobile, keyring is unavailable — use private filesystem fallback
-    if cfg!(target_os = "android") || cfg!(target_os = "ios") {
-        return _store_key_file(user_id, encryption_key);
-    }
-
     let username = format!("user_{}", user_id);
-    let entry = Entry::new(SERVICE_NAME, &username)?;
+    let entry = Entry::new(service_name(crate::hidden_storage::TEST_BUILD), &username)?;
     
     // Encoder la clé en base64 pour le stockage
     let mut key_b64 = general_purpose::STANDARD.encode(encryption_key);
@@ -152,183 +149,19 @@ fn _store_key_b64(entry: &Entry, key_b64: &str) -> Result<(), SecureStorageError
 /// - Protection contre memory dumps
 use crate::secure_key::SecureKey;
 
-/// Mobile fallback: store key in app-private filesystem
-///
-/// ## Sécurité
-/// - Sur Android 10+ : le répertoire privé de l'app est chiffré au repos (FBE)
-/// - Sur iOS : le répertoire Documents est protégé par Data Protection
-/// - Permissions restrictives (0o600) empêchent la lecture par d'autres processus
-/// - La suppression écrase le fichier avec des zéros avant deletion
-/// - ⚠️ Un appareil rooté/jailbreaké peut contourner ces protections
-/// - Pour une sécurité maximale, intégrer Android Keystore / iOS Keychain via un plugin Tauri natif
-fn _mobile_key_path(user_id: i64) -> Result<std::path::PathBuf, SecureStorageError> {
-    let dir = crate::hidden_storage::get_hidden_database_dir()
-        .map_err(|e| SecureStorageError::KeyringError(e))?;
-    let keys_dir = dir.join(".keys");
-    std::fs::create_dir_all(&keys_dir)
-        .map_err(|e| SecureStorageError::KeyringError(format!("Cannot create keys dir: {}", e)))?;
-    Ok(keys_dir.join(format!("k_{}.bin", user_id)))
-}
-
-/// V-01 : Dérive une wrapping key unique par installation pour chiffrer le fichier clé.
-///
-/// Schéma : HKDF-SHA256(ikm = device_salt(32B random), info = "fluxlock-mobile-wrap-v1")
-/// Le device_salt est un fichier de 32 octets aléatoires créé une seule fois,
-/// stocké dans le répertoire `.keys/` avec un nom non-évident (`.d`).
-///
-/// Ce n'est PAS équivalent à Android Keystore/iOS Keychain (matériel HSM),
-/// mais ça empêche l'extraction par simple `base64 -d` sur appareil rooté.
-fn _get_or_create_device_wrapping_key(user_id: i64) -> Result<[u8; 32], SecureStorageError> {
-    let dir = crate::hidden_storage::get_hidden_database_dir()
-        .map_err(|e| SecureStorageError::KeyringError(e))?;
-    let keys_dir = dir.join(".keys");
-    std::fs::create_dir_all(&keys_dir)
-        .map_err(|e| SecureStorageError::KeyringError(format!("Cannot create keys dir: {}", e)))?;
-    let salt_path = keys_dir.join(".d");
-
-    let salt: [u8; 32] = if salt_path.exists() {
-        let data = std::fs::read(&salt_path)
-            .map_err(|e| SecureStorageError::KeyringError(format!("Read device salt: {}", e)))?;
-        if data.len() != 32 {
-            return Err(SecureStorageError::KeyringError(
-                "Corrupted device salt file".to_string(),
-            ));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&data);
-        arr
-    } else {
-        use rand::RngCore;
-        let mut salt = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        std::fs::write(&salt_path, &salt)
-            .map_err(|e| SecureStorageError::KeyringError(format!("Write device salt: {}", e)))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&salt_path, std::fs::Permissions::from_mode(0o600));
-        }
-        salt
-    };
-
-    // Derive wrapping key via HKDF-SHA256
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    type HmacSha256 = Hmac<Sha256>;
-
-    // HKDF-Extract
-    let prk = HmacSha256::new_from_slice(b"fluxlock-mobile-wrap-v1")
-        .map_err(|e| SecureStorageError::KeyringError(format!("HMAC init: {}", e)))?
-        .chain_update(&salt)
-        .chain_update(&user_id.to_le_bytes())
-        .finalize()
-        .into_bytes();
-
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&prk);
-    Ok(key)
-}
-
-fn _store_key_file(user_id: i64, encryption_key: &[u8]) -> Result<(), SecureStorageError> {
-    let path = _mobile_key_path(user_id)?;
-
-    // ═══ V-01 : Chiffrement de la clé avant écriture sur disque ═══
-    // Dérive une "wrapping key" depuis un sel d'installation unique (device salt).
-    // Empêche l'extraction triviale par simple base64 -d sur un appareil rooté.
-    let wrapping_key = _get_or_create_device_wrapping_key(user_id)?;
-
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadCore};
-    use chacha20poly1305::aead::{Aead, OsRng};
-    let cipher = ChaCha20Poly1305::new((&wrapping_key[..]).into());
-    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce, encryption_key)
-        .map_err(|e| SecureStorageError::KeyringError(format!("Encrypt key file: {}", e)))?;
-
-    // Format: nonce (12 bytes) || ciphertext+tag
-    let mut blob = Vec::with_capacity(12 + ciphertext.len());
-    blob.extend_from_slice(&nonce);
-    blob.extend_from_slice(&ciphertext);
-
-    let result = std::fs::write(&path, &blob)
-        .map_err(|e| SecureStorageError::KeyringError(format!("File write error: {}", e)));
-    result?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    debug_log!("🔐 Clé stockée chiffrée dans fichier privé (mobile fallback)");
-    Ok(())
-}
-
-fn _retrieve_key_file(user_id: i64) -> Result<SecureKey, SecureStorageError> {
-    let path = _mobile_key_path(user_id)?;
-    let blob = std::fs::read(&path)
-        .map_err(|e| SecureStorageError::KeyringError(format!("Key file not found: {}", e)))?;
-
-    // ═══ V-01 : Déchiffrement de la clé depuis le fichier chiffré ═══
-    if blob.len() < 12 + 16 {
-        // Trop petit pour nonce(12) + tag(16) → probablement ancien format base64
-        // Tentative de lecture legacy (base64 non chiffré)
-        let mut key_b64 = String::from_utf8(blob)
-            .map_err(|_| SecureStorageError::EncodingError("Invalid key file format".to_string()))?;
-        let key = general_purpose::STANDARD
-            .decode(key_b64.as_bytes())
-            .map_err(|e| SecureStorageError::EncodingError(e.to_string()));
-        unsafe { key_b64.as_bytes_mut().zeroize(); }
-        let key = key?;
-        debug_log!("🔓 Clé récupérée depuis fichier legacy (va être re-chiffrée)");
-        // Re-encrypt in new format for future reads
-        let secure_key = SecureKey::new(key);
-        let _ = secure_key.use_key(|k| _store_key_file(user_id, k));
-        return Ok(secure_key);
-    }
-
-    let wrapping_key = _get_or_create_device_wrapping_key(user_id)?;
-
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
-    use chacha20poly1305::aead::Aead;
-    use chacha20poly1305::aead::generic_array::GenericArray;
-    let nonce = GenericArray::from_slice(&blob[..12]);
-    let ciphertext = &blob[12..];
-
-    let cipher = ChaCha20Poly1305::new((&wrapping_key[..]).into());
-    let key = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| SecureStorageError::KeyringError(format!("Decrypt key file: {}", e)))?;
-
-    debug_log!("🔓 Clé déchiffrée depuis fichier privé (mobile fallback)");
-    Ok(SecureKey::new(key))
-}
-
-fn _delete_key_file(user_id: i64) -> Result<(), SecureStorageError> {
-    let path = _mobile_key_path(user_id)?;
-    if path.exists() {
-        // Écraser le contenu avec des zéros avant suppression (effacement sécurisé)
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            let zeros = vec![0u8; metadata.len() as usize];
-            let _ = std::fs::write(&path, &zeros);
-        }
-        match std::fs::remove_file(&path) {
-            Ok(_) => { debug_log!("🗑️ Clé fichier effacée et supprimée (mobile fallback)"); Ok(()) },
-            Err(e) => Err(SecureStorageError::KeyringError(format!("Delete error: {}", e))),
-        }
-    } else {
-        Ok(())
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn remove_legacy_session_key(dir: &std::path::Path, user_id: i64) {
+    let path = dir.join(".keys").join(format!("k_{user_id}.bin"));
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!("Impossible de supprimer l’ancienne clé de session : {error}"),
     }
 }
 
 pub fn retrieve_encryption_key_secure(user_id: i64) -> Result<SecureKey, SecureStorageError> {
-    // On mobile, use filesystem fallback
-    if cfg!(target_os = "android") || cfg!(target_os = "ios") {
-        return _retrieve_key_file(user_id);
-    }
-
     let username = format!("user_{}", user_id);
-    let entry = Entry::new(SERVICE_NAME, &username)?;
+    let entry = Entry::new(service_name(crate::hidden_storage::TEST_BUILD), &username)?;
     
     let mut key_b64 = entry.get_password()?;
     
@@ -353,12 +186,8 @@ pub fn retrieve_encryption_key_secure(user_id: i64) -> Result<SecureKey, SecureS
 ///
 /// À utiliser lors de la déconnexion pour garantir que la clé ne reste pas stockée
 pub fn delete_encryption_key(user_id: i64) -> Result<(), SecureStorageError> {
-    if cfg!(target_os = "android") || cfg!(target_os = "ios") {
-        return _delete_key_file(user_id);
-    }
-
     let username = format!("user_{}", user_id);
-    let entry = Entry::new(SERVICE_NAME, &username)?;
+    let entry = Entry::new(service_name(crate::hidden_storage::TEST_BUILD), &username)?;
     
     match entry.delete_password() {
         Ok(_) => {
@@ -396,7 +225,7 @@ pub fn get_enclave_status_info() -> EnclaveStatus {
         EnclaveStatus {
             platform: "macOS".to_string(),
             enclave_type: "Keychain (keyring crate)".to_string(),
-            hardware_backed: true, // T2/M1+ ont Secure Enclave
+            hardware_backed: false,
             sync_disabled: false, // Non garanti — défaut iCloud Keychain peut sync
             notes: "Keychain via défauts keyring. Migration vers security-framework recommandée pour contrôle kSecAttr.".to_string(),
         }
@@ -425,20 +254,20 @@ pub fn get_enclave_status_info() -> EnclaveStatus {
     {
         EnclaveStatus {
             platform: "Android".to_string(),
-            enclave_type: "Fichier chiffré ChaCha20-Poly1305 (fallback)".to_string(),
+            enclave_type: "Mémoire de session".to_string(),
             hardware_backed: false,
             sync_disabled: true,
-            notes: "Fallback fichier avec wrapping key HKDF. Pour hardware: intégrer Android Keystore via JNI.".to_string(),
+            notes: "La biométrie optionnelle utilise une clé d’enveloppe dans Android Keystore.".to_string(),
         }
     }
     #[cfg(target_os = "ios")]
     {
         EnclaveStatus {
             platform: "iOS".to_string(),
-            enclave_type: "Fichier chiffré ChaCha20-Poly1305 (fallback)".to_string(),
+            enclave_type: "Mémoire de session".to_string(),
             hardware_backed: false,
             sync_disabled: true,
-            notes: "Fallback fichier. Pour hardware: intégrer iOS Keychain Services via un plugin Tauri natif.".to_string(),
+            notes: "La clé du coffre reste en mémoire pendant la session.".to_string(),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "android", target_os = "ios")))]
@@ -456,6 +285,12 @@ pub fn get_enclave_status_info() -> EnclaveStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_uses_separate_session_keyring() {
+        assert_eq!(service_name(true), "com.fluxlock.app.test");
+        assert_eq!(service_name(false), "com.fluxlock.app");
+    }
 
     #[test]
     fn test_store_and_retrieve_key() {

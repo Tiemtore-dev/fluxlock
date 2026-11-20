@@ -1,14 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Edit2, Trash2, KeyRound, RefreshCw, AlertCircle, ShieldAlert, Download, Upload, Fingerprint, Eye, EyeOff, FileText, CheckCircle2, XCircle, ArrowRightLeft, X } from 'lucide-react'
+import { Plus, Edit2, Trash2, RefreshCw, ShieldAlert, Download, Upload, Fingerprint, Eye, EyeOff, FileText, CheckCircle2, ArrowRightLeft } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
+import { hasAndroidKeystore } from '../lib/android-biometric'
 import { hasAndroidStorage, saveTextToPublic } from '../lib/public-storage'
-import { passwords, csvIO, type Password, type ParsedCsvEntry, type EntryAction, type ImportCsvResponse } from '../lib/vault-service'
+import { passwords, csvIO, biometric, type Password, type EntryAction, type ImportCsvResponse } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
-import { AppShell } from '../design-system/layouts'
+import { WorkspacePage } from '../design-system/layouts'
 import { Button, Input, Spinner, Badge } from '../design-system/atoms'
-import { SearchBar, PasswordField, PasswordStrength, EmptyState, Modal } from '../design-system/molecules'
+import { SearchBar, PasswordField, PasswordStrength, Modal } from '../design-system/molecules'
 import { useToast } from '../design-system/organisms'
 import { useClipboard } from '../hooks/useClipboard'
 
@@ -64,6 +65,15 @@ export default function PasswordsPage() {
   const [csvActions, setCsvActions] = useState<Record<number, 'import' | 'skip' | 'overwrite'>>({})
   const [csvImportResult, setCsvImportResult] = useState<ImportCsvResponse | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const reviewedCsv = useRef<{ content: string; biometric: boolean } | null>(null)
+  const csvBiometrics = useQuery({
+    queryKey: ['csv-biometric-status'],
+    queryFn: biometric.checkStatus,
+    enabled: (showImportModal || showExportModal) && !hasAndroidKeystore(),
+    staleTime: 0,
+  })
+  const canUseCsvBiometrics = !hasAndroidKeystore() && !!csvBiometrics.data?.available &&
+    csvBiometrics.data.enrolled && !csvBiometrics.data.requires_password
   // Export-specific
   const [exportDone, setExportDone] = useState(false)
   const [exportLocation, setExportLocation] = useState('')
@@ -137,6 +147,7 @@ export default function PasswordsPage() {
 
   // ── CSV Import helpers ──
   const resetImportModal = () => {
+    reviewedCsv.current = null
     setCsvFile(null); setCsvFormat('auto'); setCsvPreview(null); setCsvActions({})
     setCsvImportResult(null); setCsvAuthPw(''); setCsvAuthVisible(false); setCsvError('')
     setCsvLoading(false)
@@ -146,16 +157,24 @@ export default function PasswordsPage() {
 
   const handleCsvFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) setCsvFile(file)
+    setCsvError('')
+    if (file && file.size > 10 * 1024 * 1024) {
+      setCsvFile(null)
+      e.target.value = ''
+      setCsvError('Le fichier dépasse la limite de 10 Mio.')
+      return
+    }
+    setCsvFile(file ?? null)
   }
 
-  const handleCsvPreview = async () => {
-    if (!csvFile) return
+  const handleCsvPreview = async (useBiometrics = false) => {
+    if (!csvFile || csvLoading || (!useBiometrics && csvAuthPw === '')) return
     setCsvLoading(true); setCsvError('')
     try {
-      const content = await csvFile.text()
-      const masterPw = csvAuthPw.trim() || null
-      const result = await csvIO.preview(masterPw, content, csvFormat)
+      const content = new TextDecoder('utf-8', { fatal: true }).decode(await csvFile.arrayBuffer())
+      const credential = useBiometrics ? null : csvAuthPw
+      const result = await csvIO.preview(credential, content, csvFormat)
+      reviewedCsv.current = { content, biometric: useBiometrics }
       setCsvPreview(result)
       // Default actions: 'import' for new, 'skip' for duplicates
       const defaults: Record<number, 'import' | 'skip' | 'overwrite'> = {}
@@ -171,11 +190,11 @@ export default function PasswordsPage() {
   }
 
   const handleCsvImport = async () => {
-    if (!csvFile || !csvPreview) return
+    if (!csvPreview || !reviewedCsv.current || csvLoading) return
     setCsvLoading(true); setCsvError('')
     try {
-      const content = await csvFile.text()
-      const masterPw = csvAuthPw.trim() || null
+      const { content, biometric } = reviewedCsv.current
+      const masterPw = biometric ? null : csvAuthPw
       const entryActions: EntryAction[] = Object.entries(csvActions).map(([idx, action]) => {
         const entry = csvPreview.entries?.find((e) => e.index === Number(idx))
         return {
@@ -184,10 +203,13 @@ export default function PasswordsPage() {
           overwrite_id: action === 'overwrite' ? entry?.existing_match?.id : undefined,
         }
       })
-      const result = await csvIO.import(masterPw, content, csvPreview.detected_format, entryActions)
+      const result = await csvIO.import(masterPw, content, csvFormat, entryActions)
+      reviewedCsv.current = null
+      setCsvAuthPw('')
+      setCsvAuthVisible(false)
       setCsvImportResult(result)
       queryClient.invalidateQueries({ queryKey: ['passwords'] })
-      toast(`Import terminé: ${result.imported_count} importés, ${result.overwritten_count} écrasés`, 'success')
+
     } catch (err) {
       setCsvError(String(err))
     } finally {
@@ -195,20 +217,14 @@ export default function PasswordsPage() {
     }
   }
 
-  const handleBiometricAuth = async (mode: 'import' | 'export') => {
-    setCsvAuthPw('')  // null password = biometric path
-    if (mode === 'import') await handleCsvPreview()
-    else await handleCsvExport()
-  }
-
   // ── CSV Export helpers ──
   const openExport = () => { setCsvAuthPw(''); setCsvAuthVisible(false); setCsvError(''); setExportDone(false); setExportLocation(''); setCsvLoading(false); setShowExportModal(true) }
   const closeExport = () => { setShowExportModal(false); setCsvAuthPw(''); setCsvError('') }
 
-  const handleCsvExport = async () => {
+  const handleCsvExport = async (useBiometrics = false) => {
     setCsvLoading(true); setCsvError('')
     try {
-      const masterPw = csvAuthPw.trim() || null
+      const masterPw = useBiometrics ? null : csvAuthPw
       const result = await csvIO.export(masterPw)
       const fileName = `fluxlock-export-${new Date().toISOString().slice(0, 10)}.csv`
       const location = hasAndroidStorage()
@@ -274,23 +290,6 @@ export default function PasswordsPage() {
     setPassword(chars.join(''))
   }
 
-  if (isLoading) return <AppShell><div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-16)' }}><Spinner size={32} /></div></AppShell>
-
-  if (isError) return (
-    <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-4)', padding: 'var(--space-16)' }}>
-        <AlertCircle size={40} style={{ color: 'var(--danger)' }} />
-        <p style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-body)', fontSize: 'var(--text-base)' }}>
-          Erreur de chargement des mots de passe
-        </p>
-        <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: 'var(--text-sm)', textAlign: 'center', maxWidth: 400 }}>
-          {String(queryError)}
-        </p>
-        <Button onClick={() => refetch()}>Réessayer</Button>
-      </div>
-    </AppShell>
-  )
-
   const renderForm = () => (
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
       <Input label="Titre" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: Gmail" required />
@@ -298,7 +297,7 @@ export default function PasswordsPage() {
       <div>
         <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
           <div className="flex-1">
-            <Input label="Mot de passe" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mot de passe" required />
+            <Input label="Mot de passe" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mot de passe" required />
           </div>
           <Button type="button" variant="secondary" icon={RefreshCw} onClick={generatePassword} style={{ marginBottom: 0 }} className="w-full sm:w-auto">
             Générer
@@ -306,8 +305,8 @@ export default function PasswordsPage() {
         </div>
         <div className="mt-3 flex flex-col gap-3">
           <div className="flex items-center gap-3">
-            <label className="text-xs text-tx-secondary font-body min-w-[70px]">Longueur : {pwLength}</label>
-            <input type="range" min={8} max={64} value={pwLength} onChange={(e) => setPwLength(Number(e.target.value))} className="flex-1 accent-accent" />
+            <label htmlFor="password-generator-length" className="text-xs text-tx-secondary font-body min-w-[70px]">Longueur : {pwLength}</label>
+            <input id="password-generator-length" type="range" min={8} max={64} value={pwLength} onChange={(e) => setPwLength(Number(e.target.value))} className="flex-1 accent-accent" />
           </div>
           <div className="flex gap-4 flex-wrap">
             {([['A-Z', pwUpper, setPwUpper], ['a-z', pwLower, setPwLower], ['0-9', pwDigits, setPwDigits], ['!@#', pwSymbols, setPwSymbols]] as const).map(([label, val, set]) => (
@@ -322,11 +321,12 @@ export default function PasswordsPage() {
           <PasswordStrength password={password} />
         </div>
       </div>
-      <Input label="URL" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com" />
+      <Input label="URL" inputMode="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com" />
       <Input label="Catégorie" value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Social, Email, Travail…" />
       <div>
-        <label className="block text-xs font-medium text-tx-secondary font-body tracking-wide uppercase mb-1">Notes</label>
+        <label htmlFor="password-notes" className="block text-xs font-medium text-tx-secondary font-body tracking-wide uppercase mb-1">Notes</label>
         <textarea
+          id="password-notes"
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
           placeholder="Notes additionnelles…"
@@ -344,153 +344,66 @@ export default function PasswordsPage() {
   )
 
   return (
-    <AppShell>
-      <div className="flex h-full w-full">
-        {/* MASTER PANE */}
-        <div className={`flex-1 flex-col gap-6 min-w-0 overflow-y-auto page-content ${showModal ? 'hidden md:flex' : 'flex'} pr-0 md:pr-6 pb-20 md:pb-0`}>
-          {/* Header */}
-          <div className="page-header flex-col items-start sm:flex-row sm:items-center gap-4">
-            <div>
-              <h1 className="font-display text-3xl text-tx-primary flex items-center gap-3">
-                <KeyRound size={28} className="text-accent" />
-                Mots de passe
-              </h1>
-              <p className="text-sm text-tx-muted font-body mt-1">
-                {list.length} entrée{list.length !== 1 ? 's' : ''} enregistrée{list.length !== 1 ? 's' : ''}
-              </p>
-            </div>
-            <div className="flex items-center gap-2 w-full sm:w-auto">
-              <Button variant="secondary" size="sm" icon={Download} onClick={openImport} disabled={isReadonly} title="Importer" style={{ padding: '8px' }} />
-              <Button variant="secondary" size="sm" icon={Upload} onClick={openExport} title="Exporter" style={{ padding: '8px' }} />
-              <Button icon={Plus} onClick={openCreate} disabled={isReadonly} className="w-full sm:w-auto ml-1">Nouveau</Button>
-            </div>
-          </div>
-
-          {/* Readonly banner */}
-          {isReadonly && (
-            <div className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm bg-danger-muted border border-danger text-danger font-body shrink-0">
-              <ShieldAlert size={16} />
-              Coffre-fort en lecture seule — modifications bloquées
-            </div>
-          )}
-
-          {/* Search */}
-          <div className="shrink-0">
-            <SearchBar value={search} onChange={setSearch} placeholder="Rechercher un mot de passe…" />
-          </div>
-
-          {/* Category filter chips */}
-          {categories.length > 0 && (
-            <div className="flex gap-2 overflow-x-auto pb-2 -mx-4 px-4 sm:mx-0 sm:px-0 [&::-webkit-scrollbar]:hidden shrink-0">
-              <button
-                onClick={() => setFilterCategory(null)}
-                className={`shrink-0 px-3 py-1 rounded-full text-xs font-medium cursor-pointer transition-all duration-150 font-body border ${!filterCategory ? 'border-accent bg-accent-muted text-accent-text' : 'border-bd bg-transparent text-tx-muted'}`}
-              >
-                Tous
-              </button>
-              {categories.map((cat) => (
-                <button
-                  key={cat}
-                  onClick={() => setFilterCategory(filterCategory === cat ? null : cat)}
-                  className={`shrink-0 px-3 py-1 rounded-full text-xs font-medium cursor-pointer transition-all duration-150 font-body border ${filterCategory === cat ? 'border-accent bg-accent-muted text-accent-text' : 'border-bd bg-transparent text-tx-muted'}`}
-                >
-                  {cat}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* List */}
-          {filtered.length === 0 ? (
-            <EmptyState
-              icon={KeyRound}
-              title={search ? 'Aucun résultat' : 'Aucun mot de passe'}
-              description={search ? undefined : 'Commencez par ajouter votre premier mot de passe'}
-              action={!search ? <Button icon={Plus} onClick={openCreate}>Créer</Button> : undefined}
-            />
-          ) : (
-            <div className="flex flex-col gap-3">
-              {filtered.map((p) => (
-                <div key={p.id} onClick={() => openEdit(p)} className={`bg-surface sm:border rounded-2xl p-4 sm:p-5 flex flex-col gap-3 transition-all duration-200 cursor-pointer ${editing?.id === p.id ? 'sm:border-accent ring-1 ring-accent/20' : 'sm:border-bd hover:border-accent/50'}`}>
-                  <div className="flex justify-between items-start gap-4">
-                    <div className="flex items-start gap-3 min-w-0 flex-1">
-                      <div className="w-10 h-10 rounded-full bg-accent-muted text-accent-text flex items-center justify-center text-lg font-display shrink-0 mt-0.5">
-                        {p.title.charAt(0).toUpperCase()}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-base font-semibold text-tx-primary font-body break-words">
-                          {p.title}
-                        </p>
-                        {p.username && <p className="text-sm text-tx-secondary font-body mt-0.5 truncate">{p.username}</p>}
-                        {p.url && <p className="text-xs text-tx-muted font-mono mt-0.5 truncate">{p.url}</p>}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {p.category && <Badge size="sm" className="hidden sm:inline-flex">{p.category}</Badge>}
-                    </div>
-                  </div>
-
-                  <div className="pl-0 sm:pl-[52px]" onClick={e => e.stopPropagation()}>
-                    <PasswordField
-                      value={p.password}
-                      revealed={revealed.has(p.id)}
-                      onToggleReveal={() => setRevealed((prev) => { const s = new Set(prev); s.has(p.id) ? s.delete(p.id) : s.add(p.id); return s })}
-                      onCopy={() => handleCopy(p.password, p.id)}
-                      copied={copied === p.id}
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between pt-2 mt-1 border-t border-bd/50 pl-0 sm:pl-[52px]">
-                    <span className="text-xs text-tx-disabled font-body">
-                      {new Date(p.created_at).toLocaleDateString('fr-FR')}
-                    </span>
-                    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-                      <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Supprimer "${p.title}" ?`)) deleteMut.mutate(p.id) }} disabled={isReadonly} className="w-8 h-8 p-0 flex items-center justify-center text-danger hover:bg-danger-muted" title="Supprimer">
-                        <Trash2 size={16} />
-                      </Button>
-                    </div>
-                  </div>
+    <WorkspacePage title="Mots de passe" description={`${list.length} identifiant${list.length === 1 ? '' : 's'} enregistré${list.length === 1 ? '' : 's'}`}
+      actions={<>
+        <Button variant="secondary" icon={Download} onClick={openImport} disabled={isReadonly}>Importer un CSV</Button>
+        <Button variant="secondary" icon={Upload} onClick={openExport}>Exporter un CSV</Button>
+        <Button icon={Plus} onClick={openCreate} disabled={isReadonly}>Nouvel identifiant</Button>
+      </>}>
+      {isReadonly && <p className="workspace-error" role="status">Le coffre est en lecture seule. Les modifications sont désactivées.</p>}
+      <section className="workspace-panel workspace-stack" aria-labelledby="password-list">
+        <h2 id="password-list">Identifiants du coffre</h2>
+        <SearchBar value={search} onChange={setSearch} placeholder="Rechercher un identifiant…" />
+        {categories.length > 0 && <div className="workspace-segments" role="group" aria-label="Filtrer par catégorie">
+          <button type="button" aria-pressed={!filterCategory} onClick={() => setFilterCategory(null)}>Tous</button>
+          {categories.map((name) => <button key={name} type="button" aria-pressed={filterCategory === name}
+            onClick={() => setFilterCategory(filterCategory === name ? null : name)}>{name}</button>)}
+        </div>}
+        {isLoading ? <p role="status" className="workspace-label"><Spinner size={18} /> Chargement…</p> :
+          isError ? <div className="workspace-stack">
+            <p role="alert" className="workspace-error">Impossible de charger les identifiants. {String(queryError)}</p>
+            <div><Button variant="secondary" onClick={() => void refetch()}>Réessayer</Button></div>
+          </div> : filtered.length === 0 ? (
+          <p className="workspace-empty">{search || filterCategory ? 'Aucun identifiant ne correspond à votre recherche.' : 'Ajoutez votre premier identifiant ou importez un CSV.'}</p>
+        ) : (
+          <ul className="workspace-list">
+            {filtered.map((item) => (
+              <li key={item.id} className="workspace-row">
+                <div className="workspace-row-copy">
+                  <strong>{item.title}</strong>
+                  {item.username && <span>{item.username}</span>}
+                  {item.url && <span>{item.url}</span>}
+                  {item.category && <span>{item.category}</span>}
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-        
-        {/* DETAIL PANE (Desktop) */}
-        <div className="hidden md:flex flex-col w-[350px] lg:w-[450px] shrink-0 border-l border-bd bg-surface/50 h-[calc(100vh-2rem)] rounded-r-xl overflow-hidden -mt-4 -mr-4 ml-2">
-          {showModal ? (
-            <div className="flex flex-col h-full bg-surface shadow-[-4px_0_15px_rgba(0,0,0,0.03)]">
-              <div className="flex items-center justify-between p-6 border-b border-bd/50 shrink-0 bg-surface z-10 sticky top-0">
-                <h2 className="text-xl font-display font-semibold text-tx-primary">
-                  {editing ? 'Modifier' : 'Nouveau'}
-                </h2>
-                <button onClick={close} className="p-2 -mr-2 rounded-full hover:bg-elevated text-tx-secondary transition-colors" aria-label="Fermer">
-                  <X size={20} />
-                </button>
-              </div>
-              <div className="p-6 overflow-y-auto">
-                {renderForm()}
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col h-full items-center justify-center p-8 text-center opacity-60">
-              <KeyRound size={48} className="text-tx-disabled mb-4" />
-              <h3 className="text-lg font-medium text-tx-secondary font-display">Aucun élément sélectionné</h3>
-              <p className="text-sm text-tx-muted mt-2 font-body">Sélectionnez un mot de passe dans la liste ou créez-en un nouveau pour afficher les détails.</p>
-            </div>
-          )}
-        </div>
-      </div>
+                <div className="workspace-secret">
+                  <PasswordField value={item.password} revealed={revealed.has(item.id)}
+                    onToggleReveal={() => setRevealed((previous) => {
+                      const next = new Set(previous)
+                      if (next.has(item.id)) next.delete(item.id)
+                      else next.add(item.id)
+                      return next
+                    })}
+                    onCopy={() => handleCopy(item.password, item.id)} copied={copied === item.id} />
+                </div>
+                <div className="workspace-actions">
+                  <Button variant="secondary" size="sm" icon={Edit2} onClick={() => openEdit(item)}
+                    disabled={isReadonly} aria-label={`Modifier ${item.title}`}>Modifier</Button>
+                  <Button variant="ghost" size="sm" icon={Trash2} disabled={isReadonly}
+                    aria-label={`Supprimer ${item.title}`}
+                    onClick={() => { if (confirm(`Supprimer « ${item.title} » ?`)) deleteMut.mutate(item.id) }} />
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
-      {/* MOBILE DETAIL PANE (Modal) */}
-      <div className="md:hidden">
-        <Modal open={showModal} onClose={close} title={editing ? 'Modifier le mot de passe' : 'Nouveau mot de passe'}>
-          {renderForm()}
-        </Modal>
-      </div>
+      <Modal open={showModal} onClose={close} title={editing ? 'Modifier le mot de passe' : 'Nouveau mot de passe'}>
+        {renderForm()}
+      </Modal>
 
       {/* ═══ Import CSV Modal ═══ */}
-      <Modal open={showImportModal} onClose={closeImport} title="Importer des mots de passe" width={680}>
+      <Modal open={showImportModal} onClose={() => { if (!csvLoading) closeImport() }} title="Importer des mots de passe" width={680}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
           {/* Step indicator */}
           <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
@@ -532,10 +445,10 @@ export default function PasswordsPage() {
           ) : csvPreview ? (
             /* ── Preview / conflict resolution screen ── */
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-              <div className="flex items-center justify-between" style={{ fontFamily: 'var(--font-body)' }}>
+              <div className="workspace-actions justify-between">
                 <Badge>{csvPreview.detected_format}</Badge>
                 <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                  {csvPreview.new_count} nouvelles · {csvPreview.duplicate_count} doublons · {csvPreview.error_count} erreurs
+                  {csvPreview.new_count} à ajouter · {csvPreview.duplicate_count} doublon{csvPreview.duplicate_count > 1 ? 's' : ''} · {csvPreview.error_count} erreur{csvPreview.error_count > 1 ? 's' : ''}
                 </span>
               </div>
               <div style={{ maxHeight: 340, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
@@ -547,13 +460,27 @@ export default function PasswordsPage() {
                       border: `1px solid ${entry.is_duplicate ? 'var(--warning)' : 'var(--border)'}`,
                       fontFamily: 'var(--font-body)',
                     }}>
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
                         <p style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)' }} className="truncate">{entry.title}</p>
-                        {entry.username && <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }} className="truncate">{entry.username}</p>}
+                        {entry.username && <p className="text-sm break-words">{entry.username}</p>}
+                        {entry.url && <p className="workspace-label break-all">{entry.url}</p>}
+                        {entry.category && <p className="workspace-label break-words">{entry.category}</p>}
+                        {entry.notes && <p className="workspace-label whitespace-pre-wrap break-words">{entry.notes}</p>}
                       </div>
                       <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{entry.password_preview}</span>
                     </div>
+                    {!entry.is_duplicate && (
+                      <label className="workspace-choice text-sm">
+                        <input type="checkbox" checked={csvActions[entry.index] === 'import'}
+                          aria-label={`Inclure ${entry.title}`}
+                          onChange={(event) => {
+                            const action = event.target.checked ? 'import' : 'skip'
+                            setCsvActions((previous) => ({ ...previous, [entry.index]: action }))
+                          }} />
+                        Inclure
+                      </label>
+                    )}
                     {entry.is_duplicate && entry.existing_match && (
                       <div className="mt-1 flex flex-col gap-1.5">
                         <div className="flex items-center gap-1.5" style={{ fontSize: 'var(--text-xs)', color: 'var(--warning)' }}>
@@ -575,73 +502,60 @@ export default function PasswordsPage() {
                   </div>
                 ))}
               </div>
-              {csvError && <p style={{ fontSize: 'var(--text-sm)', color: 'var(--danger)', fontFamily: 'var(--font-body)' }}>{csvError}</p>}
-              <div className="flex gap-3 pt-2">
-                <Button onClick={() => setCsvPreview(null)} variant="secondary" fullWidth>← Retour</Button>
-                <Button onClick={handleCsvImport} loading={csvLoading} fullWidth>
-                  Importer {Object.values(csvActions).filter((a) => a !== 'skip').length} entrées
+              {csvPreview.error_count > 0 && <details className="workspace-details">
+                <summary>Lignes ignorées ({csvPreview.error_count})</summary>
+                <ul className="text-sm space-y-1">
+                  {csvPreview.entries?.filter((entry) => entry.parse_error).map((entry) => (
+                    <li key={entry.index}>Entrée {entry.index + 1} · {entry.parse_error}</li>
+                  ))}
+                </ul>
+              </details>}
+              {csvError && <p role="alert" className="workspace-error">{csvError}</p>}
+              <div className="workspace-actions">
+                <Button onClick={() => { reviewedCsv.current = null; setCsvPreview(null); setCsvError('') }}
+                  variant="secondary" disabled={csvLoading}>Retour</Button>
+                <Button onClick={handleCsvImport} loading={csvLoading}
+                  disabled={!Object.values(csvActions).some((action) => action !== 'skip')}>
+                  Importer la sélection
                 </Button>
               </div>
             </div>
           ) : (
-            /* ── File selection + auth screen ── */
-            <>
-              {/* Format selector */}
-              <div>
-                <label style={{ display: 'block', fontSize: 'var(--text-xs)', fontWeight: 500, color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', letterSpacing: 'var(--tracking-wide)', textTransform: 'uppercase', marginBottom: 'var(--space-1)' }}>Format source</label>
-                <select value={csvFormat} onChange={(e) => setCsvFormat(e.target.value)}
-                  style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: '10px 12px', color: 'var(--text-primary)', fontFamily: 'var(--font-body)', fontSize: 'var(--text-sm)' }}>
-                  <option value="auto">Auto-détection</option>
-                  <option value="chrome">Google Chrome</option>
+            <form className="workspace-stack" onSubmit={(event) => { event.preventDefault(); void handleCsvPreview() }}>
+              <label className="workspace-field">
+                Format source
+                <select value={csvFormat} onChange={(event) => setCsvFormat(event.target.value)} disabled={csvLoading}>
+                  <option value="auto">Détection automatique</option>
+                  <option value="chromium">Brave / Chrome</option>
+                  <option value="firefox">Firefox</option>
                   <option value="bitwarden">Bitwarden</option>
                   <option value="lastpass">LastPass</option>
                   <option value="1password">1Password</option>
                   <option value="fluxlock">FluXlock</option>
                 </select>
+              </label>
+
+              <div className="workspace-stack">
+                <div><Button type="button" variant="secondary" icon={FileText}
+                  onClick={() => fileInputRef.current?.click()} disabled={csvLoading}>Choisir un fichier CSV</Button></div>
+                <input ref={fileInputRef} aria-label="Fichier CSV" type="file" accept=".csv,text/csv" onChange={handleCsvFileSelect} hidden />
+                {csvFile && <p className="break-all" role="status">{csvFile.name}</p>}
               </div>
 
-              {/* File picker */}
-              <div
-                className="flex flex-col items-center justify-center gap-2 rounded-lg p-6 cursor-pointer transition-colors"
-                style={{ border: '2px dashed var(--border)', background: csvFile ? 'var(--accent-muted)' : 'transparent' }}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <FileText size={28} style={{ color: csvFile ? 'var(--accent-text)' : 'var(--text-muted)' }} />
-                {csvFile ? (
-                  <p style={{ fontSize: 'var(--text-sm)', color: 'var(--accent-text)', fontFamily: 'var(--font-body)', fontWeight: 500 }}>{csvFile.name} ({(csvFile.size / 1024).toFixed(1)} Ko)</p>
-                ) : (
-                  <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>Cliquez pour sélectionner un fichier CSV</p>
-                )}
-                <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={handleCsvFileSelect} style={{ display: 'none' }} />
-              </div>
-
-              {/* Re-authentication */}
-              {csvFile && (
-                <div className="rounded-lg p-4" style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}>
-                  <p style={{ fontSize: 'var(--text-xs)', fontWeight: 500, color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', letterSpacing: 'var(--tracking-wide)', textTransform: 'uppercase', marginBottom: 'var(--space-2)' }}>Authentification requise</p>
-                  <div className="flex flex-col gap-2">
-                    <div className="relative">
-                      <Input
-                        type={csvAuthVisible ? 'text' : 'password'}
-                        value={csvAuthPw}
-                        onChange={(e) => setCsvAuthPw(e.target.value)}
-                        placeholder="Mot de passe maître"
-                        iconRight={csvAuthVisible ? EyeOff : Eye}
-                        onIconRightClick={() => setCsvAuthVisible(!csvAuthVisible)}
-                      />
-                    </div>
-                    <div className="flex gap-2">
-                      <Button onClick={handleCsvPreview} disabled={!csvAuthPw.trim()} loading={csvLoading} fullWidth>Analyser le fichier</Button>
-                      <Button variant="secondary" onClick={() => handleBiometricAuth('import')} loading={csvLoading} title="Authentification biométrique">
-                        <Fingerprint size={18} />
-                      </Button>
-                    </div>
-                  </div>
+              {csvFile && <>
+                <Input label="Mot de passe maître" type={csvAuthVisible ? 'text' : 'password'}
+                  value={csvAuthPw} onChange={(event) => setCsvAuthPw(event.target.value)} disabled={csvLoading}
+                  autoComplete="current-password" iconRight={csvAuthVisible ? EyeOff : Eye}
+                  onIconRightClick={() => setCsvAuthVisible(!csvAuthVisible)} />
+                <div className="workspace-actions">
+                  <Button type="submit" disabled={csvAuthPw === ''} loading={csvLoading}>Analyser le fichier</Button>
+                  {canUseCsvBiometrics && <Button type="button" variant="secondary" icon={Fingerprint} disabled={csvLoading}
+                    onClick={() => void handleCsvPreview(true)}>Utiliser la biométrie</Button>}
                 </div>
-              )}
+              </>}
 
-              {csvError && <p style={{ fontSize: 'var(--text-sm)', color: 'var(--danger)', fontFamily: 'var(--font-body)' }}>{csvError}</p>}
-            </>
+              {csvError && <p role="alert" className="workspace-error">{csvError}</p>}
+            </form>
           )}
         </div>
       </Modal>
@@ -690,12 +604,11 @@ export default function PasswordsPage() {
                     onIconRightClick={() => setCsvAuthVisible(!csvAuthVisible)}
                   />
                   <div className="flex gap-2">
-                    <Button variant="danger" onClick={handleCsvExport} disabled={!csvAuthPw.trim()} loading={csvLoading} fullWidth icon={Upload}>
+                    <Button variant="danger" onClick={() => void handleCsvExport()} disabled={csvAuthPw === ''} loading={csvLoading} fullWidth icon={Upload}>
                       Exporter {list.length} mot{list.length !== 1 ? 's' : ''} de passe
                     </Button>
-                    <Button variant="secondary" onClick={() => handleBiometricAuth('export')} loading={csvLoading} title="Authentification biométrique">
-                      <Fingerprint size={18} />
-                    </Button>
+                    {canUseCsvBiometrics && <Button variant="secondary" icon={Fingerprint} disabled={csvLoading}
+                      onClick={() => void handleCsvExport(true)}>Utiliser la biométrie</Button>}
                   </div>
                 </div>
               </div>
@@ -705,6 +618,6 @@ export default function PasswordsPage() {
           )}
         </div>
       </Modal>
-    </AppShell>
+    </WorkspacePage>
   )
 }

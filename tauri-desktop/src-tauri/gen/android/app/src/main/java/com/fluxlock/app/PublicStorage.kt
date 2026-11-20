@@ -25,9 +25,10 @@ import java.io.File
  * All methods return "ok:<human readable location>", "needs_permission" or "error:<message>".
  */
 class PublicStorage(private val activity: FragmentActivity) {
+    private val folder = if (activity.packageName == "com.fluxlock.app.test") "FluXlock Test" else "FluXlock"
+
     companion object {
         private const val TAG = "FluXlock.Storage"
-        private const val FOLDER = "FluXlock"
     }
 
     @JavascriptInterface
@@ -36,9 +37,24 @@ class PublicStorage(private val activity: FragmentActivity) {
 
     @JavascriptInterface
     fun saveFile(sourcePath: String, fileName: String, mimeType: String): String {
-        val src = File(sourcePath)
-        if (!src.isFile) return "error:Fichier source introuvable"
-        return save(fileName, mimeType) { out -> src.inputStream().use { it.copyTo(out) } }
+        return try {
+            val src = File(sourcePath).canonicalFile
+            val exports = File(activity.cacheDir, "exports").canonicalFile
+            val backups = File(activity.applicationInfo.dataDir, "SecureVault/backups").canonicalFile
+            val temporaryExport = src.parentFile == exports &&
+                Regex("[0-9a-f-]{36}").matches(src.name)
+            val allowedBackup = src.parentFile == backups && src.extension == "svbackup"
+            if ((!temporaryExport && !allowedBackup) || !src.isFile) {
+                return "error:Fichier source non autorisé"
+            }
+            try {
+                save(fileName, mimeType) { out -> src.inputStream().use { it.copyTo(out) } }
+            } finally {
+                if (temporaryExport) src.delete()
+            }
+        } catch (e: Exception) {
+            "error:Impossible d’ouvrir le fichier source"
+        }
     }
 
     private fun save(fileName: String, mimeType: String, writer: (java.io.OutputStream) -> Unit): String {
@@ -55,7 +71,7 @@ class PublicStorage(private val activity: FragmentActivity) {
 
     private fun saveViaMediaStore(name: String, mime: String, writer: (java.io.OutputStream) -> Unit): String {
         val resolver = activity.contentResolver
-        val relativePath = "${Environment.DIRECTORY_DOCUMENTS}/$FOLDER"
+        val relativePath = "${Environment.DIRECTORY_DOCUMENTS}/$folder"
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, mime)
@@ -87,15 +103,20 @@ class PublicStorage(private val activity: FragmentActivity) {
             return "needs_permission"
         }
         @Suppress("DEPRECATION")
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), FOLDER)
+        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), folder)
         if (!dir.exists() && !dir.mkdirs()) return "error:Création du dossier impossible"
         val dot = name.lastIndexOf('.')
         val stem = if (dot > 0) name.substring(0, dot) else name
         val ext = if (dot > 0) name.substring(dot) else ""
         var target = File(dir, name)
         var n = 1
-        while (target.exists()) target = File(dir, "$stem ($n)$ext").also { n++ }
-        target.outputStream().use(writer)
-        return "ok:${Environment.DIRECTORY_DOCUMENTS}/$FOLDER/${target.name}"
+        while (!target.createNewFile()) target = File(dir, "$stem ($n)$ext").also { n++ }
+        try {
+            target.outputStream().use(writer)
+        } catch (e: Exception) {
+            target.delete()
+            throw e
+        }
+        return "ok:${Environment.DIRECTORY_DOCUMENTS}/$folder/${target.name}"
     }
 }

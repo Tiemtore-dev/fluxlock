@@ -18,6 +18,7 @@ declare global {
       // Hardware-backed key storage (Android Keystore + BiometricPrompt CryptoObject)
       storeKey(account: string, plainB64: string, callbackId: string): void
       retrieveKey(account: string, callbackId: string): void
+      hasStoredKey(account: string): boolean
       deleteKey(account: string): boolean
     }
     __biometricResolve?: (id: string, success: boolean, error: string) => void
@@ -114,6 +115,14 @@ window.__keystoreResolve = (id: string, success: boolean, error: string, data: s
 /** True when the Android Keystore bridge is available (storeKey/retrieveKey). */
 export function hasAndroidKeystore(): boolean {
   return typeof window.AndroidBiometric?.storeKey === 'function'
+}
+
+export function androidHasStoredKey(account: string): boolean {
+  try {
+    return window.AndroidBiometric?.hasStoredKey(account) ?? false
+  } catch {
+    return false
+  }
 }
 
 /**

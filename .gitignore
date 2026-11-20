@@ -7,7 +7,6 @@ rust-crypto-core/target/
 tauri-desktop/node_modules/
 tauri-desktop/dist/
 tauri-desktop/src-tauri/target/
-tauri-desktop/src-tauri/Cargo.lock
 tauri-desktop/.vscode/
 tauri-desktop/src-tauri/gen/schemas/
 

@@ -117,3 +117,32 @@ fn test_config_from_env() {
     
     println!("✅ Configuration chargée depuis environnement");
 }
+
+
+#[tokio::test]
+async fn a_vault_has_one_owner_even_during_concurrent_registration() {
+    let temp = TempDir::new().unwrap();
+    let db = Database::new(&temp.path().join("vault.db")).await.unwrap();
+    db.initialize().await.unwrap();
+    assert!(db.get_vault_owner().await.unwrap().is_none());
+
+    let (first, second) = tokio::join!(
+        db.create_user("first", "first@example.net", "hash", "salt"),
+        db.create_user("second", "second@example.net", "hash", "salt"),
+    );
+    let winner = match (first, second) {
+        (Ok(id), Err(_)) | (Err(_), Ok(id)) => id,
+        _ => panic!("Exactly one registration must succeed"),
+    };
+    assert_eq!(db.get_vault_owner().await.unwrap().unwrap().id, winner);
+
+    sqlx::query("INSERT INTO users (username, email, password_hash, crypto_salt) VALUES (?, ?, ?, ?)")
+        .bind("legacy")
+        .bind("legacy@example.net")
+        .bind("hash")
+        .bind("salt")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(db.get_vault_owner().await.is_err());
+}

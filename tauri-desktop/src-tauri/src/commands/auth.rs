@@ -1,17 +1,17 @@
 use crate::{AppState, LoginRequest, LoginResponse, RegisterRequest};
 use crate::{generate_session_token, init_signed_log_manager};
 use crate::database::Database;
+use crate::secure_key::SecureKey;
 use crate::crypto::{
-    hash_password, verify_password, CryptoError,
+    hash_password, verified_argon2_config, derive_key_with_config, CryptoError,
     encrypt_data_secure, decrypt_data_secure,
     generate_salt, derive_encryption_key_from_password_secure,
 };
-use crate::secure_storage::store_encryption_key;
+use crate::store_session_key;
 use crate::security_monitor::get_security_monitor;
 use crate::{biometric, hidden_storage, transfer};
 use tauri::State;
 use base64::{Engine as _, engine::general_purpose};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[tauri::command]
 pub fn get_app_version() -> String {
@@ -28,11 +28,10 @@ pub async fn init_local_db(
     _app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    // Atomic guard against double initialization (frontend may call twice concurrently)
-    static DB_INIT_STARTED: AtomicBool = AtomicBool::new(false);
-    if DB_INIT_STARTED.swap(true, Ordering::SeqCst) {
-        debug_log!("ℹ️ Base de données déjà en cours d'initialisation, skip");
-        return Ok("Base de données déjà initialisée".to_string());
+    static INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _init = INIT_LOCK.lock().await;
+    if state.db.lock().await.is_some() {
+        return Ok("Base de données déjà initialisée".into());
     }
 
     // Android: utiliser app_data_dir() de Tauri (seul chemin writable garanti)
@@ -127,24 +126,22 @@ pub async fn local_register(
     credentials: RegisterRequest,
     state: State<'_, AppState>,
 ) -> Result<LoginResponse, String> {
-    debug_log!("📝 Tentative d'enregistrement pour: {}", credentials.username);
+    let _lifecycle = state.auth_lifecycle.lock().await;
     
     let db_guard = state.db.lock().await;
     let db = db_guard
         .as_ref()
         .ok_or("Base de données non initialisée")?;
 
-    // Vérifier si l'utilisateur existe déjà
-    if let Ok(Some(_)) = db.get_user_by_username(&credentials.username).await {
-        #[cfg(debug_assertions)]
-        debug_log!("⚠️  Utilisateur {} existe déjà", credentials.username);
-        return Ok(LoginResponse {
-            success: false,
-            token: None,
-            message: "Nom d'utilisateur déjà utilisé".to_string(),
-            user_id: None,
-            email: None,
-        });
+    if db.get_vault_owner().await.map_err(|e| e.to_string())?.is_some() {
+        return Err("Un compte existe déjà sur cet appareil".into());
+    }
+
+    let username = credentials.username.trim();
+    if username.is_empty() || username.len() > 256 || credentials.email.len() > 320
+        || credentials.password.chars().count() < 12 || credentials.password.len() > 4096
+    {
+        return Err("Nom d’utilisateur, adresse e-mail ou mot de passe invalide".into());
     }
 
     // Hasher le mot de passe
@@ -154,7 +151,7 @@ pub async fn local_register(
         .map_err(|e| format!("Erreur de hashage: {}", e))?;
     
     #[cfg(debug_assertions)]
-    debug_log!("💾 Hash généré (longueur: {})", password_hash.len());
+    debug_log!("Vérificateur du mot de passe généré");
     
     // Générer un sel unique pour la dérivation de clé de chiffrement
     let crypto_salt = generate_salt();
@@ -172,28 +169,15 @@ pub async fn local_register(
 
     // Créer l'utilisateur avec l'email chiffré
     let user_id = db
-        .create_user(&credentials.username, &encrypted_email, &password_hash, &crypto_salt_b64)
+        .create_user(username, &encrypted_email, &password_hash, &crypto_salt_b64)
         .await
         .map_err(|e| format!("Erreur création utilisateur: {}", e))?;
 
     #[cfg(debug_assertions)]
     debug_log!("✅ Utilisateur créé");
     
-    // Stocker la clé dans l'enclave sécurisée (Keychain) au lieu de la RAM
-    let result = encryption_key.use_key(|k| {
-        store_encryption_key(user_id, k)
-            .map_err(|e| format!("Erreur stockage clé sécurisée: {}", e))
-    });
-    result?;
-    
-    debug_log!("🔐 Clé de chiffrement stockée dans l'enclave sécurisée (Keychain)");
-    *state.current_user_id.lock().await = Some(user_id);
-
-    // Peupler le cache vault sécurisé (XOR-masked, TTL configurable, NIST SP 800-57)
-    if state.cache_enabled {
-        let key_bytes = encryption_key.to_vec();
-        state.vault_key_cache.lock().await.store(user_id, &key_bytes);
-    }
+    store_session_key(&state, user_id, &encryption_key).await?;
+    *state.last_activity.lock().await = std::time::Instant::now();
 
     // Déverrouiller le trust store pour la nouvelle session
     if let Some(tm) = state.transfer_manager.lock().await.as_mut() {
@@ -207,6 +191,7 @@ pub async fn local_register(
     // Générer et stocker le token de session
     let token = generate_session_token();
     *state.session_token.lock().await = Some(token.clone());
+    *state.current_user_id.lock().await = Some(user_id);
     
     // Log l'événement d'inscription
     let _ = db.log_action(user_id, "REGISTER", "user", Some(user_id)).await;
@@ -216,6 +201,7 @@ pub async fn local_register(
         token: Some(token),
         message: "Compte créé avec succès".to_string(),
         user_id: Some(user_id),
+        username: Some(username.to_owned()),
         email: Some(credentials.email),
     })
 }
@@ -225,105 +211,35 @@ pub async fn local_login(
     credentials: LoginRequest,
     state: State<'_, AppState>,
 ) -> Result<LoginResponse, String> {
-    debug_log!("🔑 Tentative de connexion pour: {}", credentials.username);
-    
+    let _lifecycle = state.auth_lifecycle.lock().await;
     let db_guard = state.db.lock().await;
-    let db = db_guard
-        .as_ref()
-        .ok_or("Base de données non initialisée")?;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+    let user = db.get_vault_owner().await.map_err(|e| e.to_string())?
+        .ok_or("Aucun compte n’est configuré sur cet appareil")?;
 
-    // Récupérer l'utilisateur
-    let user = match db.get_user_by_username(&credentials.username).await {
-        Ok(Some(u)) => {
-            debug_log!("👤 Utilisateur trouvé: {} (ID: {})", u.username, u.id);
-            u
-        },
-        Ok(None) => {
-            debug_log!("❌ Aucun utilisateur trouvé avec le nom: {}", credentials.username);
-            return Ok(LoginResponse {
-                success: false,
-                token: None,
-                message: "Identifiants incorrects".to_string(),
-                user_id: None,
-                email: None,
-            })
-        }
-        Err(e) => {
-            debug_log!("❌ Erreur DB: {}", e);
-            return Err(format!("Erreur base de données: {}", e));
-        }
-    };
-
-    // Vérifier si l'utilisateur est verrouillé (anti-brute force)
-    let monitor = get_security_monitor();
-    if let Some(remaining) = monitor.is_user_locked(&credentials.username).await {
-        #[cfg(debug_assertions)]
-        debug_log!("🔒 Utilisateur verrouillé (brute force) - {} secondes restantes", remaining);
-        return Ok(LoginResponse {
-            success: false,
-            token: None,
-            message: format!("Compte temporairement verrouillé. Réessayez dans {} secondes.", remaining),
-            user_id: None,
-            email: None,
-        });
+    if db.check_account_locked(user.id).await.map_err(|e| e.to_string())? {
+        return Ok(rejected_login("Compte verrouillé"));
+    }
+    let remaining = login_delay(db, &user).await?;
+    if remaining > 0 {
+        return Ok(rejected_login(&format!("Trop de tentatives. Réessayez dans {remaining} secondes.")));
     }
 
-    // Vérifier le délai basé sur les tentatives échouées récentes
-    let failed_count = db.count_failed_logins(user.id, 2).await
-        .map_err(|e| format!("Erreur DB: {}", e))?;
-    
-    let delay_seconds = match failed_count {
-        0..=2 => 0,
-        3..=4 => 15,
-        5..=7 => 30,
-        8..=10 => 60,
-        _ => 120,
-    };
-    
-    if delay_seconds > 0 {
-        // Vérifier le temps écoulé depuis la dernière tentative échouée
-        if let Ok(Some(elapsed)) = db.get_time_since_last_failed_login(user.id).await {
-            if elapsed >= delay_seconds {
-                // Le délai est expiré, on peut tester le mot de passe
-                debug_log!("✅ Délai expiré ({}s écoulées sur {}s requis) - tentative autorisée", elapsed, delay_seconds);
-            } else {
-                // Le délai est toujours actif
-                let remaining = delay_seconds - elapsed;
-                debug_log!("⏱️ Délai actif: {}s restantes sur {}s requis ({} tentatives)", remaining, delay_seconds, failed_count);
-                return Ok(LoginResponse {
-                    success: false,
-                    token: None,
-                    message: format!("⏱️ Trop de tentatives échouées. Veuillez patienter {} secondes avant de réessayer.", remaining),
-                    user_id: None,
-                    email: None,
-                });
-            }
-        } else {
-            // Pas de dernière tentative trouvée, mais des échecs comptés - probablement expiré
-            debug_log!("⚠️ Échecs comptés mais pas de dernière tentative trouvée - autorisation");
-        }
+    if credentials.password.is_empty() || credentials.password.len() > 4096 {
+        return Ok(rejected_login("Mot de passe incorrect"));
     }
 
     // Vérifier le mot de passe
     #[cfg(debug_assertions)]
     debug_log!("🔐 Vérification du mot de passe (hash length: {})", user.password_hash.len());
-    let password_valid = verify_password(&credentials.password, &user.password_hash);
-
-    match password_valid {
-        Ok(()) => { /* mot de passe correct, on continue */ }
+    let config = match verified_argon2_config(&credentials.password, &user.password_hash) {
+        Ok(config) => config,
         Err(CryptoError::VerificationError) => {
             debug_log!("❌ Mot de passe incorrect pour l'utilisateur {}", user.id);
             
-            // Enregistrer la tentative échouée dans audit_logs
-            let _ = db.log_action(user.id, "login_failed", "auth", None).await;
-            
-            return Ok(LoginResponse {
-                success: false,
-                token: None,
-                message: "Identifiants incorrects".to_string(),
-                user_id: None,
-                email: None,
-            });
+            db.log_action(user.id, "login_failed", "auth", None).await
+                .map_err(|e| format!("Erreur DB: {e}"))?;
+            return Ok(rejected_login("Mot de passe incorrect"));
         }
         Err(e) => {
             // Erreur opérationnelle (OOM Argon2, décodage base64, etc.)
@@ -331,7 +247,7 @@ pub async fn local_login(
             eprintln!("🚨 Erreur vérification mot de passe: {}", e);
             return Err(format!("Erreur interne de vérification: {}", e));
         }
-    }
+    };
 
     debug_log!("✅ Mot de passe vérifié");
     
@@ -345,53 +261,34 @@ pub async fn local_login(
         .decode(&user.crypto_salt)
         .map_err(|e| format!("Erreur décodage sel crypto: {}", e))?;
     
-    let encryption_key = derive_encryption_key_from_password_secure(&credentials.password, &crypto_salt)
+    let encryption_key = derive_key_with_config(&credentials.password, &crypto_salt, &config)
         .map_err(|e| format!("Erreur dérivation clé: {}", e))?;
     
-    // Stocker la clé dans l'enclave sécurisée (Keychain) pour la session
-    let result = encryption_key.use_key(|k| {
-        store_encryption_key(user.id, k)
-            .map_err(|e| format!("Erreur stockage clé sécurisée: {}", e))
-    });
-    result?;
-    
-    debug_log!("🔑 Clé de chiffrement stockée dans l'enclave sécurisée (Keychain)");
-    
-    debug_log!("✅ Connexion réussie pour {}", user.username);
-    *state.current_user_id.lock().await = Some(user.id);
+    let email = read_account_email(db, user.id, &user.email, &encryption_key).await?;
 
-    // Peupler le cache vault sécurisé (XOR-masked, TTL configurable, NIST SP 800-57)
-    if state.cache_enabled {
-        let key_bytes = encryption_key.to_vec();
-        state.vault_key_cache.lock().await.store(user.id, &key_bytes);
-    }
+    store_session_key(&state, user.id, &encryption_key).await?;
+    *state.last_activity.lock().await = std::time::Instant::now();
 
-    // Update transfer peer name with actual username and auto-start mDNS discovery
+    // Charger le registre des appareils dans la session locale
     if let Some(tm) = state.transfer_manager.lock().await.as_mut() {
-        tm.set_peer_name(&user.username);
         // Déverrouiller le trust store chiffré avec la vault_key
         if let Err(e) = tm.trust_store.lock().await.unlock(&encryption_key) {
             debug_log!("⚠️  Trust store unlock failed: {}", e);
         } else {
             debug_log!("🔒 Trust store déverrouillé (ChaCha20-Poly1305)");
         }
-        // Auto-start mDNS so this device is discoverable immediately
-        if let Err(e) = tm.discovery.start_mdns_discovery().await {
-            eprintln!("[TRANSFER] Auto-start mDNS failed at login: {}", e);
-        }
     }
     
-    // Notify biometric module that a master-password login succeeded
-    // This enables biometric quick-unlock for the configured timeout period
-    biometric::notify_password_login_success();
-    
-    // Notify passkey module that a master-password login succeeded
-    // This resets the 14-day password reminder timer
-    crate::passkey::notify_password_used();
+    if let Ok(dir) = super::biometric_cmds::biometric_dir(&state).await {
+        if let Err(error) = biometric::notify_password_login_success(&dir) {
+            eprintln!("Impossible de réactiver le déverrouillage biométrique : {error}");
+        }
+    }
     
     // Générer et stocker le token de session
     let token = generate_session_token();
     *state.session_token.lock().await = Some(token.clone());
+    *state.current_user_id.lock().await = Some(user.id);
     
     // Log l'événement de connexion
     let _ = db.log_action(user.id, "LOGIN", "session", None).await;
@@ -401,8 +298,81 @@ pub async fn local_login(
         token: Some(token),
         message: "Connexion réussie".to_string(),
         user_id: Some(user.id),
+        username: Some(user.username),
         // VULN-004: Déchiffrer l'email avant de le renvoyer au frontend
-        email: decrypt_data_secure(&user.email, &encryption_key).ok()
-            .or(Some(user.email.clone())),
+        email: Some(email),
     })
+}
+
+fn rejected_login(message: &str) -> LoginResponse {
+    LoginResponse {
+        success: false,
+        token: None,
+        message: message.to_owned(),
+        user_id: None,
+        username: None,
+        email: None,
+    }
+}
+
+pub(crate) async fn login_delay(db: &Database, user: &crate::database::User) -> Result<u64, String> {
+    if let Some(seconds) = get_security_monitor().is_user_locked(&user.username).await {
+        return Ok(seconds);
+    }
+    let count = db.count_failed_logins(user.id, 2).await.map_err(|e| e.to_string())?;
+    let delay: i64 = match count {
+        0..=2 => return Ok(0),
+        3..=4 => 15,
+        5..=7 => 30,
+        8..=10 => 60,
+        _ => 120,
+    };
+    let elapsed = db.get_time_since_last_failed_login(user.id).await
+        .map_err(|e| e.to_string())?.unwrap_or_default().max(0);
+    Ok(delay.saturating_sub(elapsed).max(0) as u64)
+}
+
+/// Called only after verifying the password and deriving the account's vault key.
+async fn read_account_email(db: &Database, id: i64, stored: &str, key: &SecureKey) -> Result<String, String> {
+    if let Ok(email) = decrypt_data_secure(stored, key) {
+        return Ok(email);
+    }
+    if stored.starts_with("v2:") {
+        return Err("Le coffre ne peut pas être déchiffré avec le profil de la sauvegarde".into());
+    }
+
+    // Historical accounts could store this address in plain text. Authenticate it
+    // with the recovered vault key so biometric unlock can validate that key later.
+    let is_plain_email = stored.split_once('@').is_some_and(|(local, domain)| {
+        !local.is_empty() && !domain.is_empty() && !stored.chars().any(char::is_whitespace)
+    });
+    if is_plain_email || stored.is_empty() {
+        let encrypted = encrypt_data_secure(stored, key).map_err(|e| e.to_string())?;
+        sqlx::query("UPDATE users SET email = ? WHERE id = ? AND email = ?")
+            .bind(encrypted).bind(id).bind(stored)
+            .execute(&db.pool).await.map_err(|e| e.to_string())?;
+    }
+    Ok(stored.to_owned())
+}
+
+#[cfg(test)]
+mod biometric_compatibility_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn password_unlock_authenticates_the_legacy_plaintext_email() {
+        let files = tempfile::tempdir().unwrap();
+        let db = Database::new(&files.path().join("vault.db")).await.unwrap();
+        db.initialize().await.unwrap();
+        let email = "coffre@example.org";
+        let id = db.create_user("compte", email, "hash", "salt").await.unwrap();
+        let key = SecureKey::from_slice(&[1; 32]);
+        let wrong_key = SecureKey::from_slice(&[2; 32]);
+
+        assert_eq!(read_account_email(&db, id, email, &key).await.unwrap(), email);
+        let stored = db.get_user_by_id(id).await.unwrap().unwrap().email;
+        assert_eq!(decrypt_data_secure(&stored, &key).unwrap(), email);
+        assert!(read_account_email(&db, id, &stored, &wrong_key).await.is_err());
+        assert_eq!(db.get_user_by_id(id).await.unwrap().unwrap().email, stored);
+    }
 }

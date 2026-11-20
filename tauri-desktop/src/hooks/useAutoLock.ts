@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { tauriAPI } from '../lib/tauri-api'
@@ -20,6 +20,13 @@ export function useAutoLock() {
   const checkIntervalRef = useRef<number | null>(null)
   const pendingLockRef = useRef(false)
 
+  const [settingsRevision, setSettingsRevision] = useState(0)
+  useEffect(() => {
+    const refresh = () => setSettingsRevision((revision) => revision + 1)
+    window.addEventListener('fluxlock:auto-lock-settings', refresh)
+    return () => window.removeEventListener('fluxlock:auto-lock-settings', refresh)
+  }, [])
+
   const lockApp = useCallback(() => {
     clearAuth()
     navigate('/login')
@@ -38,10 +45,13 @@ export function useAutoLock() {
     // VULN-019: Lire les paramètres depuis sessionStorage au lieu de localStorage
     // localStorage persiste après fermeture et est manipulable; sessionStorage est éphémère
     const autoLock = sessionStorage.getItem('autoLock') === 'true' || !sessionStorage.getItem('autoLock')
-    if (!autoLock) return
+    if (!autoLock) {
+      tauriAPI.setAutoLockTimeout(0).catch(console.error)
+      return
+    }
 
     // Récupérer le délai en minutes (défaut: 15 minutes, max 60)
-    const rawTimeout = parseInt(sessionStorage.getItem('lockTimeout') || '15')
+    const rawTimeout = Number.parseInt(sessionStorage.getItem('lockTimeout') || '15', 10) || 15
     const lockTimeout = Math.min(Math.max(rawTimeout, 1), 60) // VULN-019: clamp 1-60 min
     const timeoutMs = lockTimeout * 60 * 1000
 
@@ -118,5 +128,5 @@ export function useAutoLock() {
       })
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [isAuthenticated, clearAuth, navigate, lockApp, notifyBackendActivity])
+  }, [isAuthenticated, clearAuth, navigate, lockApp, notifyBackendActivity, settingsRevision])
 }

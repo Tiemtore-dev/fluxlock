@@ -8,6 +8,7 @@ interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, '
   icon?: LucideIcon
   iconRight?: LucideIcon
   onIconRightClick?: () => void
+  iconRightLabel?: string
   size?: 'sm' | 'md' | 'lg'
   fullWidth?: boolean
 }
@@ -19,9 +20,10 @@ const sizeMap = {
 }
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ label, error, hint, icon: Icon, iconRight: IconRight, onIconRightClick, size = 'md', fullWidth = true, style, id, ...props }, ref) => {
+  ({ label, error, hint, icon: Icon, iconRight: IconRight, onIconRightClick, iconRightLabel = "Afficher ou masquer le mot de passe", size = 'md', fullWidth = true, style, id, ...props }, ref) => {
     const [focused, setFocused] = React.useState(false)
-    const inputId = id || label?.toLowerCase().replace(/\s+/g, '-')
+    const generatedId = React.useId()
+    const inputId = id || generatedId
     const { padding, fontSize, iconSize } = sizeMap[size]
 
     const wrapperStyle: React.CSSProperties = {
@@ -36,7 +38,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
       alignItems: 'center',
       gap: 'var(--space-2)',
       background: 'var(--bg-input)',
-      border: `1px solid ${error ? 'var(--border-error)' : focused ? 'var(--border-focus)' : 'var(--border)'}`,
+      border: `1px solid ${error ? 'var(--border-error)' : focused ? 'var(--border-focus)' : 'var(--control-border)'}`,
       borderRadius: 'var(--radius-md)',
       padding,
       transition: `all var(--transition-fast)`,
@@ -66,8 +68,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
               fontWeight: 500,
               color: 'var(--text-secondary)',
               fontFamily: 'var(--font-body)',
-              letterSpacing: 'var(--tracking-wide)',
-              textTransform: 'uppercase',
+              letterSpacing: 'var(--tracking-normal)',
             }}
           >
             {label}
@@ -78,23 +79,26 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
           <input
             ref={ref}
             id={inputId}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error || hint ? `${inputId}-hint` : undefined}
             onFocus={(e) => { setFocused(true); props.onFocus?.(e) }}
             onBlur={(e) => { setFocused(false); props.onBlur?.(e) }}
             style={inputStyle}
             {...props}
           />
-          {IconRight && (
+          {IconRight && onIconRightClick && (
             <button
               type="button"
               onClick={onIconRightClick}
-              tabIndex={-1}
+              aria-label={iconRightLabel}
+              disabled={props.disabled}
               style={{
                 background: 'none',
                 border: 'none',
                 cursor: 'pointer',
                 color: 'var(--text-muted)',
                 display: 'flex',
-                padding: 0,
+                padding: 4,
                 flexShrink: 0,
               }}
             >
@@ -103,7 +107,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
           )}
         </div>
         {(error || hint) && (
-          <span style={{
+          <span id={`${inputId}-hint`} style={{
             fontSize: 'var(--text-xs)',
             color: error ? 'var(--danger)' : 'var(--text-muted)',
             fontFamily: 'var(--font-body)',

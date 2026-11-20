@@ -16,7 +16,6 @@ cc = "1.0"
 tauri = { version = "2", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 uuid = { version = "1.0", features = ["v4"] }
@@ -26,23 +25,13 @@ chrono = "0.4"
 secure-vault-crypto-core = { path = "../../rust-crypto-core" }
 
 # Additional crypto utilities
+tempfile = "3.8"
 hex = "0.4"
 rand = "0.8"  # For random generation
 base64 = "0.22"  # For encoding
 
 # Secure storage in system keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service)
 keyring = "2.0"
-
-# 2FA/TOTP Authentication
-totp-rs = { version = "5.5", features = ["qr", "otpauth"] }
-qrcode = "0.14"
-image = "0.25"
-
-# Email/SMTP
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls"] }
-
-# Compression
-flate2 = "1.0"  # gzip
 
 # CSV import/export with serde integration
 csv = "1.3"
@@ -61,8 +50,6 @@ dirs = "5.0"          # Standard directory paths
 subtle = "2.5"        # Constant-time comparison
 argon2 = "0.5"        # Password hashing (pour derive_from_password)
 libc = "0.2"          # mlock/munlock for secret memory pages
-hmac = "0.12"          # V-01: HMAC pour device wrapping key derivation
-sha2 = "0.10"          # V-01: SHA-256 pour HMAC
 
 # ═══ Vault Secure Transfer ═══
 spake2 = "0.4"                          # PAKE pour wormhole handshake
@@ -70,8 +57,6 @@ chacha20poly1305 = "0.10"               # Chiffrement session transfer
 mdns-sd = "0.11"                        # mDNS/DNS-SD discovery local
 rmp-serde = "1.1"                       # MessagePack wire format
 tokio-rustls = "0.25"                   # TLS pour toutes les connexions P2P
-rustls-native-certs = "0.7"             # Certificats natifs
-pem = "3.0"                             # Parsing certificats PEM
 rcgen = "0.12"                           # Génération certificats auto-signés éphémères
 
 # Network discovery dependencies
@@ -104,9 +89,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [[bin]]
 name = "fluxlock"
 path = "src/main.rs"
-
-[dev-dependencies]
-tempfile = "3.8"
 
 [features]
 # Tauri v2 - no custom-protocol needed

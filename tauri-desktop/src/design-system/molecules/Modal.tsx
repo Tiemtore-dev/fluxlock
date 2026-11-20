@@ -1,69 +1,35 @@
-import React from 'react'
+import { useEffect, useId, useRef, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 
 interface ModalProps {
   open: boolean
   onClose: () => void
   title: string
-  children: React.ReactNode
+  children: ReactNode
   width?: number
 }
 
 export function Modal({ open, onClose, title, children, width = 520 }: ModalProps) {
-  if (!open) return null
+  const ref = useRef<HTMLDialogElement>(null)
+  const headingId = useId()
+
+  useEffect(() => {
+    const dialog = ref.current
+    if (!open || !dialog) return
+    dialog.showModal()
+    return () => dialog.close()
+  }, [open])
 
   return (
-    <div className="modal-overlay">
-      {/* Backdrop */}
-      <div
-        onClick={onClose}
-        className="animate-fade-in"
-        style={{
-          position: 'fixed',
-          inset: 0,
-          background: 'var(--bg-overlay)',
-          backdropFilter: 'blur(4px)',
-        }}
-      />
-
-      {/* Panel */}
-      <div
-        className="modal-panel animate-scale-in"
-        style={{ maxWidth: width }}
-      >
-        {/* Header */}
-        <div className="modal-header">
-          <h2 style={{
-            fontSize: 'var(--text-lg)',
-            fontWeight: 600,
-            color: 'var(--text-primary)',
-            fontFamily: 'var(--font-body)',
-          }}>
-            {title}
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--text-muted)',
-              display: 'flex',
-              padding: '4px',
-              borderRadius: 'var(--radius-sm)',
-              transition: `color var(--transition-fast)`,
-            }}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="modal-body">
-          {children}
-        </div>
-      </div>
-    </div>
+    <dialog ref={ref} className="modal-panel workspace-modal" style={{ maxWidth: width }} aria-labelledby={headingId}
+      onCancel={(event) => { event.preventDefault(); onClose() }}>
+      {open && <>
+        <header className="modal-header">
+          <h2 id={headingId}>{title}</h2>
+          <button type="button" className="workspace-close" aria-label="Fermer" onClick={onClose}><X size={20} aria-hidden="true" /></button>
+        </header>
+        <div className="modal-body">{children}</div>
+      </>}
+    </dialog>
   )
 }

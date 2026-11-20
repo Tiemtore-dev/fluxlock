@@ -9,6 +9,7 @@ import { PasswordStrength } from '../design-system/molecules'
 export default function RegisterPage() {
   const navigate = useNavigate()
   const setAuth = useAuthStore((state) => state.setAuth)
+  const dbReady = useAuthStore((state) => state.dbReady)
 
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
@@ -22,29 +23,35 @@ export default function RegisterPage() {
   const [checkingUser, setCheckingUser] = useState(true)
 
   useEffect(() => {
+    if (!dbReady) return
+    let active = true
     auth.hasExistingUser().then((exists) => {
+      if (!active) return
       setHasUser(exists)
       setCheckingUser(false)
+    }).catch(() => {
+      if (active) setError('Le coffre est indisponible. Redémarrez FluXlock pour réessayer.')
     })
-  }, [])
+    return () => { active = false }
+  }, [dbReady])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
     if (password !== confirmPassword) { setError('Les mots de passe ne correspondent pas'); return }
-    if (password.length < 12) { setError('Le mot de passe doit contenir au moins 12 caractères'); return }
+    if (Array.from(password).length < 12) { setError('Le mot de passe doit contenir au moins 12 caractères'); return }
 
     setIsLoading(true)
     try {
       const res = await auth.register(username, email, password)
       if (res.success && res.token) {
-        setAuth({ id: res.user_id?.toString() || '1', username, email }, res.token, res.token)
+        setAuth({ id: res.user_id?.toString() || '1', username: res.username || username, email })
         navigate('/')
       } else {
         setError(res.message || "Erreur lors de l'inscription")
       }
     } catch (err: any) {
-      setError(err.message || "Erreur lors de l'inscription")
+      setError(typeof err === "string" ? err : err.message || "Erreur lors de l'inscription")
     } finally {
       setIsLoading(false)
     }
@@ -53,27 +60,10 @@ export default function RegisterPage() {
   return (
     <div className="auth-page">
       <div className="auth-page-inner animate-fade-in" style={{ maxWidth: 400 }}>
-        {/* Brand */}
-        <div style={{ textAlign: 'center', marginBottom: 'var(--space-10)' }}>
-          <div style={{
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            width: 56, height: 56, borderRadius: 'var(--radius-xl)',
-            background: 'var(--accent)', boxShadow: 'var(--shadow-glow)',
-            marginBottom: 'var(--space-5)',
-          }}>
-            <Lock size={24} style={{ color: 'var(--text-inverse)' }} />
-          </div>
-          <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', letterSpacing: 'var(--tracking-tight)' }}>
-            FluXlock
-          </h1>
-          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-1)' }}>
-            Créer un nouveau compte
-          </p>
-        </div>
-
-        {/* Card */}
-        <div className="auth-card">
-          {checkingUser ? (
+        <div className="auth-card auth-unlock">
+          <div className="auth-brand"><img src="/fluxlock-mark.png" alt="" width={52} height={52} />FluXlock</div>
+          <h1>Créer votre coffre</h1>
+          {checkingUser && error ? <p className="auth-error" role="alert">{error}</p> : checkingUser ? (
             <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-10)' }}>
               <Spinner size={32} />
             </div>
@@ -100,10 +90,10 @@ export default function RegisterPage() {
             </div>
           ) : (
             <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-              <Input label="Nom d'utilisateur" icon={User} value={username} onChange={(e) => setUsername(e.target.value)} placeholder="johndoe" required autoFocus />
-              <Input label="Email" type="email" icon={Mail} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="john@example.com" required />
+              <Input label="Nom d'utilisateur" icon={User} value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required autoFocus />
+              <Input label="Email" type="email" icon={Mail} value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
               <div>
-                <Input label="Mot de passe" type={showPassword ? 'text' : 'password'} icon={Lock} iconRight={showPassword ? EyeOff : Eye} onIconRightClick={() => setShowPassword((v) => !v)} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••••••" required />
+                <Input label="Mot de passe" type={showPassword ? 'text' : 'password'} icon={Lock} iconRight={showPassword ? EyeOff : Eye} onIconRightClick={() => setShowPassword((v) => !v)} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" required />
                 <div style={{ marginTop: 'var(--space-2)' }}>
                   <PasswordStrength password={password} />
                 </div>
@@ -111,7 +101,7 @@ export default function RegisterPage() {
                   Minimum 12 caractères
                 </p>
               </div>
-              <Input label="Confirmer le mot de passe" type={showConfirm ? 'text' : 'password'} icon={Lock} iconRight={showConfirm ? EyeOff : Eye} onIconRightClick={() => setShowConfirm((v) => !v)} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••••••" required />
+              <Input label="Confirmer le mot de passe" type={showConfirm ? 'text' : 'password'} icon={Lock} iconRight={showConfirm ? EyeOff : Eye} onIconRightClick={() => setShowConfirm((v) => !v)} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} autoComplete="new-password" required />
 
               {error && (
                 <div style={{

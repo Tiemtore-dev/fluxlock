@@ -30,9 +30,7 @@ async fn resolve_backup_dir(state: &AppState) -> Result<std::path::PathBuf, Stri
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateBackupRequest {
-    pub master_password: Option<String>,
-    /// Authentication method: "passkey" to use passkey, null for password.
-    pub auth_method: Option<String>,
+    pub master_password: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,38 +60,19 @@ pub async fn create_backup(
         .map_err(|e| format!("Erreur récupération utilisateur: {}", e))?
         .ok_or("Utilisateur non trouvé")?;
 
-    // Authenticate: passkey, password, or biometric
-    let master_password_for_backup = if request.auth_method.as_deref() == Some("passkey") {
-        // Passkey auth — authenticate and use a dummy password for backup encryption
-        // The backup is encrypted with the master_password, so we need it.
-        // With passkey, we derive a backup-specific key from the vault key.
-        let (_pk_uid, _pk_name, _key_bytes) =
-            crate::passkey::authenticate_passkey(&user.username, None)
-                .map_err(|e| format!("Échec passkey: {}", e))?;
-        // For backup compatibility, we still need the user's password.
-        // Since passkey wraps the vault key (not the password), we use
-        // the vault key directly to create the backup.
-        return Err("Les backups nécessitent le mot de passe maître pour le chiffrement. \
-                    La passkey ne peut pas être utilisée pour créer un backup car le backup \
-                    doit être déchiffrable avec le mot de passe sur un autre appareil.".to_string());
-    } else {
-        request.master_password
-            .as_ref()
-            .ok_or("Mot de passe maître requis pour le backup")?
-            .clone()
-    };
+    verify_password(&request.master_password, &user.password_hash)
+        .map_err(|_| "Mot de passe incorrect")?;
 
     // Obtenir les chemins
     let data_dir = resolve_data_dir(&state).await?;
-    let db_path = data_dir.join("sv.db");
     let files_dir = data_dir.join("files");
     let backup_dir = resolve_backup_dir(&state).await?;
 
     // Créer le backup
     let backup_path = backup_manager::create_backup(
-        &db_path,
+        db,
         &files_dir,
-        &master_password_for_backup,
+        &request.master_password,
         &user.username,
         &backup_dir,
     )
@@ -177,8 +156,7 @@ pub async fn export_text_to_downloads(filename: String, content: String) -> Resu
 pub struct RestoreBackupRequest {
     pub backup_path: String,
     pub master_password: String,
-    // Note: restore always requires the master password because
-    // the backup file is encrypted with it. Passkey cannot be used here.
+    pub current_password: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -193,23 +171,30 @@ pub async fn restore_backup(
     request: RestoreBackupRequest,
     state: State<'_, AppState>,
 ) -> Result<RestoreBackupResponse, String> {
-    // Fermer les connexions actuelles
-    *state.current_user_id.lock().await = None;
-    *state.db.lock().await = None;
+    let _lifecycle = state.auth_lifecycle.lock().await;
+    let id = crate::validate_session(&state).await?;
+    let mut db_guard = state.db.lock().await;
+    let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
+    let owner = db.get_user_by_id(id).await.map_err(|e| e.to_string())?.ok_or("Compte introuvable")?;
+    verify_password(&request.current_password, &owner.password_hash)
+        .map_err(|_| "Mot de passe actuel incorrect")?;
 
-    let backup_path = std::path::PathBuf::from(&request.backup_path);
+    let path = std::path::Path::new(&request.backup_path);
     let data_dir = resolve_data_dir(&state).await?;
     let db_path = data_dir.join("sv.db");
     let files_dir = data_dir.join("files");
+    db.pool.close().await;
+    let result = backup_manager::restore_backup(path, &request.master_password, &db_path, &files_dir).await;
 
-    // Restaurer le backup
-    let metadata = backup_manager::restore_backup(
-        &backup_path,
-        &request.master_password,
-        &db_path,
-        &files_dir,
-    )
-    .await?;
+    let replacement = Database::new(&db_path).await.map_err(|e| e.to_string())?;
+    *db_guard = Some(replacement);
+    drop(db_guard);
+    let metadata = result?;
+    *state.current_user_id.lock().await = None;
+    *state.session_token.lock().await = None;
+    super::session::clear_session_key(&state, id).await;
+    super::session::clear_transfer_state(&state).await;
+    let _ = crate::biometric::disable_biometric(&data_dir);
 
     Ok(RestoreBackupResponse {
         success: true,
@@ -233,13 +218,13 @@ pub async fn get_backup_metadata(
 
 // ========== COMMANDE RESET VAULT ==========
 
-/// CFG-003: Réinitialisation complète avec vérification du mot de passe ou passkey
+/// CFG-003: Réinitialisation complète avec vérification du mot de passe
 #[tauri::command]
 pub async fn reset_vault_completely(
-    password: Option<String>,
-    auth_method: Option<String>,
+    password: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let _lifecycle = state.auth_lifecycle.lock().await;
     debug_log!("⚠️ Réinitialisation complète du coffre-fort demandée");
     
     // CFG-003: Vérifier l'identité avant la destruction
@@ -257,28 +242,21 @@ pub async fn reset_vault_completely(
             .map_err(|e| format!("Erreur récupération utilisateur: {}", e))?
             .ok_or("Utilisateur non trouvé")?;
         
-        if auth_method.as_deref() == Some("passkey") {
-            // Passkey authentication for reset
-            let (pk_uid, _, _) = crate::passkey::authenticate_passkey(&user.username, None)
-                .map_err(|e| format!("Échec passkey: {}", e))?;
-            if pk_uid != user_id {
-                return Err("❌ Incohérence de compte — réinitialisation refusée".to_string());
-            }
-        } else {
-            let pw = password.as_ref().ok_or("❌ Mot de passe requis")?;
-            if verify_password(pw, &user.password_hash).is_err() {
-                debug_log!("❌ Mot de passe incorrect pour réinitialisation du coffre");
-                return Err("❌ Mot de passe incorrect — réinitialisation refusée".to_string());
-            }
-        }
+        verify_password(&password, &user.password_hash)
+            .map_err(|_| "Mot de passe incorrect. Réinitialisation refusée.")?;
     }
-    
-    // Nettoyer l'ID utilisateur courant
+
     *state.current_user_id.lock().await = None;
-    
-    // Fermer la connexion à la base de données
-    *state.db.lock().await = None;
-    
+    *state.session_token.lock().await = None;
+    super::session::clear_session_key(&state, user_id).await;
+    super::session::clear_transfer_state(&state).await;
+    crate::biometric::disable_biometric(&resolve_data_dir(&state).await?)?;
+    let mut database = state.db.lock().await;
+    if let Some(db) = database.take() {
+        db.pool.close().await;
+    }
+    drop(database);
+
     // Obtenir le répertoire de données (stocké par init_local_db)
     // Fallback: hidden_storage pour rétrocompatibilité desktop
     let app_data_dir = {

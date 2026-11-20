@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
+import { useAuthStore } from './stores/authStore'
 import './index.css'
 
 // Configuration React Query
@@ -13,6 +14,12 @@ const queryClient = new QueryClient({
       staleTime: 5 * 60 * 1000, // 5 minutes
     },
   },
+})
+
+useAuthStore.subscribe((state, previous) => {
+  if (!state.isAuthenticated && previous.isAuthenticated) {
+    queryClient.clear()
+  }
 })
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

@@ -107,6 +107,7 @@ export interface AuthResponse {
   token?: string
   message: string
   user_id?: number
+  username?: string
   email?: string
 }
 
@@ -130,22 +131,21 @@ export interface AutoLockStatus {
 
 export const auth = {
   hasExistingUser: () =>
-    invoke<boolean>('has_existing_user').catch(() => false),
+    invoke<boolean>('has_existing_user'),
 
   register: (username: string, email: string, password: string) =>
     invoke<AuthResponse>('local_register', {
       credentials: { username, email, password },
     }),
 
-  login: (username: string, password: string) =>
+  login: (password: string) =>
     invoke<AuthResponse>('local_login', {
-      credentials: { username, password },
+      credentials: { password },
     }),
 
   logout: () => invoke('local_logout').catch(() => {}),
 
-  checkLoginDelay: (username: string) =>
-    invoke<number>('check_login_delay', { username }),
+  checkLoginDelay: () => invoke<number>('check_login_delay'),
 }
 
 /* ─── Biometric ─── */
@@ -174,51 +174,17 @@ export const biometric = {
       } as BiometricStatus
     }),
 
-  enable: () => invoke<string>('enable_biometric'),
+  enable: (password: string) => invoke<string>('enable_biometric', { password }),
 
   disable: () => invoke<string>('disable_biometric'),
 
-  login: (username: string) => invoke<AuthResponse>('biometric_login', { username }),
+  login: () => invoke<AuthResponse>('biometric_login'),
 
   /** Android Keystore flow: frontend provides the key retrieved from TEE/StrongBox */
-  loginWithKey: (username: string, keyB64: string) =>
-    invoke<AuthResponse>('biometric_login_with_key', { username, keyB64 }),
+  loginWithKey: (keyB64: string) =>
+    invoke<AuthResponse>('biometric_login_with_key', { keyB64 }),
 
   emergencyLock: () => invoke<string>('biometric_emergency_lock'),
-}
-
-/* ─── Passkey (FIDO2-like local + hybrid PQ) ─── */
-
-export interface PasskeyStatus {
-  available: boolean
-  enrolled: boolean
-  enrolled_username?: string
-  /** true if > 14 days since last password login — user must enter password */
-  needs_password_reminder: boolean
-}
-
-export const passkey = {
-  checkStatus: () =>
-    invoke<PasskeyStatus>('check_passkey').catch((err) => {
-      console.error('[vault] check_passkey failed:', err)
-      return {
-        available: false,
-        enrolled: false,
-        needs_password_reminder: false,
-      } as PasskeyStatus
-    }),
-
-  /** Register a new passkey (requires active session with password login) */
-  register: () => invoke<string>('register_passkey'),
-
-  /** Login with passkey (always-on: no cold start, no timeout) */
-  login: (username: string, androidKey?: string) => invoke<AuthResponse>('passkey_login', { username, androidKey }),
-
-  /** Re-authenticate with passkey for sensitive operations (CSV, backup, etc.) */
-  authenticate: (androidKey?: string) => invoke<string>('passkey_authenticate', { androidKey }),
-
-  /** Delete the passkey enrollment */
-  delete: () => invoke<string>('delete_passkey'),
 }
 
 /* ─── System ─── */
@@ -374,9 +340,8 @@ export const files = {
     })
   },
 
-  decrypt: (id: number) => invoke<string>('decrypt_file', { id }),
 
-  decryptToPath: (id: number, outputPath: string) =>
+  decryptToPath: (id: number, outputPath?: string) =>
     invoke<string>('decrypt_file_to_path', { id, outputPath }),
 
   delete: (id: number) => invoke<boolean>('delete_secure_file', { id }),
@@ -531,11 +496,7 @@ export interface SyncPairingResult {
   device_name: string
 }
 
-export interface AutoSyncResult {
-  success: boolean
-  merged_count: number
-  peer_name: string
-}
+
 
 export const transfer = {
   createOffer: (itemType: string, itemIds: number[], crossNetwork = false) =>
@@ -605,10 +566,4 @@ export const transfer = {
   joinSyncPairing: (wormholeCode: string) =>
     invoke<SyncPairingResult>('transfer_join_sync_pairing', { wormholeCode }),
 
-  /** Auto-sync avec un pair appairé découvert sur le réseau local (verified beacon). */
-  autoSyncWithPeer: (peerAddr: string, peerPort: number) =>
-    invoke<AutoSyncResult>('transfer_auto_sync_with_peer', { peerAddr, peerPort }),
-
-  syncTrustStore: (transferId: string) =>
-    invoke<number>('transfer_sync_trust_store', { transferId }),
 }

@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, type FormEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { HardDrive, Search, FolderOpen, RefreshCw, Upload, AlertTriangle } from 'lucide-react'
-import { AppShell } from '../design-system/layouts'
-import { Button, Input, Spinner, Badge } from '../design-system/atoms'
-import { Modal, EmptyState } from '../design-system/molecules'
+import { FolderOpen, RefreshCw, HardDriveDownload } from 'lucide-react'
+import { WorkspacePage } from '../design-system/layouts'
+import { Button, Input, Spinner } from '../design-system/atoms'
+import { Modal } from '../design-system/molecules'
 import { useToast } from '../design-system/organisms'
 import { hasAndroidStorage, saveFileToPublic } from '../lib/public-storage'
 
@@ -20,16 +20,20 @@ interface BackupInfo { path: string; metadata: BackupMetadata }
 interface CreateBackupResponse { success: boolean; backup_path?: string; message: string }
 interface RestoreBackupResponse { success: boolean; message: string; metadata?: BackupMetadata }
 
-const fmt = (iso: string) => { try { return new Date(iso).toLocaleString('fr-FR') } catch { return iso } }
+const filename = (path: string) => path.split(/[\\/]/).pop() || path
 
 export default function BackupRestorePage() {
   const { toast } = useToast()
   const [backups, setBackups] = useState<BackupInfo[]>([])
   const [loading, setLoading] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+  const [restoreError, setRestoreError] = useState('')
+  const [searchError, setSearchError] = useState('')
   const [searching, setSearching] = useState(false)
   const [masterPw, setMasterPw] = useState('')
   const [showRestore, setShowRestore] = useState(false)
   const [restorePw, setRestorePw] = useState('')
+  const [currentPw, setCurrentPw] = useState('')
   const [restorePath, setRestorePath] = useState<string | null>(null)
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -37,17 +41,19 @@ export default function BackupRestorePage() {
 
   const searchBackups = async () => {
     setSearching(true)
+    setSearchError('')
     try {
       const r: { backups: BackupInfo[] } = await invoke('search_backups')
       setBackups(r.backups)
-      toast(`${r.backups.length} backup(s) trouvé(s)`, 'success')
-    } catch (e: any) { toast('Erreur recherche : ' + e, 'error') }
+    } catch (error) { setSearchError(String(error)) }
     finally { setSearching(false) }
   }
 
   useEffect(() => { searchBackups() }, [])
 
-  const createBackup = async () => {
+  const createBackup = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (loading || restoring) return
     if (!masterPw) { toast('Mot de passe maître requis', 'error'); return }
     setLoading(true)
     try {
@@ -73,16 +79,37 @@ export default function BackupRestorePage() {
     finally { setLoading(false) }
   }
 
-  const confirmRestore = async () => {
-    if (!restorePath || !restorePw) return
-    setShowRestore(false); setLoading(true)
-    toast('Restauration en cours…', 'info')
+  const closeRestore = () => {
+    if (restoring) return
+    setShowRestore(false)
+    setRestorePath(null)
+    setRestorePw('')
+    setCurrentPw('')
+    setRestoreError('')
+  }
+
+  const confirmRestore = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!restorePath || !restorePw || !currentPw || restoring || loading) return
+    setRestoring(true)
+    setRestoreError('')
     try {
-      const r: RestoreBackupResponse = await invoke('restore_backup', { request: { backup_path: restorePath, master_password: restorePw } })
-      if (r.success) { toast(r.message, 'success'); setTimeout(() => window.location.reload(), 3000) }
-      else { toast(r.message, 'error'); setLoading(false) }
-    } catch (e: any) { toast('Échec restauration : ' + e, 'error'); setLoading(false) }
-    setRestorePw(''); setRestorePath(null)
+      const response: RestoreBackupResponse = await invoke('restore_backup', {
+        request: { backup_path: restorePath, master_password: restorePw, current_password: currentPw },
+      })
+      if (response.success) {
+        closeRestore()
+        toast(response.message, 'success')
+        setTimeout(() => window.location.reload(), 1500)
+        return
+      }
+      setRestoreError(response.message)
+    } catch (error) {
+      setRestoreError(String(error))
+    }
+    setRestoring(false)
+    setRestorePw('')
+    setCurrentPw('')
   }
 
   // Android: the system picker returns content, not a path, so read it and hand it to the backend.
@@ -90,6 +117,7 @@ export default function BackupRestorePage() {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
+    if (file.size > 64 * 1024 * 1024) { toast('Sauvegarde trop volumineuse', 'error'); return }
     try {
       const content = await file.text()
       const path: string = await invoke('import_backup_content', { content })
@@ -112,105 +140,66 @@ export default function BackupRestorePage() {
     } catch (e: any) { toast('Erreur fichier : ' + e, 'error') }
   }
 
-  const card: React.CSSProperties = { background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-6)' }
-
   return (
-    <AppShell>
-      <div className="page-content" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-        {/* Header */}
-        <div className="page-header">
-          <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--text-3xl)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 'var(--space-3)', margin: 0 }}>
-            <HardDrive size={28} style={{ color: 'var(--accent)' }} /> Backup & Restauration
-          </h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>Sauvegardez et restaurez votre coffre-fort</p>
-        </div>
-
-        {/* Create backup */}
-        <div style={card}>
-          <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', marginBottom: 'var(--space-4)' }}>Créer un backup</h2>
-          <div style={{ display: 'flex', gap: 'var(--space-4)', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-            <div style={{ flex: 1 }}>
-              <Input label="Mot de passe maître" type="password" value={masterPw} onChange={(e) => setMasterPw(e.target.value)} placeholder="Entrez votre mot de passe" disabled={loading} />
-            </div>
-            <Button icon={Upload} onClick={createBackup} disabled={loading || !masterPw}>
-              {loading ? 'Création…' : 'Créer'}
-            </Button>
+    <WorkspacePage title="Sauvegardes" description="Créez une copie chiffrée du coffre ou reprenez vos données à partir d’une archive.">
+      <div className="workspace-columns">
+        <form className="workspace-panel workspace-stack" onSubmit={createBackup}>
+          <div>
+            <h2>Créer une sauvegarde</h2>
+            <p>{isAndroid ? 'Une copie sera enregistrée dans Documents sur cet appareil.' : 'Une copie sera enregistrée dans le dossier de sauvegardes du coffre.'}</p>
           </div>
-          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)' }}>{isAndroid
-              ? 'Enregistré dans Documents/FluXlock/ (conservé même si vous désinstallez l\'application)'
-              : 'Sauvegardé dans Documents/SecureVault Backups/'}
-          </p>
-          {lastSavedAt && (
-            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--success)', marginTop: 'var(--space-1)', wordBreak: 'break-all' }}>Dernier backup : {lastSavedAt}</p>
-          )}
-          <input ref={fileInputRef} type="file" style={{ display: 'none' }} onChange={onAndroidFilePicked} />
-        </div>
+          <Input label="Mot de passe maître" type="password" autoComplete="current-password" value={masterPw}
+            onChange={(event) => setMasterPw(event.target.value)} required disabled={loading || restoring} />
+          <div><Button type="submit" icon={HardDriveDownload} loading={loading} disabled={!masterPw || restoring}>Créer la sauvegarde</Button></div>
+          {lastSavedAt && <p role="status">Sauvegarde enregistrée dans {lastSavedAt}</p>}
+        </form>
 
-        {/* Backup list */}
-        <div style={card}>
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-4">
-            <h2 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 'var(--text-lg)', margin: 0 }}>Backups disponibles</h2>
-            <div className="flex flex-wrap gap-2 w-full sm:w-auto">
-              <Button variant="secondary" icon={FolderOpen} onClick={selectCustom} className="flex-1 sm:flex-initial">Ouvrir .svbackup</Button>
-              <Button variant="secondary" icon={RefreshCw} onClick={searchBackups} disabled={searching} className="flex-1 sm:flex-initial">
-                {searching ? 'Recherche…' : 'Rechercher'}
-              </Button>
-            </div>
+        <section className="workspace-panel workspace-stack" aria-labelledby="restore-section">
+          <div>
+            <h2 id="restore-section">Restaurer une sauvegarde</h2>
+            <p>Choisissez une archive. La restauration remplacera le contenu du coffre actuel après confirmation.</p>
           </div>
-
-          {backups.length === 0 ? (
-            <EmptyState icon={Search} title="Aucun backup trouvé" description="Créez votre premier backup ou ouvrez un fichier .svbackup existant" />
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-              {backups.map((b, i) => (
-                <div key={i} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 'var(--space-4)' }} className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="flex-1 min-w-0 w-full">
-                    <p style={{ fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
-                      {b.metadata.username}@{b.metadata.device_name}
-                    </p>
-                    <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', margin: '4px 0' }}>
-                      {fmt(b.metadata.created_at)} · {b.metadata.file_count} fichier(s) · v{b.metadata.version}
-                    </p>
-                    <p style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0 }} className="break-all">{b.path}</p>
-                  </div>
-                  <Button variant="secondary" onClick={() => { setRestorePath(b.path); setRestorePw(''); setShowRestore(true) }} disabled={loading} className="w-full sm:w-auto flex-shrink-0">
-                    Restaurer
-                  </Button>
+          <div className="workspace-actions">
+            <Button variant="secondary" icon={FolderOpen} onClick={selectCustom} disabled={restoring}>Ouvrir un fichier .svbackup</Button>
+            <Button variant="ghost" icon={RefreshCw} onClick={searchBackups} loading={searching}>Actualiser</Button>
+          </div>
+          <input ref={fileInputRef} type="file" hidden onChange={onAndroidFilePicked} />
+          {searchError && <p className="workspace-error" role="alert">Impossible de rechercher les sauvegardes. {searchError}</p>}
+          {searching && <p role="status" className="workspace-label"><Spinner size={17} /> Recherche des archives…</p>}
+          {!searching && !backups.length && <p className="workspace-empty">Aucune archive chargée.</p>}
+          {!!backups.length && <ul className="workspace-list">
+            {backups.map(({ path, metadata }) => (
+              <li key={path} className="workspace-row">
+                <div className="workspace-row-copy">
+                  <strong>{filename(path)}</strong>
+                  <span>{new Date(metadata.created_at).toLocaleString('fr-FR')}</span>
+                  <span>{metadata.username} · {metadata.device_name}</span>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Warning */}
-        <div style={{ background: 'var(--warning-muted)', borderLeft: '4px solid var(--warning)', borderRadius: 'var(--radius-md)', padding: 'var(--space-4)' }}>
-          <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-start' }}>
-            <AlertTriangle size={20} style={{ color: 'var(--warning)', flexShrink: 0, marginTop: 2 }} />
-            <div>
-              <h3 style={{ fontWeight: 700, color: 'var(--warning)', marginBottom: 'var(--space-2)' }}>Important</h3>
-              <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                <li>Les backups sont chiffrés avec votre mot de passe maître</li>
-                <li>La restauration remplacera toutes vos données actuelles</li>
-                <li>Conservez vos backups dans un endroit sûr</li>
-              </ul>
-            </div>
-          </div>
-        </div>
+                <Button variant="secondary" disabled={loading || restoring} onClick={() => {
+                  setRestorePath(path)
+                  setRestoreError('')
+                  setShowRestore(true)
+                }} aria-label={`Restaurer ${filename(path)}`}>Restaurer</Button>
+              </li>
+            ))}
+          </ul>}
+        </section>
       </div>
 
-      {/* Restore modal */}
-      <Modal open={showRestore} onClose={() => { setShowRestore(false); setRestorePw('') }} title="Restauration du backup">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-          <div style={{ background: 'var(--warning-muted)', borderLeft: '4px solid var(--warning)', borderRadius: 'var(--radius-md)', padding: 'var(--space-3)' }}>
-            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--warning)', fontWeight: 600, margin: 0 }}>Cette action remplacera TOUTES vos données actuelles !</p>
+      <Modal open={showRestore} onClose={closeRestore} title="Restaurer une sauvegarde">
+        <form className="workspace-stack" onSubmit={confirmRestore}>
+          <p className="workspace-danger">Le contenu actuel du coffre sera remplacé par celui de <strong>{restorePath && filename(restorePath)}</strong>.</p>
+          <Input type="password" label="Mot de passe de la sauvegarde" value={restorePw} required disabled={restoring}
+            onChange={(event) => setRestorePw(event.target.value)} />
+          <Input type="password" label="Mot de passe du coffre actuel" value={currentPw} required disabled={restoring}
+            onChange={(event) => setCurrentPw(event.target.value)} autoComplete="current-password" />
+          {restoreError && <p className="workspace-error" role="alert">{restoreError}</p>}
+          <div className="workspace-actions">
+            <Button variant="secondary" onClick={closeRestore} disabled={restoring}>Annuler</Button>
+            <Button variant="danger" type="submit" loading={restoring} disabled={!restorePw || !currentPw}>Restaurer et remplacer</Button>
           </div>
-          <Input type="password" label="Mot de passe maître" value={restorePw} onChange={(e) => setRestorePw(e.target.value)} onKeyDown={(e: React.KeyboardEvent) => e.key === 'Enter' && confirmRestore()} placeholder="Mot de passe" autoFocus />
-          <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
-            <Button fullWidth variant="secondary" onClick={() => { setShowRestore(false); setRestorePw('') }}>Annuler</Button>
-            <Button fullWidth variant="danger" onClick={confirmRestore} disabled={!restorePw}>Confirmer</Button>
-          </div>
-        </div>
+        </form>
       </Modal>
-    </AppShell>
+    </WorkspacePage>
   )
 }

@@ -20,6 +20,7 @@
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::io::Write;
 use zeroize::Zeroize;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
@@ -125,6 +126,23 @@ impl TrustStore {
     /// Appelé après le login quand la clé de chiffrement est disponible.
     pub fn unlock(&mut self, vault_key: &SecureKey) -> Result<(), String> {
         // Dériver une sous-clé dédiée via HKDF
+        self.lock();
+        let result = self.unlock_inner(vault_key);
+        if result.is_err() {
+            self.lock();
+        }
+        result
+    }
+
+    pub(crate) fn lock(&mut self) {
+        self.ts_key = None;
+        self.device_keypair = None;
+        self.sync_enabled = false;
+        self.peers.clear();
+        self.sync_devices.clear();
+    }
+
+    fn unlock_inner(&mut self, vault_key: &SecureKey) -> Result<(), String> {
         let ts_key = vault_key.use_key(|k| {
             let derived = secure_vault_crypto::derive_key_hkdf(
                 k,
@@ -241,17 +259,11 @@ impl TrustStore {
         let encrypted = encrypt_data_secure(&json, key)
             .map_err(|e| format!("Chiffrement trust store: {}", e))?;
 
-        std::fs::write(&self.store_path, &encrypted)
-            .map_err(|e| format!("Écriture trust store: {}", e))?;
-
-        // Restreindre les permissions au propriétaire uniquement (E-03)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&self.store_path, perms)
-                .map_err(|e| format!("Permissions trust store: {}", e))?;
-        }
+        let parent = self.store_path.parent().ok_or("Répertoire de confiance invalide")?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+        staged.write_all(encrypted.as_bytes()).map_err(|e| e.to_string())?;
+        staged.as_file().sync_all().map_err(|e| e.to_string())?;
+        staged.persist(&self.store_path).map_err(|e| e.error.to_string())?;
 
         Ok(())
     }
@@ -317,8 +329,8 @@ impl TrustStore {
         let mut signed_peers = self.peers.clone();
         for (_, peer) in signed_peers.iter_mut() {
             // Données canoniques à signer : nom + fingerprint + trusted_since + transfer_count
-            let canon = format!("{}|{}|{}|{}", peer.name, peer.fingerprint, peer.trusted_since, peer.transfer_count);
-            let sig = kp.sign(canon.as_bytes())
+            let canon = signed_peer_bytes(peer)?;
+            let sig = kp.sign(&canon)
                 .map_err(|e| format!("Signature ML-DSA: {}", e))?;
             peer.signature = Some(B64.encode(&sig));
             peer.signer_vk = Some(vk_b64.clone());
@@ -336,46 +348,32 @@ impl TrustStore {
     /// Vérifie les signatures ML-DSA-65 avant la fusion.
     /// Stratégie de fusion : garder le pair avec le `transfer_count` le plus élevé
     pub fn merge_from_sync(&mut self, json: &str) -> Result<u32, String> {
-        // Essayer d'abord le nouveau format signé
-        let (remote_peers, signer_vk_b64) = if let Ok(signed) = serde_json::from_str::<SyncExportData>(json) {
-            (signed.peers, Some(signed.signer_verifying_key))
-        } else {
-            // Fallback : ancien format non signé (migration)
-            let legacy: TrustStoreData = serde_json::from_str(json)
-                .map_err(|e| format!("Parse sync data: {}", e))?;
-            (legacy.peers, None)
-        };
+        if !self.is_unlocked() || !self.sync_enabled {
+            return Err("La synchronisation du registre doit être activée".into());
+        }
+        let data: SyncExportData = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let signer = data.signer_verifying_key;
+        if !self.sync_devices.iter().any(|d| d.verifying_key == signer) {
+            return Err("Appareil non autorisé pour la synchronisation".into());
+        }
 
-        // Vérifier que le signataire est autorisé (si sync activé)
-        if self.sync_enabled {
-            if let Some(ref vk_b64) = signer_vk_b64 {
-                let authorized = self.sync_devices.iter().any(|d| d.verifying_key == *vk_b64);
-                if !authorized {
-                    return Err("Appareil non autorisé pour la synchronisation".to_string());
-                }
-            } else {
-                return Err("Données non signées rejetées (ML-DSA requis)".to_string());
+        let vk_der = B64.decode(&signer).map_err(|e| e.to_string())?;
+        let remote_peers = data.peers;
+        for (index, peer) in &remote_peers {
+            if index != &peer.fingerprint || peer.signer_vk.as_deref() != Some(signer.as_str()) {
+                return Err("Identité de pair incohérente".into());
+            }
+            let sig = peer.signature.as_deref().ok_or("Signature de pair manquante")?;
+            let sig = B64.decode(sig).map_err(|e| e.to_string())?;
+            let valid = secure_vault_crypto::verify_ml_dsa(&vk_der, &signed_peer_bytes(peer)?, &sig)
+                .map_err(|e| e.to_string())?;
+            if !valid {
+                return Err("Signature d’entrée invalide".into());
             }
         }
 
-        // Vérifier les signatures si présentes
-        if let Some(ref vk_b64) = signer_vk_b64 {
-            let vk_der = B64.decode(vk_b64)
-                .map_err(|e| format!("Décodage VK base64: {}", e))?;
-            for (_, peer) in &remote_peers {
-                if let (Some(ref sig_b64), Some(_)) = (&peer.signature, &peer.signer_vk) {
-                    let sig_bytes = B64.decode(sig_b64)
-                        .map_err(|e| format!("Décodage signature base64: {}", e))?;
-                    let canon = format!("{}|{}|{}|{}", peer.name, peer.fingerprint, peer.trusted_since, peer.transfer_count);
-                    let valid = secure_vault_crypto::verify_ml_dsa(&vk_der, canon.as_bytes(), &sig_bytes)
-                        .map_err(|e| format!("Vérification ML-DSA: {}", e))?;
-                    if !valid {
-                        return Err(format!("Signature invalide pour le pair '{}'", peer.name));
-                    }
-                }
-            }
-        }
-
+        let peers_before = self.peers.clone();
+        let devices_before = self.sync_devices.clone();
         let mut merged_count = 0u32;
         for (fingerprint, remote_peer) in remote_peers {
             match self.peers.get(&fingerprint) {
@@ -390,18 +388,42 @@ impl TrustStore {
             }
         }
 
-        // Mettre à jour la date de dernière sync pour l'appareil
-        if let Some(ref vk_b64) = signer_vk_b64 {
-            let now = chrono::Utc::now().to_rfc3339();
-            if let Some(dev) = self.sync_devices.iter_mut().find(|d| d.verifying_key == *vk_b64) {
-                dev.last_sync = Some(now);
-            }
+        if let Some(device) = self.sync_devices.iter_mut().find(|d| d.verifying_key == signer) {
+            device.last_sync = Some(chrono::Utc::now().to_rfc3339());
         }
-
-        if merged_count > 0 {
-            self.save()?;
+        if let Err(error) = self.save() {
+            self.peers = peers_before;
+            self.sync_devices = devices_before;
+            return Err(error);
         }
         Ok(merged_count)
+    }
+
+    pub(crate) fn pair_and_merge(&mut self, name: &str, key: &str, trust_data: &str) -> Result<u32, String> {
+        if !self.is_unlocked() {
+            return Err("Registre de confiance verrouillé".into());
+        }
+        let data: SyncExportData = serde_json::from_str(trust_data).map_err(|e| e.to_string())?;
+        if data.signer_verifying_key != key || key.len() > 4096 || name.len() > 256 {
+            return Err("Identité de l’appareil incohérente".into());
+        }
+        let previous_devices = self.sync_devices.clone();
+        let previous_status = self.sync_enabled;
+        if !self.sync_devices.iter().any(|device| device.verifying_key == key) {
+            self.sync_devices.push(SyncDevice {
+                name: name.to_owned(),
+                verifying_key: key.to_owned(),
+                added_at: chrono::Utc::now().to_rfc3339(),
+                last_sync: None,
+            });
+        }
+        self.sync_enabled = true;
+        let result = self.merge_from_sync(trust_data);
+        if result.is_err() {
+            self.sync_devices = previous_devices;
+            self.sync_enabled = previous_status;
+        }
+        result
     }
 
     /// Retourne la clé de vérification ML-DSA-65 de cet appareil (base64 SPKI DER)
@@ -466,6 +488,17 @@ impl TrustStore {
     }
 }
 
+fn signed_peer_bytes(peer: &TrustedPeer) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&(
+        "fluxlock/trust-sync/v2",
+        &peer.name,
+        &peer.fingerprint,
+        &peer.trusted_since,
+        &peer.last_seen,
+        peer.transfer_count,
+    )).map_err(|e| e.to_string())
+}
+
 impl Drop for TrustStore {
     fn drop(&mut self) {
         // Zeroize les fingerprints et noms en mémoire
@@ -489,6 +522,35 @@ mod tests {
         let key = SecureKey::from_slice(&[0x42u8; 32]);
         store.unlock(&key).unwrap();
         (store, tmp)
+    }
+
+    #[test]
+    fn sync_rejects_missing_signature_and_unsigned_metadata() {
+        let (mut sender, _sender_dir) = setup_unlocked_store();
+        let (mut receiver, _receiver_dir) = setup_unlocked_store();
+        let fingerprint = "AA:BB:CC:DD:EE:FF:00:11";
+        sender.trust_peer("Test", fingerprint).unwrap();
+        let original = sender.export_for_sync().unwrap();
+        receiver.add_sync_device("Device", &sender.device_verifying_key_b64().unwrap()).unwrap();
+        assert!(receiver.merge_from_sync(&original).is_err());
+        receiver.set_sync_enabled(true).unwrap();
+
+        let mut changed: serde_json::Value = serde_json::from_str(&original).unwrap();
+        changed["peers"][fingerprint]["last_seen"] = serde_json::json!("2099-01-01");
+        assert!(receiver.merge_from_sync(&changed.to_string()).is_err());
+        changed["peers"][fingerprint]["signature"] = serde_json::Value::Null;
+        assert!(receiver.merge_from_sync(&changed.to_string()).is_err());
+        assert!(!receiver.is_trusted(fingerprint));
+        assert_eq!(receiver.merge_from_sync(&original).unwrap(), 1);
+    }
+
+    #[test]
+    fn locking_discards_unlocked_trust_state() {
+        let (mut store, _dir) = setup_unlocked_store();
+        store.lock();
+        assert!(!store.is_unlocked());
+        assert!(store.device_verifying_key_b64().is_err());
+        assert!(store.export_for_sync().is_err());
     }
 
     #[test]

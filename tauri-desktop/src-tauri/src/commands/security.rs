@@ -122,59 +122,15 @@ pub async fn disable_readonly_mode(password: String, state: State<'_, AppState>)
     Ok("Mode lecture seule désactivé avec succès".to_string())
 }
 
-/// Vérifie le délai d'attente pour un utilisateur (en secondes)
-/// Retourne 0 si aucun délai, sinon le nombre de secondes à attendre
+/// Retourne le délai restant avant la prochaine tentative de déverrouillage.
 #[tauri::command]
-pub async fn check_login_delay(username: String, state: State<'_, AppState>) -> Result<u64, String> {
+pub async fn check_login_delay(state: State<'_, AppState>) -> Result<u64, String> {
     let db_guard = state.db.lock().await;
     let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
-    
-    // VULN-007: Ne pas révéler si l'utilisateur existe ou non
-    let user = match db.get_user_by_username(&username).await {
-        Ok(Some(u)) => u,
-        _ => return Ok(0), // Utilisateur inexistant → même réponse que 0 tentatives
-    };
-    
-    // Vérifier si le compte est bloqué
-    let is_locked = db.check_account_locked(user.id).await
-        .map_err(|e| format!("Erreur DB: {}", e))?;
-    
-    if is_locked {
-        // Compte bloqué = délai maximum de 1 heure
-        return Ok(3600);
+    match db.get_vault_owner().await.map_err(|e| e.to_string())? {
+        Some(user) => super::auth::login_delay(db, &user).await,
+        None => Ok(0),
     }
-    
-    // Compter les tentatives échouées récentes (dernières 2 minutes)
-    let failed_count = db.count_failed_logins(user.id, 2).await
-        .map_err(|e| format!("Erreur DB: {}", e))?;
-    
-    // Calculer le délai selon le nombre de tentatives
-    let delay = match failed_count {
-        0..=2 => 0,           // 0-2 tentatives : pas de délai
-        3..=4 => 15,          // 3-4 tentatives : 15 secondes
-        5..=7 => 30,          // 5-7 tentatives : 30 secondes
-        8..=10 => 60,         // 8-10 tentatives : 1 minute
-        _ => 120,             // 11+ tentatives : 2 minutes
-    };
-    
-    if delay > 0 {
-        // Vérifier le temps écoulé depuis la dernière tentative
-        if let Ok(Some(elapsed)) = db.get_time_since_last_failed_login(user.id).await {
-            if elapsed >= delay {
-                // Délai expiré
-                debug_log!("✅ check_login_delay: Délai expiré ({}s écoulées)", elapsed);
-                return Ok(0);
-            } else {
-                // Délai actif - retourner le temps restant
-                let remaining = (delay - elapsed) as u64;
-                debug_log!("⏱️ check_login_delay: {}s restantes sur {}s ({} tentatives)", remaining, delay, failed_count);
-                return Ok(remaining);
-            }
-        }
-    }
-    
-    debug_log!("🔐 check_login_delay pour {}: {} tentatives → délai: {}s", username, failed_count, delay);
-    Ok(delay as u64)
 }
 
 /// Réinitialise tous les compteurs de sécurité

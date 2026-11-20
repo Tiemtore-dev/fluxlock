@@ -34,7 +34,7 @@ async fn test_full_hello_exchange_via_session() {
     let hello = TransferMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
         peer_name: "DeviceA".to_string(),
-        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "auto-sync".to_string()],
+        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "sync-pair-v2".to_string()],
     };
 
     let mut wire = Vec::new();
@@ -48,7 +48,7 @@ async fn test_full_hello_exchange_via_session() {
         TransferMessage::Hello { protocol_version, peer_name, capabilities } => {
             assert_eq!(protocol_version, PROTOCOL_VERSION);
             assert_eq!(peer_name, "DeviceA");
-            assert!(capabilities.contains(&"auto-sync".to_string()));
+            assert!(capabilities.contains(&"sync-pair-v2".to_string()));
             assert!(capabilities.contains(&"pqc-kem".to_string()));
         }
         _ => panic!("Expected Hello"),
@@ -133,7 +133,7 @@ async fn test_full_transfer_flow_via_session() {
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_auto_sync_protocol_via_session() {
+async fn test_signed_sync_pairing_messages_via_session() {
     let key = [0xCCu8; 32];
     let mut initiator = SecureSession::new(key, true).unwrap();
     let mut responder = SecureSession::new(key, false).unwrap();
@@ -145,7 +145,7 @@ async fn test_auto_sync_protocol_via_session() {
     let hello_init = TransferMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
         peer_name: "PC-Bureau".to_string(),
-        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "auto-sync".to_string()],
+        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "sync-pair-v2".to_string()],
     };
     initiator.send_message(&mut wire, &hello_init).await.unwrap();
 
@@ -153,14 +153,14 @@ async fn test_auto_sync_protocol_via_session() {
     let hello_recv = responder.recv_message(&mut cursor).await.unwrap();
     match &hello_recv {
         TransferMessage::Hello { capabilities, .. } => {
-            assert!(capabilities.contains(&"auto-sync".to_string()));
+            assert!(capabilities.contains(&"sync-pair-v2".to_string()));
         }
         _ => panic!("Expected Hello"),
     }
 
-    // 2. AutoSyncRequest
+    // 2. SyncPairRequest
     let mut wire2 = Vec::new();
-    let sync_req = TransferMessage::AutoSyncRequest {
+    let sync_req = TransferMessage::SyncPairRequest {
         device_name: "PC-Bureau".to_string(),
         verifying_key_b64: "aW5pdGlhdG9yX3Zr".to_string(),
         trust_data: r#"{"peers":{"AA:BB":{"name":"test"}},"signer_verifying_key":"aW5pdGlhdG9yX3Zr"}"#.to_string(),
@@ -170,34 +170,33 @@ async fn test_auto_sync_protocol_via_session() {
     let mut cursor2 = tokio::io::BufReader::new(&wire2[..]);
     let req_recv = responder.recv_message(&mut cursor2).await.unwrap();
     match req_recv {
-        TransferMessage::AutoSyncRequest { device_name, verifying_key_b64, trust_data } => {
+        TransferMessage::SyncPairRequest { device_name, verifying_key_b64, trust_data } => {
             assert_eq!(device_name, "PC-Bureau");
             assert!(!verifying_key_b64.is_empty());
             assert!(trust_data.contains("peers"));
         }
-        _ => panic!("Expected AutoSyncRequest"),
+        _ => panic!("Expected SyncPairRequest"),
     }
 
-    // 3. AutoSyncResponse
+    // 3. SyncPairResponse
     let mut wire3 = Vec::new();
-    let sync_resp = TransferMessage::AutoSyncResponse {
+    let sync_resp = TransferMessage::SyncPairResponse {
         accepted: true,
         device_name: "Téléphone".to_string(),
         verifying_key_b64: "cmVzcG9uZGVyX3Zr".to_string(),
         trust_data: r#"{"peers":{},"signer_verifying_key":"cmVzcG9uZGVyX3Zr"}"#.to_string(),
-        merged_count: 1,
     };
     responder.send_message(&mut wire3, &sync_resp).await.unwrap();
 
     let mut cursor3 = tokio::io::BufReader::new(&wire3[..]);
     let resp_recv = initiator.recv_message(&mut cursor3).await.unwrap();
     match resp_recv {
-        TransferMessage::AutoSyncResponse { accepted, device_name, merged_count, .. } => {
+        TransferMessage::SyncPairResponse { accepted, device_name, trust_data, .. } => {
             assert!(accepted);
             assert_eq!(device_name, "Téléphone");
-            assert_eq!(merged_count, 1);
+            assert!(trust_data.contains("peers"));
         }
-        _ => panic!("Expected AutoSyncResponse"),
+        _ => panic!("Expected SyncPairResponse"),
     }
 }
 
@@ -407,23 +406,13 @@ fn test_encode_decode_all_message_types() {
         TransferMessage::SyncPairRequest {
             device_name: "D".to_string(),
             verifying_key_b64: "vk".to_string(),
+            trust_data: "{}".into(),
         },
         TransferMessage::SyncPairResponse {
             device_name: "D".to_string(),
             verifying_key_b64: "vk".to_string(),
             accepted: true,
-        },
-        TransferMessage::AutoSyncRequest {
-            device_name: "A".to_string(),
-            verifying_key_b64: "k".to_string(),
-            trust_data: "d".to_string(),
-        },
-        TransferMessage::AutoSyncResponse {
-            accepted: true,
-            device_name: "B".to_string(),
-            verifying_key_b64: "k".to_string(),
-            trust_data: "d".to_string(),
-            merged_count: 0,
+            trust_data: "{}".into(),
         },
         TransferMessage::Error { code: 500, message: "test".to_string() },
     ];

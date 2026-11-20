@@ -28,9 +28,8 @@ use super::transport::{TransportListener, TransportConnection, connect_to_peer, 
 use super::protocol::{self, TransferMessage, TransferItem, TransferItemType, DEFAULT_TRANSFER_PORT, CHUNK_DATA_SIZE};
 use super::session::SecureSession;
 use super::{ConnectionMethod, TransferState, TransferInfo, WORMHOLE_TTL_SECS};
-use secure_vault_crypto::crypto::kem;
 
-use crate::crypto::{encrypt_data_secure, decrypt_data_secure, is_senc_format, decrypt_data_bytes_secure};
+use crate::crypto::{encrypt_data_secure, decrypt_data_secure};
 
 /// Données d'un mot de passe sérialisées pour le transfert (plaintext transitoire)
 #[derive(Debug, Serialize, Deserialize)]
@@ -125,6 +124,57 @@ impl TransferManager {
     }
 }
 
+const MAX_TRANSFER_ITEM_BYTES: usize = 32 * 1024 * 1024;
+const MAX_TRANSFER_METADATA_BYTES: usize = 8 * 1024;
+
+#[derive(Default)]
+struct LimitedTransferBuffer {
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+}
+
+impl std::io::Write for LimitedTransferBuffer {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if data.len() > MAX_TRANSFER_ITEM_BYTES.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("Fichier trop volumineux pour le transfert"));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn validate_transfer_chunk(
+    expected_item: u32, expected_chunk: u32, accumulated: usize,
+    item: u32, chunk: u32, size: usize, finished: bool, last: bool, last_chunk: bool,
+) -> Result<(), String> {
+    if finished || item != expected_item || chunk != expected_chunk
+        || size == 0 || size > CHUNK_DATA_SIZE || (last && !last_chunk)
+        || accumulated.saturating_add(size) > MAX_TRANSFER_ITEM_BYTES + MAX_TRANSFER_METADATA_BYTES
+    {
+        return Err("Séquence de blocs ou taille de transfert invalide".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod transfer_limits_tests {
+    use super::*;
+
+    #[test]
+    fn chunks_must_be_ordered_bounded_and_end_on_item_boundary() {
+        assert!(validate_transfer_chunk(1, 2, 12, 1, 2, 10, false, true, true).is_ok());
+        assert!(validate_transfer_chunk(1, 2, 12, 1, 3, 10, false, false, true).is_err());
+        assert!(validate_transfer_chunk(1, 2, 12, 0, 2, 10, false, false, true).is_err());
+        assert!(validate_transfer_chunk(1, 2, 12, 1, 2, 10, false, true, false).is_err());
+        assert!(validate_transfer_chunk(1, 2, 12, 1, 2, 10, true, false, true).is_err());
+        assert!(validate_transfer_chunk(1, 2, MAX_TRANSFER_ITEM_BYTES + MAX_TRANSFER_METADATA_BYTES,
+            1, 2, 10, false, false, true).is_err());
+    }
+}
+
 /// Requête de création d'offre
 #[derive(Debug, Deserialize)]
 pub struct CreateOfferRequest {
@@ -189,11 +239,7 @@ pub async fn transfer_create_offer(
         return Err("Mode isolation activé — transferts réseau désactivés".to_string());
     }
     // Vérifier l'authentification
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let user_id = state.current_user_id.lock().await
         .ok_or("Non authentifié")?;
@@ -542,11 +588,7 @@ pub async fn transfer_connect(
         return Err("Mode isolation activé — transferts réseau désactivés".to_string());
     }
     // Vérifier l'authentification
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -784,15 +826,10 @@ pub async fn transfer_connect(
             .as_secs(),
     });
 
-    // Log the connection event
-    {
-        let user_id = state.current_user_id.lock().await;
-        if let Some(uid) = *user_id {
-            let db_guard = state.db.lock().await;
-            if let Some(db) = db_guard.as_ref() {
-                let _ = db.log_action(uid, "TRANSFER_CONNECT", "transfer", None).await;
-            }
-        }
+    drop(tm_guard);
+    let user_id = crate::validate_session(&state).await?;
+    if let Some(db) = state.db.lock().await.as_ref() {
+        let _ = db.log_action(user_id, "TRANSFER_CONNECT", "transfer", None).await;
     }
 
     Ok(ConnectResponse {
@@ -818,6 +855,11 @@ pub async fn transfer_confirm_and_execute(
     confirmed: bool,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<bool, String> {
+    crate::validate_session(&state).await?;
+    if *state.isolation_mode.lock().await {
+        return Err("Transfert bloqué en mode isolation".into());
+    }
+
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
 
@@ -878,12 +920,17 @@ pub async fn transfer_confirm_and_execute(
 
             // Receive encrypted data chunks and store them
             // Chunk accumulator: reassemble multi-chunk items before processing
-            let mut chunk_accumulator: std::collections::HashMap<u32, Vec<u8>> = std::collections::HashMap::new();
+            let mut chunk_accumulator = zeroize::Zeroizing::new(Vec::new());
+            let mut next_chunk = 0;
             let mut received_count = 0u32;
+            let mut final_item_received = false;
             let mut total_received_bytes = 0u64;
             loop {
                 match secure_session.recv_message(&mut stream).await {
-                    Ok(TransferMessage::DataChunk { item_index, chunk_index: _, mut data, is_last, integrity_hash, is_last_chunk }) => {
+                    Ok(TransferMessage::DataChunk { item_index, chunk_index, data, is_last, integrity_hash, is_last_chunk }) => {
+                        let data = zeroize::Zeroizing::new(data);
+                        validate_transfer_chunk(received_count, next_chunk, chunk_accumulator.len(),
+                            item_index, chunk_index, data.len(), final_item_received, is_last, is_last_chunk)?;
                         total_received_bytes += data.len() as u64;
 
                         // VULN-012: Rejeter les chunks sans hash d'intégrité
@@ -896,23 +943,14 @@ pub async fn transfer_confirm_and_execute(
                         };
 
                         if !hash_ok {
-                            eprintln!("[TRANSFER] Receiver: integrity check FAILED for chunk");
-                            data.zeroize();
-                            let ack = TransferMessage::Ack {
-                                item_index: received_count,
-                                integrity_ok: false,
-                            };
-                            secure_session.send_message(&mut stream, &ack).await?;
-                            continue;
+                            return Err("Contrôle d’intégrité du bloc de transfert en échec".into());
                         }
 
-                        // Accumulate chunk data for this item
-                        chunk_accumulator.entry(item_index).or_default().extend_from_slice(&data);
-                        data.zeroize();
-
-                        // Process the complete item only when last chunk is received
+                        chunk_accumulator.extend_from_slice(&data);
+                        next_chunk += 1;
                         if is_last_chunk {
-                            let mut complete_data = chunk_accumulator.remove(&item_index).unwrap_or_default();
+                            let mut complete_data = zeroize::Zeroizing::new(std::mem::take(&mut *chunk_accumulator));
+                            next_chunk = 0;
 
                             // Auto-detect: fichier (préfixe binaire 4 octets LE) vs mot de passe (JSON pur)
                             let is_file_payload = complete_data.len() >= 4 && complete_data[0] != b'{';
@@ -924,12 +962,17 @@ pub async fn transfer_confirm_and_execute(
                                     complete_data[2], complete_data[3],
                                 ]) as usize;
 
-                                if complete_data.len() < 4 + meta_len {
+                                if meta_len > MAX_TRANSFER_METADATA_BYTES || complete_data.len() < 4 + meta_len {
                                     complete_data.zeroize();
                                     eprintln!("[TRANSFER] Receiver: fichier tronqué (metadata)");
                                 } else if let Ok(metadata) = serde_json::from_slice::<TransferFileMetadata>(&complete_data[4..4+meta_len]) {
                                     let plaintext_start = 4 + meta_len;
                                     let plaintext_data = &complete_data[plaintext_start..];
+                                    if metadata.original_size != plaintext_data.len() as i64
+                                        || !crate::commands::files::valid_export_name(&metadata.filename)
+                                    {
+                                        return Err("Métadonnées de fichier incohérentes".into());
+                                    }
 
                                     // Re-chiffrer le nom de fichier avec notre clé vault
                                     let encrypted_filename = encrypt_data_secure(&metadata.filename, &vault_key)
@@ -937,23 +980,22 @@ pub async fn transfer_confirm_and_execute(
 
                                     // Générer un ID unique et chiffrer avec streaming
                                     let file_id = uuid::Uuid::new_v4().to_string();
-                                    let files_dir = crate::hidden_storage::get_hidden_files_dir()
-                                        .map_err(|e| format!("Erreur dossier: {}", e))?;
+                                    let files_dir = crate::commands::files::files_dir(&state).await?;
                                     let output_path = files_dir.join(format!("{}.senc", file_id));
 
                                     // Chiffrer en streaming vers un fichier .senc
                                     let out_path = output_path.clone();
                                     let key_copy = vault_key.to_vec();
-                                    let plaintext_vec = plaintext_data.to_vec();
+                                    let plaintext_vec = zeroize::Zeroizing::new(plaintext_data.to_vec());
                                     let encrypt_result = tokio::task::spawn_blocking(move || -> Result<u64, String> {
                                         let key_arr: &[u8; 32] = key_copy.as_slice().try_into()
                                             .map_err(|_| "Clé invalide".to_string())?;
-                                        let mut reader = std::io::Cursor::new(&plaintext_vec);
-                                        let dst = std::fs::File::create(&out_path)
-                                            .map_err(|e| format!("Création fichier: {}", e))?;
-                                        let mut writer = std::io::BufWriter::with_capacity(65536, dst);
-                                        secure_vault_crypto::encrypt_stream(key_arr, &mut reader, &mut writer, 0)
-                                            .map_err(|e| format!("Chiffrement streaming: {}", e))
+                                        let mut reader = std::io::Cursor::new(plaintext_vec.as_slice());
+                                        crate::commands::files::publish_new_file(&out_path, |dst| {
+                                            let mut writer = std::io::BufWriter::with_capacity(65536, dst);
+                                            secure_vault_crypto::encrypt_stream(key_arr, &mut reader, &mut writer, 0)
+                                                .map_err(|e| format!("Chiffrement streaming: {e}"))
+                                        })
                                     }).await
                                         .map_err(|e| format!("Thread: {}", e))?;
 
@@ -1059,11 +1101,11 @@ pub async fn transfer_confirm_and_execute(
                             eprintln!("[TRANSFER] Receiver: failed to parse DataChunk payload");
                         }
 
-                        // Send ACK via SecureSession (one per complete item)
-                        let ack = TransferMessage::Ack {
-                            item_index: received_count.saturating_sub(1),
-                            integrity_ok: true,
-                        };
+                        if received_count != item_index + 1 {
+                            return Err("L’élément reçu n’a pas été enregistré".into());
+                        }
+                        final_item_received = is_last;
+                        let ack = TransferMessage::Ack { item_index, integrity_ok: true };
                         secure_session.send_message(&mut stream, &ack).await?;
                         } // end is_last_chunk
 
@@ -1081,6 +1123,9 @@ pub async fn transfer_confirm_and_execute(
                         }
                     }
                     Ok(TransferMessage::TransferComplete) => {
+                        if !final_item_received || !chunk_accumulator.is_empty() {
+                            return Err("Fin du transfert prématurée".into());
+                        }
                         let tm_guard2 = state.transfer_manager.lock().await;
                         if let Some(tm2) = tm_guard2.as_ref() {
                             if let Some(info) = tm2.active_transfers.lock().await.get_mut(&transfer_id) {
@@ -1099,19 +1144,8 @@ pub async fn transfer_confirm_and_execute(
                         }
                         return Err(format!("Transfert échoué : {}", message));
                     }
-                    Err(e) => {
-                        if received_count > 0 {
-                            let tm_guard2 = state.transfer_manager.lock().await;
-                            if let Some(tm2) = tm_guard2.as_ref() {
-                                if let Some(info) = tm2.active_transfers.lock().await.get_mut(&transfer_id) {
-                                    info.state = TransferState::Completed;
-                                }
-                            }
-                            break;
-                        }
-                        return Err(format!("Erreur réception : {}", e));
-                    }
-                    _ => {}
+                    Err(e) => return Err(format!("Transfert interrompu : {e}")),
+                    _ => return Err("Message inattendu pendant le transfert".into()),
                 }
             }
 
@@ -1217,7 +1251,7 @@ pub async fn transfer_confirm_and_execute(
 
                         // Wait for ACK (one per item, after all chunks sent)
                         match secure_session.recv_message(&mut stream).await {
-                            Ok(TransferMessage::Ack { integrity_ok: true, .. }) => {
+                            Ok(TransferMessage::Ack { integrity_ok: true, item_index }) if item_index == idx as u32 => {
                                 sent_count += 1;
                                 // EXP-009: Ne pas logger les titres en production
                                 #[cfg(debug_assertions)]
@@ -1225,16 +1259,7 @@ pub async fn transfer_confirm_and_execute(
                                 #[cfg(not(debug_assertions))]
                                 eprintln!("[TRANSFER] Sender: sent item {}/{} ({} chunk(s))", idx + 1, item_ids.len(), num_chunks);
                             }
-                            Ok(TransferMessage::Ack { integrity_ok: false, .. }) => {
-                                // EXP-009: Ne pas logger les titres en production
-                                #[cfg(debug_assertions)]
-                                eprintln!("[TRANSFER] Sender: receiver reported integrity error for '{}'", pw.title);
-                                #[cfg(not(debug_assertions))]
-                                eprintln!("[TRANSFER] Sender: receiver reported integrity error for item {}", idx + 1);
-                            }
-                            _ => {
-                                eprintln!("[TRANSFER] Sender: unexpected response for ACK");
-                            }
+                            _ => return Err("Le pair n’a pas confirmé l’enregistrement du mot de passe".into()),
                         }
 
                         // Log each item sent
@@ -1266,47 +1291,22 @@ pub async fn transfer_confirm_and_execute(
                             .map_err(|e| format!("Sérialisation metadata: {}", e))?;
 
                         // Déchiffrer le fichier en mémoire
-                        let file_path = file.file_path.clone();
-                        let plaintext_data = {
-                            // Détecter le format
-                            let header = {
-                                let mut f = std::fs::File::open(&file_path)
-                                    .map_err(|e| format!("Erreur ouverture fichier: {}", e))?;
-                                let mut buf = [0u8; 6];
-                                use std::io::Read;
-                                let _ = f.read(&mut buf).map_err(|e| format!("Erreur lecture header: {}", e))?;
-                                buf
-                            };
-                            if is_senc_format(&header) {
-                                let fp = file_path.clone();
-                                let key_copy = vault_key.to_vec();
-                                tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-                                    let key_arr: &[u8; 32] = key_copy.as_slice().try_into()
-                                        .map_err(|_| "Clé invalide".to_string())?;
-                                    let src = std::fs::File::open(&fp)
-                                        .map_err(|e| format!("Ouverture: {}", e))?;
-                                    let mut reader = std::io::BufReader::with_capacity(65536, src);
-                                    let mut output = Vec::new();
-                                    let mut writer = std::io::Cursor::new(&mut output);
-                                    secure_vault_crypto::decrypt_stream(key_arr, &mut reader, &mut writer)
-                                        .map_err(|e| format!("Déchiffrement streaming: {}", e))?;
-                                    Ok(output)
-                                }).await
-                                    .map_err(|e| format!("Thread: {}", e))?
-                                    .map_err(|e| e)?
-                            } else {
-                                // Format legacy (v2:base64)
-                                let encrypted_str = std::fs::read_to_string(&file_path)
-                                    .map_err(|e| format!("Lecture: {}", e))?;
-                                decrypt_data_bytes_secure(&encrypted_str, &vault_key)
-                                    .map_err(|e| format!("Déchiffrement legacy: {}", e))?
-                            }
-                        };
+                        if file.file_size < 0 || file.file_size as usize > MAX_TRANSFER_ITEM_BYTES {
+                            return Err("Les transferts acceptent des fichiers de 32 Mio maximum".into());
+                        }
+                        let file_path = crate::commands::files::encrypted_file_path(&state, &file.file_path).await?;
+                        let key_copy = vault_key.to_vec();
+                        let plaintext_data = tokio::task::spawn_blocking(move || {
+                            let key = crate::secure_key::SecureKey::from_slice(&key_copy);
+                            let mut output = LimitedTransferBuffer::default();
+                            crate::commands::files::decrypt_into(&file_path, &key, &mut output)?;
+                            Ok::<_, String>(output.bytes)
+                        }).await.map_err(|e| e.to_string())??;
 
                         // Construire le flux de données: [metadata_json] + [plaintext_file_bytes]
                         // Préfixer la metadata par sa taille (4 octets LE) pour que le receiver puisse la séparer
                         let meta_len = (meta_json.len() as u32).to_le_bytes();
-                        let mut data = Vec::with_capacity(4 + meta_json.len() + plaintext_data.len());
+                        let mut data = zeroize::Zeroizing::new(Vec::with_capacity(4 + meta_json.len() + plaintext_data.len()));
                         data.extend_from_slice(&meta_len);
                         data.extend_from_slice(&meta_json);
                         data.extend_from_slice(&plaintext_data);
@@ -1337,16 +1337,11 @@ pub async fn transfer_confirm_and_execute(
 
                         // Wait for ACK
                         match secure_session.recv_message(&mut stream).await {
-                            Ok(TransferMessage::Ack { integrity_ok: true, .. }) => {
+                            Ok(TransferMessage::Ack { integrity_ok: true, item_index }) if item_index == idx as u32 => {
                                 sent_count += 1;
                                 eprintln!("[TRANSFER] Sender: sent file {}/{} ({} chunk(s))", idx + 1, item_ids.len(), num_chunks);
                             }
-                            Ok(TransferMessage::Ack { integrity_ok: false, .. }) => {
-                                eprintln!("[TRANSFER] Sender: receiver reported integrity error for file {}", idx + 1);
-                            }
-                            _ => {
-                                eprintln!("[TRANSFER] Sender: unexpected response for file ACK");
-                            }
+                            _ => return Err("Le pair n’a pas confirmé l’enregistrement du fichier".into()),
                         }
                         let _ = db.log_action(user_id, "TRANSFER_SEND", "file", Some(*file_id)).await;
                     }
@@ -1354,6 +1349,9 @@ pub async fn transfer_confirm_and_execute(
                 drop(db_guard);
             }
 
+            if sent_count == 0 || sent_count as usize != item_ids.len() {
+                return Err("Certains éléments sélectionnés n’ont pas été envoyés".into());
+            }
             // Send TransferComplete
             let complete = TransferMessage::TransferComplete;
             secure_session.send_message(&mut stream, &complete).await?;
@@ -1396,11 +1394,7 @@ pub async fn transfer_scan_local_network(
         return Err("Mode isolation activé — scan réseau désactivé".to_string());
     }
     // Vérifier l'authentification
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1425,11 +1419,7 @@ pub async fn transfer_scan_local_network(
 pub async fn transfer_get_trusted_peers(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<super::trust_store::TrustedPeer>, String> {
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1444,11 +1434,7 @@ pub async fn transfer_revoke_trust(
     fingerprint: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<bool, String> {
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1464,11 +1450,7 @@ pub async fn transfer_add_trusted_peer(
     fingerprint: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<bool, String> {
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1484,6 +1466,7 @@ pub async fn transfer_get_status(
     transfer_id: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Option<TransferInfo>, String> {
+    crate::validate_session(&state).await?;
     let tm_guard = state.transfer_manager.lock().await;
     if let Some(ref tm) = *tm_guard {
         let transfers = tm.active_transfers.lock().await;
@@ -1499,6 +1482,7 @@ pub async fn transfer_cancel(
     transfer_id: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<bool, String> {
+    crate::validate_session(&state).await?;
     let tm_guard = state.transfer_manager.lock().await;
     if let Some(ref tm) = *tm_guard {
         let removed = tm.active_transfers.lock().await.remove(&transfer_id).is_some();
@@ -1527,11 +1511,7 @@ pub async fn transfer_set_visibility(
     if *state.isolation_mode.lock().await {
         return Err("Mode isolation activé — visibilité réseau désactivée".to_string());
     }
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1573,94 +1553,6 @@ pub async fn transfer_get_visibility(
     let visible = *tm.visible.lock().await;
     Ok(visible)
 }
-
-/// C11 : Synchronise le trust store avec un pair via une session sécurisée existante.
-///
-/// Utilise le canal PQC déjà établi (SPAKE2 + ML-KEM-768 → ChaCha20-Poly1305)
-/// pour échanger les trust stores de manière bidirectionnelle sans serveur.
-///
-/// Prérequis : un transfert (handshake terminé) existe pour `transfer_id`.
-#[tauri::command]
-pub async fn transfer_sync_trust_store(
-    transfer_id: String,
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<u32, String> {
-    // Vérifier le mode isolation réseau
-    if *state.isolation_mode.lock().await {
-        return Err("Mode isolation activé — synchronisation désactivée".to_string());
-    }
-    let session_check = state.session.lock().await;
-    if session_check.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session_check);
-
-    let tm_guard = state.transfer_manager.lock().await;
-    let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
-
-    // Vérifier que le trust store est déverrouillé
-    {
-        let store = tm.trust_store.lock().await;
-        if !store.is_unlocked() {
-            return Err("Trust store non déverrouillé".to_string());
-        }
-        if !store.is_sync_enabled() {
-            return Err("Synchronisation non activée dans les paramètres".to_string());
-        }
-    }
-
-    // Récupérer la session sécurisée PQC et la connexion
-    let mut sessions = tm.active_sessions.lock().await;
-    let mut connections = tm.active_connections.lock().await;
-
-    let secure_session = sessions.get_mut(&transfer_id)
-        .ok_or("Aucune session sécurisée pour ce transfert")?;
-    let conn = connections.get_mut(&transfer_id)
-        .ok_or("Aucune connexion active pour ce transfert")?;
-    let stream = &mut *conn.stream;
-
-    // 1. Exporter notre trust store
-    let local_data = {
-        let store = tm.trust_store.lock().await;
-        store.export_for_sync()?
-    };
-
-    // 2. Envoyer via la session PQC (déjà chiffré ChaCha20-Poly1305 + clé hybride ML-KEM)
-    let sync_msg = TransferMessage::TrustStoreSync {
-        trust_data: local_data,
-    };
-    secure_session.send_message(stream, &sync_msg).await
-        .map_err(|e| format!("Envoi sync: {}", e))?;
-
-    // 3. Recevoir la réponse du pair (son trust store + ack)
-    let response = secure_session.recv_message(stream).await
-        .map_err(|e| format!("Réception sync: {}", e))?;
-
-    let mut merged_count = 0u32;
-
-    match response {
-        TransferMessage::TrustStoreSync { trust_data } => {
-            // Fusionner les données du pair
-            let mut store = tm.trust_store.lock().await;
-            merged_count = store.merge_from_sync(&trust_data)?;
-
-            // Envoyer notre ACK
-            let ack_msg = TransferMessage::TrustStoreSyncAck { merged_count };
-            secure_session.send_message(stream, &ack_msg).await
-                .map_err(|e| format!("Envoi ack sync: {}", e))?;
-        }
-        TransferMessage::TrustStoreSyncAck { merged_count: remote_merged } => {
-            eprintln!("[SYNC] Pair a fusionné {} entrées de notre trust store", remote_merged);
-        }
-        _ => {
-            return Err("Réponse sync inattendue".to_string());
-        }
-    }
-
-    eprintln!("[SYNC] Trust store synchronisé : {} entrées fusionnées", merged_count);
-    Ok(merged_count)
-}
-
 /// Info d'un appareil de synchronisation pour le frontend
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncDeviceInfo {
@@ -1683,11 +1575,7 @@ pub struct SyncSettings {
 pub async fn transfer_get_sync_settings(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<SyncSettings, String> {
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1720,11 +1608,7 @@ pub async fn transfer_set_sync_enabled(
     enabled: bool,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<bool, String> {
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1742,11 +1626,7 @@ pub async fn transfer_add_sync_device(
     verifying_key: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<bool, String> {
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1763,11 +1643,7 @@ pub async fn transfer_remove_sync_device(
     verifying_key: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<bool, String> {
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1812,11 +1688,7 @@ pub async fn transfer_start_sync_pairing(
         return Err("Mode isolation activé — appairage sync désactivé".to_string());
     }
     // Vérifier l'authentification
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -1888,6 +1760,10 @@ pub async fn transfer_start_sync_pairing(
     let wc = base_wormhole_code.clone();
     let vk_b64 = our_vk_b64;
     let name = our_name;
+    let session_token = state.session_token.clone();
+    let pairing_token = session_token.lock().await.clone();
+    let isolation = state.isolation_mode.clone();
+
 
     // ── Background task: accept connection → handshake → exchange ML-DSA keys ──
     tokio::spawn(async move {
@@ -1922,14 +1798,16 @@ pub async fn transfer_start_sync_pairing(
             // ── Hello exchange (initiator reads first, then sends) ──
             let joiner_hello = protocol::read_message(&mut stream).await?;
             let joiner_name = match &joiner_hello {
-                TransferMessage::Hello { peer_name, .. } => peer_name.clone(),
-                _ => "FluXlock Peer".to_string(),
+                TransferMessage::Hello { peer_name, capabilities, protocol_version }
+                    if *protocol_version == protocol::PROTOCOL_VERSION
+                        && capabilities.iter().any(|c| c == "sync-pair-v2") => peer_name.clone(),
+                _ => return Err("L’autre appareil doit utiliser la même version de FluXlock".into()),
             };
 
             let hello = TransferMessage::Hello {
                 protocol_version: protocol::PROTOCOL_VERSION,
                 peer_name: name.clone(),
-                capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "sync-pair".to_string()],
+                capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "sync-pair-v2".to_string()],
             };
             protocol::write_message(&mut stream, &hello).await?;
 
@@ -1965,30 +1843,35 @@ pub async fn transfer_start_sync_pairing(
 
             let hs_result = phase1.finalize_with_kem(&ct_bytes)?;
             let mut secure_session = SecureSession::new(hs_result.session_key, true)?;
-            eprintln!("[SYNC-PAIR] Initiator: PQC handshake complete, safety_number={}", hs_result.safety_number);
 
             // ── Exchange ML-DSA-65 keys via encrypted channel ──
             // Initiator sends SyncPairRequest
+            if *isolation.lock().await || *session_token.lock().await != pairing_token
+                || !active_transfers.lock().await.contains_key(&pid)
+            {
+                return Err("Appairage annulé".into());
+            }
             let request = TransferMessage::SyncPairRequest {
                 device_name: name.clone(),
                 verifying_key_b64: vk_b64.clone(),
+                trust_data: trust_store.lock().await.export_for_sync()?,
             };
             secure_session.send_message(&mut stream, &request).await?;
 
             // Wait for SyncPairResponse from joiner
             let response = secure_session.recv_message(&mut stream).await?;
             match response {
-                TransferMessage::SyncPairResponse { device_name, verifying_key_b64, accepted } => {
+                TransferMessage::SyncPairResponse { device_name, verifying_key_b64, accepted, trust_data } => {
                     if !accepted {
                         return Err("L'autre appareil a refusé l'appairage".to_string());
                     }
 
-                    // Register the joiner as a sync device
-                    let mut store = trust_store.lock().await;
-                    store.add_sync_device(&device_name, &verifying_key_b64)?;
-                    // Auto-enable sync
-                    let _ = store.set_sync_enabled(true);
-                    eprintln!("[SYNC-PAIR] Initiator: paired with '{}', sync enabled", device_name);
+                    if *isolation.lock().await || *session_token.lock().await != pairing_token
+                        || !active_transfers.lock().await.contains_key(&pid)
+                    {
+                        return Err("Appairage annulé".into());
+                    }
+                    trust_store.lock().await.pair_and_merge(&device_name, &verifying_key_b64, &trust_data)?;
 
                     if let Some(info) = active_transfers.lock().await.get_mut(&pid) {
                         info.state = TransferState::Completed;
@@ -2032,11 +1915,7 @@ pub async fn transfer_join_sync_pairing(
         return Err("Mode isolation activé — appairage sync désactivé".to_string());
     }
     // Vérifier l'authentification
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
+    crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
@@ -2165,19 +2044,18 @@ pub async fn transfer_join_sync_pairing(
     let hello = TransferMessage::Hello {
         protocol_version: protocol::PROTOCOL_VERSION,
         peer_name: our_name.clone(),
-        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "sync-pair".to_string()],
+        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "sync-pair-v2".to_string()],
     };
     protocol::write_message(&mut stream, &hello).await?;
 
-    let initiator_hello = protocol::read_message(&mut stream).await?;
-    let _initiator_name = match &initiator_hello {
-        TransferMessage::Hello { peer_name, .. } => peer_name.clone(),
-        _ => "FluXlock Peer".to_string(),
-    };
+    match protocol::read_message(&mut stream).await? {
+        TransferMessage::Hello { capabilities, protocol_version, .. }
+            if protocol_version == protocol::PROTOCOL_VERSION
+                && capabilities.iter().any(|c| c == "sync-pair-v2") => {}
+        _ => return Err("L’autre appareil doit utiliser la même version de FluXlock".into()),
+    }
 
-    // ── SPAKE2 + ML-KEM handshake (responder side) ──
     let responder = handshake::HandshakeResponder::new(&spake_code)?;
-
     let spake_msg = TransferMessage::SpakeMessage {
         body: responder.spake_message().to_vec(),
     };
@@ -2200,34 +2078,36 @@ pub async fn transfer_join_sync_pairing(
     protocol::write_message(&mut stream, &kem_ct).await?;
 
     let mut secure_session = SecureSession::new(result.session_key, false)?;
-    eprintln!("[SYNC-PAIR] Joiner: PQC handshake complete, safety_number={}", result.safety_number);
 
     // ── Receive SyncPairRequest from initiator ──
     let request = secure_session.recv_message(&mut stream).await?;
-    let (initiator_device_name, initiator_vk_b64) = match request {
-        TransferMessage::SyncPairRequest { device_name, verifying_key_b64 } => {
-            (device_name, verifying_key_b64)
+    let (initiator_device_name, initiator_vk_b64, trust_data) = match request {
+        TransferMessage::SyncPairRequest { device_name, verifying_key_b64, trust_data } => {
+            (device_name, verifying_key_b64, trust_data)
         }
         _ => return Err("Protocole invalide : SyncPairRequest attendu".to_string()),
     };
 
-    // ── Send SyncPairResponse with our key ──
+    crate::validate_session(&state).await?;
+    if *state.isolation_mode.lock().await {
+        return Err("Appairage annulé".into());
+    }
+    let local_export = {
+        let tm_guard = state.transfer_manager.lock().await;
+        let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
+        let mut store = tm.trust_store.lock().await;
+        let export = store.export_for_sync()?;
+        store.pair_and_merge(&initiator_device_name, &initiator_vk_b64, &trust_data)?;
+        export
+    };
+
     let response = TransferMessage::SyncPairResponse {
-        device_name: our_name.clone(),
-        verifying_key_b64: our_vk_b64.clone(),
+        device_name: our_name,
+        verifying_key_b64: our_vk_b64,
         accepted: true,
+        trust_data: local_export,
     };
     secure_session.send_message(&mut stream, &response).await?;
-
-    // ── Register the initiator as a sync device ──
-    let tm_guard2 = state.transfer_manager.lock().await;
-    let tm2 = tm_guard2.as_ref().ok_or("Module de transfert non initialisé")?;
-    {
-        let mut store = tm2.trust_store.lock().await;
-        store.add_sync_device(&initiator_device_name, &initiator_vk_b64)?;
-        let _ = store.set_sync_enabled(true);
-    }
-    eprintln!("[SYNC-PAIR] Joiner: paired with '{}', sync enabled", initiator_device_name);
 
     Ok(SyncPairingResult {
         success: true,
@@ -2237,284 +2117,3 @@ pub async fn transfer_join_sync_pairing(
 
 // ─────────────────────────────────────────────────────────
 // C18 : Auto-sync avec un pair appairé découvert sur le même réseau
-// ─────────────────────────────────────────────────────────
-
-/// Résultat de l'auto-sync
-#[derive(Debug, Serialize)]
-pub struct AutoSyncResult {
-    pub success: bool,
-    pub merged_count: u32,
-    pub peer_name: String,
-}
-
-/// C18 : Synchronise automatiquement le trust store avec un pair appairé
-/// découvert sur le réseau local (verified = true dans le beacon).
-///
-/// Protocole simplifié (pas de SPAKE2 — l'authentification repose sur ML-DSA-65) :
-/// 1. Connexion TLS au pair
-/// 2. Hello avec capability "auto-sync"
-/// 3. ML-KEM-768 pour chiffrement de session
-/// 4. Échange de trust stores signés ML-DSA-65
-/// 5. Vérification croisée des VK contre les sync_devices connus
-#[tauri::command]
-pub async fn transfer_auto_sync_with_peer(
-    peer_addr: String,
-    peer_port: u16,
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<AutoSyncResult, String> {
-    // Vérifier le mode isolation réseau
-    if *state.isolation_mode.lock().await {
-        return Err("Mode isolation activé — sync automatique désactivée".to_string());
-    }
-    let session = state.session.lock().await;
-    if session.is_none() {
-        return Err("Non authentifié".to_string());
-    }
-    drop(session);
-
-    let tm_guard = state.transfer_manager.lock().await;
-    let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
-
-    // Vérifier que la sync est activée et le trust store déverrouillé
-    let (our_vk_b64, our_name, trust_data) = {
-        let store = tm.trust_store.lock().await;
-        if !store.is_unlocked() {
-            return Err("Trust store non déverrouillé".to_string());
-        }
-        if !store.is_sync_enabled() {
-            return Err("Synchronisation non activée".to_string());
-        }
-        let vk = store.device_verifying_key_b64()?;
-        let data = store.export_for_sync()?;
-        (vk, tm.peer_name.clone(), data)
-    };
-
-    drop(tm_guard);
-
-    // Connecter au pair
-    let peer = DiscoveredPeer {
-        name: "auto-sync-peer".to_string(),
-        addr: peer_addr.clone(),
-        port: peer_port,
-        method: "AutoSync".to_string(),
-        verified: true,
-    };
-    let conn = connect_to_peer(&peer).await
-        .map_err(|e| format!("Connexion auto-sync échouée: {}", e))?;
-    let mut stream = conn.stream;
-
-    // Hello avec capability auto-sync
-    let hello = TransferMessage::Hello {
-        protocol_version: protocol::PROTOCOL_VERSION,
-        peer_name: our_name.clone(),
-        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "auto-sync".to_string()],
-    };
-    protocol::write_message(&mut stream, &hello).await?;
-
-    // Lire Hello du pair
-    let peer_hello = protocol::read_message(&mut stream).await?;
-    let _peer_name = match &peer_hello {
-        TransferMessage::Hello { peer_name, capabilities, .. } => {
-            if !capabilities.contains(&"auto-sync".to_string()) {
-                return Err("Le pair ne supporte pas l'auto-sync".to_string());
-            }
-            peer_name.clone()
-        }
-        _ => return Err("Protocole invalide : Hello attendu".to_string()),
-    };
-
-    // ML-KEM-768 key exchange (initiator: generate keypair, send encapsulation key)
-    let (keypair_ek, keypair_dk) = kem::generate_recipient_keypair()
-        .map_err(|e| format!("ML-KEM keygen: {}", e))?;
-
-    let kem_pub = TransferMessage::KemEncapsulation {
-        ek_bytes: keypair_ek.to_bytes(),
-    };
-    protocol::write_message(&mut stream, &kem_pub).await?;
-
-    // Receive KEM ciphertext from peer
-    let kem_ct_msg = protocol::read_message(&mut stream).await?;
-    let ct_bytes = match kem_ct_msg {
-        TransferMessage::KemCiphertext { ct_bytes } => ct_bytes,
-        _ => return Err("Protocole invalide : KEM ciphertext attendu".to_string()),
-    };
-
-    // Derive shared secret
-    let dk = kem::KemPrivateKey::from_bytes(&keypair_dk.to_bytes())
-        .map_err(|e| format!("ML-KEM import dk: {}", e))?;
-    let ct = kem::KemCiphertext::from_bytes(&ct_bytes);
-    let kem_shared = kem::decapsulate(&dk, &ct)
-        .map_err(|e| format!("ML-KEM decapsulate: {}", e))?;
-
-    // Derive session key via HKDF (KEM-only, no SPAKE2)
-    let session_key = {
-        let salt = b"fluxlock-autosync-v1";
-        let info = b"session-key";
-        let derived = secure_vault_crypto::derive_key_hkdf(kem_shared.as_bytes(), Some(salt), info, 32)
-            .map_err(|e| format!("HKDF derivation: {}", e))?;
-        let mut key = [0u8; 32];
-        key.copy_from_slice(derived.expose_secret());
-        key
-    };
-    let mut secure_session = SecureSession::new(session_key, true)?;
-
-    // Envoyer notre trust store signé ML-DSA-65 via la session chiffrée
-    let sync_request = TransferMessage::AutoSyncRequest {
-        device_name: our_name.clone(),
-        verifying_key_b64: our_vk_b64.clone(),
-        trust_data,
-    };
-    secure_session.send_message(&mut stream, &sync_request).await?;
-
-    // Recevoir la réponse du pair
-    let response = secure_session.recv_message(&mut stream).await?;
-    match response {
-        TransferMessage::AutoSyncResponse {
-            accepted, device_name, verifying_key_b64, trust_data, merged_count: remote_merged,
-        } => {
-            if !accepted {
-                return Err(format!("Le pair '{}' a refusé l'auto-sync", device_name));
-            }
-
-            // Vérifier que le pair est un sync device connu
-            let tm_guard2 = state.transfer_manager.lock().await;
-            let tm2 = tm_guard2.as_ref().ok_or("Module de transfert non initialisé")?;
-            let mut store = tm2.trust_store.lock().await;
-
-            let known_devices = store.list_sync_devices();
-            let is_known = known_devices.iter().any(|d| d.verifying_key == verifying_key_b64);
-            if !is_known {
-                return Err("Le pair n'est pas un appareil de sync autorisé".to_string());
-            }
-
-            // Fusionner le trust store du pair (vérifie la signature ML-DSA-65)
-            let merged_count = store.merge_from_sync(&trust_data)?;
-
-            eprintln!("[AUTO-SYNC] Sync terminée avec '{}': {} entrées fusionnées (pair: {})",
-                device_name, merged_count, remote_merged);
-
-            Ok(AutoSyncResult {
-                success: true,
-                merged_count,
-                peer_name: device_name,
-            })
-        }
-        TransferMessage::Error { message, .. } => {
-            Err(format!("Erreur auto-sync: {}", message))
-        }
-        _ => Err("Réponse auto-sync invalide".to_string()),
-    }
-}
-
-/// C18b : Handler côté récepteur pour l'auto-sync.
-/// Appelé quand on reçoit une connexion entrante avec capability "auto-sync".
-/// N'est PAS une commande Tauri — c'est un handler interne appelé depuis le listener.
-pub async fn handle_auto_sync_incoming(
-    mut stream: Box<dyn super::transport::AsyncReadWrite>,
-    trust_store: Arc<Mutex<TrustStore>>,
-    our_name: String,
-) -> Result<(), String> {
-    // Lire Hello du pair (déjà envoyé par l'initiateur)
-    let peer_hello = protocol::read_message(&mut stream).await?;
-    let _peer_name = match &peer_hello {
-        TransferMessage::Hello { peer_name, capabilities, .. } => {
-            if !capabilities.contains(&"auto-sync".to_string()) {
-                let err = TransferMessage::Error {
-                    code: 400,
-                    message: "auto-sync non supporté".to_string(),
-                };
-                protocol::write_message(&mut stream, &err).await?;
-                return Err("Pair ne supporte pas auto-sync".to_string());
-            }
-            peer_name.clone()
-        }
-        _ => return Err("Protocole invalide : Hello attendu".to_string()),
-    };
-
-    // Envoyer notre Hello
-    let store = trust_store.lock().await;
-    let our_vk = store.device_verifying_key_b64()?;
-    drop(store);
-
-    let hello = TransferMessage::Hello {
-        protocol_version: protocol::PROTOCOL_VERSION,
-        peer_name: our_name.clone(),
-        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "auto-sync".to_string()],
-    };
-    protocol::write_message(&mut stream, &hello).await?;
-
-    // Recevoir ML-KEM encapsulation key de l'initiateur
-    let kem_msg = protocol::read_message(&mut stream).await?;
-    let ek_bytes = match kem_msg {
-        TransferMessage::KemEncapsulation { ek_bytes } => ek_bytes,
-        _ => return Err("Protocole invalide : KEM encapsulation attendue".to_string()),
-    };
-
-    // Encapsuler et renvoyer le ciphertext
-    let ek = kem::KemPublicKey::from_bytes(&ek_bytes)
-        .map_err(|e| format!("ML-KEM import ek: {}", e))?;
-    let (kem_shared, ct) = kem::encapsulate(&ek)
-        .map_err(|e| format!("ML-KEM encapsulate: {}", e))?;
-
-    let kem_ct = TransferMessage::KemCiphertext { ct_bytes: ct.as_bytes().to_vec() };
-    protocol::write_message(&mut stream, &kem_ct).await?;
-
-    // Derive session key via HKDF (KEM-only, no SPAKE2)
-    let session_key = {
-        let salt = b"fluxlock-autosync-v1";
-        let info = b"session-key";
-        let derived = secure_vault_crypto::derive_key_hkdf(kem_shared.as_bytes(), Some(salt), info, 32)
-            .map_err(|e| format!("HKDF derivation: {}", e))?;
-        let mut key = [0u8; 32];
-        key.copy_from_slice(derived.expose_secret());
-        key
-    };
-    let mut secure_session = SecureSession::new(session_key, false)?;
-
-    // Recevoir la demande de sync du pair
-    let request = secure_session.recv_message(&mut stream).await?;
-    match request {
-        TransferMessage::AutoSyncRequest {
-            device_name, verifying_key_b64, trust_data,
-        } => {
-            let mut store = trust_store.lock().await;
-
-            // Vérifier que le pair est un sync device connu
-            let known_devices = store.list_sync_devices();
-            let is_known = known_devices.iter().any(|d| d.verifying_key == verifying_key_b64);
-
-            if !is_known || !store.is_sync_enabled() {
-                let response = TransferMessage::AutoSyncResponse {
-                    accepted: false,
-                    device_name: our_name,
-                    verifying_key_b64: our_vk,
-                    trust_data: String::new(),
-                    merged_count: 0,
-                };
-                secure_session.send_message(&mut stream, &response).await?;
-                return Err("Pair non autorisé ou sync désactivée".to_string());
-            }
-
-            // Fusionner le trust store du pair
-            let merged_count = store.merge_from_sync(&trust_data)?;
-
-            // Exporter notre trust store signé
-            let our_trust_data = store.export_for_sync()?;
-
-            let response = TransferMessage::AutoSyncResponse {
-                accepted: true,
-                device_name: our_name,
-                verifying_key_b64: our_vk,
-                trust_data: our_trust_data,
-                merged_count,
-            };
-            secure_session.send_message(&mut stream, &response).await?;
-
-            eprintln!("[AUTO-SYNC] Incoming sync avec '{}': {} entrées fusionnées",
-                device_name, merged_count);
-
-            Ok(())
-        }
-        _ => Err("Protocole invalide : AutoSyncRequest attendu".to_string()),
-    }
-}

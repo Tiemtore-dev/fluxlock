@@ -9,7 +9,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Nonce,
 };
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 
 use super::protocol::{TransferMessage, MAX_MESSAGE_SIZE, FRAME_HEADER_SIZE};
@@ -33,38 +33,6 @@ pub struct SecureSession {
     recv_counter: u64,
     /// true si cette instance est le côté initiateur du handshake
     is_initiator: bool,
-    /// Copie de la clé pour zéroïsation explicite au drop
-    _session_key: SessionKeyGuard,
-}
-
-/// Garde de clé qui se zéroïse au drop
-struct SessionKeyGuard {
-    key: [u8; 32],
-}
-
-impl Drop for SessionKeyGuard {
-    fn drop(&mut self) {
-        self.key.zeroize();
-    }
-}
-
-/// Zéroïse l'état interne du cipher en défense en profondeur.
-/// chacha20poly1305 (RustCrypto) utilise GenericArray qui implémente Zeroize,
-/// mais on force un scrub mémoire brut pour être certain.
-impl Drop for SecureSession {
-    fn drop(&mut self) {
-        // 1. Scrub mémoire du cipher (contient une copie de la clé dans GenericArray)
-        let cipher_ptr = &mut self.cipher as *mut _ as *mut u8;
-        let cipher_size = std::mem::size_of::<ChaCha20Poly1305>();
-        unsafe {
-            let bytes = std::slice::from_raw_parts_mut(cipher_ptr, cipher_size);
-            bytes.zeroize();
-        }
-        // 2. Zéroïser les compteurs pour ne pas fuiter la quantité de données échangées
-        self.send_counter = 0;
-        self.recv_counter = 0;
-        // 3. SessionKeyGuard._session_key se zéroïse dans son propre Drop
-    }
 }
 
 impl SecureSession {
@@ -72,20 +40,15 @@ impl SecureSession {
     ///
     /// `is_initiator`: true si cette instance est le côté qui a initié le handshake.
     /// La clé passée est consommée et zéroïsée après initialisation du cipher.
-    pub fn new(mut session_key: [u8; 32], is_initiator: bool) -> Result<Self, String> {
-        let cipher = ChaCha20Poly1305::new_from_slice(&session_key)
-            .map_err(|e| format!("Initialisation cipher: {}", e))?;
-
-        let guard = SessionKeyGuard { key: session_key };
-        // Zéroïser la copie locale sur la stack immédiatement
-        session_key.zeroize();
-
+    pub fn new(session_key: [u8; 32], is_initiator: bool) -> Result<Self, String> {
+        let key = Zeroizing::new(session_key);
+        let cipher = ChaCha20Poly1305::new_from_slice(key.as_slice())
+            .map_err(|e| format!("Initialisation cipher: {e}"))?;
         Ok(Self {
             cipher,
             send_counter: 0,
             recv_counter: 0,
             is_initiator,
-            _session_key: guard,
         })
     }
 
@@ -95,8 +58,8 @@ impl SecureSession {
         writer: &mut W,
         msg: &TransferMessage,
     ) -> Result<(), String> {
-        let plaintext = rmp_serde::to_vec(msg)
-            .map_err(|e| format!("Sérialisation: {}", e))?;
+        let plaintext = Zeroizing::new(rmp_serde::to_vec(msg)
+            .map_err(|e| format!("Sérialisation: {e}"))?);
 
         if plaintext.len() > MAX_MESSAGE_SIZE {
             return Err(format!("Message trop grand: {} bytes", plaintext.len()));
@@ -156,10 +119,10 @@ impl SecureSession {
         // VULN-003: AAD doit correspondre à ce que l'expéditeur a utilisé (rôle inversé)
         let peer_direction = if self.is_initiator { "resp" } else { "init" };
         let aad = format!("fluxlock-v1:{}:send:{}", peer_direction, self.recv_counter - 1);
-        let plaintext = self.cipher.decrypt(
+        let plaintext = Zeroizing::new(self.cipher.decrypt(
             &nonce,
             Payload { msg: ciphertext.as_ref(), aad: aad.as_bytes() },
-        ).map_err(|_| "Déchiffrement échoué — message corrompu ou clé incorrecte".to_string())?;
+        ).map_err(|_| "Déchiffrement échoué — message corrompu ou clé incorrecte".to_string())?);
 
         rmp_serde::from_slice(&plaintext)
             .map_err(|e| format!("Désérialisation: {}", e))
@@ -333,12 +296,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_auto_sync_messages() {
+    async fn test_session_sync_pairing_messages() {
         let key = test_key();
         let mut sender = SecureSession::new(key, true).unwrap();
         let mut receiver = SecureSession::new(key, false).unwrap();
 
-        let request = TransferMessage::AutoSyncRequest {
+        let request = TransferMessage::SyncPairRequest {
             device_name: "PC-Bureau".to_string(),
             verifying_key_b64: "dGVzdGtleQ==".to_string(),
             trust_data: r#"{"peers":{},"signer_verifying_key":"abc"}"#.to_string(),
@@ -350,10 +313,10 @@ mod tests {
         let mut cursor = tokio::io::BufReader::new(&buf[..]);
         let decoded = receiver.recv_message(&mut cursor).await.unwrap();
         match decoded {
-            TransferMessage::AutoSyncRequest { device_name, .. } => {
+            TransferMessage::SyncPairRequest { device_name, .. } => {
                 assert_eq!(device_name, "PC-Bureau");
             }
-            _ => panic!("Expected AutoSyncRequest"),
+            _ => panic!("Expected SyncPairRequest"),
         }
     }
 }

@@ -4,6 +4,12 @@
 use std::path::PathBuf;
 use std::fs;
 
+pub(crate) const TEST_BUILD: bool = cfg!(debug_assertions) && option_env!("FLUXLOCK_TEST_BUILD").is_some();
+
+fn local_storage_name(test_build: bool) -> &'static str {
+    if test_build { "SecureVault Test" } else { "SecureVault" }
+}
+
 /// Obtient le répertoire caché système pour stocker la base de données
 pub fn get_hidden_database_dir() -> Result<PathBuf, String> {
     let hidden_dir = match std::env::consts::OS {
@@ -12,7 +18,7 @@ pub fn get_hidden_database_dir() -> Result<PathBuf, String> {
             let appdata = std::env::var("LOCALAPPDATA")
                 .map_err(|_| "Variable LOCALAPPDATA non trouvée")?;
             PathBuf::from(appdata)
-                .join("SecureVault")
+                .join(local_storage_name(TEST_BUILD))
                 .join("data")
         },
         "macos" => {
@@ -22,7 +28,7 @@ pub fn get_hidden_database_dir() -> Result<PathBuf, String> {
             PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
-                .join("SecureVault")
+                .join(local_storage_name(TEST_BUILD))
         },
         "linux" | "android" => {
             // Linux: ~/.local/share/SecureVault
@@ -31,13 +37,13 @@ pub fn get_hidden_database_dir() -> Result<PathBuf, String> {
                 PathBuf::from(home)
                     .join(".local")
                     .join("share")
-                    .join("SecureVault")
+                    .join(local_storage_name(TEST_BUILD))
             } else {
                 // Android fallback: /data/data partition (app-private)
                 let data_dir = std::env::var("TMPDIR")
                     .map(|t| PathBuf::from(t).parent().unwrap_or(std::path::Path::new("/data/local/tmp")).to_path_buf())
                     .unwrap_or_else(|_| PathBuf::from("/data/local/tmp"));
-                data_dir.join("SecureVault")
+                data_dir.join(local_storage_name(TEST_BUILD))
             }
         },
         "ios" => {
@@ -47,7 +53,7 @@ pub fn get_hidden_database_dir() -> Result<PathBuf, String> {
             PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
-                .join("SecureVault")
+                .join(local_storage_name(TEST_BUILD))
         },
         _ => return Err("Système d'exploitation non supporté".to_string()),
     };
@@ -94,6 +100,11 @@ pub fn get_hidden_files_dir() -> Result<PathBuf, String> {
 
 /// Obtient le répertoire par défaut pour les backups
 pub fn get_default_backup_dir() -> Result<PathBuf, String> {
+    if TEST_BUILD {
+        let backups = get_hidden_database_dir()?.join("backups");
+        fs::create_dir_all(&backups).map_err(|e| format!("Erreur création répertoire backup: {}", e))?;
+        return Ok(backups);
+    }
     let backup_dir = match std::env::consts::OS {
         "windows" => {
             let documents = std::env::var("USERPROFILE")
@@ -135,6 +146,9 @@ pub fn get_backup_search_locations() -> Vec<PathBuf> {
     // Répertoire par défaut des backups
     if let Ok(backup_dir) = get_default_backup_dir() {
         locations.push(backup_dir);
+    }
+    if TEST_BUILD {
+        return locations;
     }
     
     // Ajouter des emplacements communs selon l'OS
@@ -214,6 +228,12 @@ pub fn search_backup_files(locations: Vec<PathBuf>) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     
+    #[test]
+    fn test_build_uses_separate_storage_name() {
+        assert_eq!(local_storage_name(true), "SecureVault Test");
+        assert_eq!(local_storage_name(false), "SecureVault");
+    }
+
     #[test]
     fn test_get_hidden_database_dir() {
         let result = get_hidden_database_dir();

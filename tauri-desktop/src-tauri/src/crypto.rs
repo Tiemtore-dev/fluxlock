@@ -20,36 +20,19 @@ const V2_PREFIX: &str = "v2:";
 /// Configuration Argon2id centréalisée (OWASP recommandations)
 /// Modifier ici pour ajuster les paramètres de dérivation globalement
 pub fn default_argon2_config() -> Argon2Config {
-    // Android devices have much tighter per-app memory limits (~256 MiB heap).
-    // 64 MiB Argon2 allocation can fail after Transfer Manager / SignedLogManager
-    // are loaded, causing silent OOM masked as "wrong password".
-    #[cfg(target_os = "android")]
-    return Argon2Config {
-        memory_cost: 19456,  // 19 MiB (OWASP minimum for Argon2id)
-        time_cost: 4,        // 4 itérations (compense la mémoire réduite)
-        parallelism: 2,      // 2 threads (mobile)
-        output_len: 32,      // 256 bits
-    };
+    argon2_profile(cfg!(target_os = "android"))
+}
 
-    #[cfg(not(target_os = "android"))]
-    Argon2Config {
-        memory_cost: 65536,  // 64 MiB (résistance GPU)
-        time_cost: 3,        // 3 itérations (balance sécurité/performance)
-        parallelism: 4,      // 4 threads (CPU moderne)
-        output_len: 32,      // 256 bits
+fn argon2_profile(mobile: bool) -> Argon2Config {
+    if mobile {
+        Argon2Config { memory_cost: 19456, time_cost: 4, parallelism: 2, output_len: 32 }
+    } else {
+        Argon2Config { memory_cost: 65536, time_cost: 3, parallelism: 4, output_len: 32 }
     }
 }
 
-/// Ancienne configuration desktop (64 MiB) — utilisée pour migration des hash existants
-/// sur Android si un utilisateur avait créé son compte avec l'ancienne config.
-#[cfg(target_os = "android")]
-fn legacy_desktop_argon2_config() -> Argon2Config {
-    Argon2Config {
-        memory_cost: 65536,
-        time_cost: 3,
-        parallelism: 4,
-        output_len: 32,
-    }
+pub(crate) fn supported_argon2_profiles() -> [Argon2Config; 2] {
+    [default_argon2_config(), argon2_profile(!cfg!(target_os = "android"))]
 }
 
 /// Erreurs possibles lors des opérations cryptographiques
@@ -148,45 +131,35 @@ pub fn verify_password_secret(password: &SecretString, hash_base64: &str) -> Res
 /// - `decoded` est encapsulé dans `Zeroizing<Vec<u8>>` pour effacer salt+hash de la mémoire
 /// - `computed_hash` est un `SecretBytes` (ZeroizeOnDrop) renvoyé par Argon2id
 fn verify_password_inner(password: &str, hash_base64: &str) -> Result<(), CryptoError> {
-    // Décoder le base64 dans un buffer zéroïsé
-    let decoded = Zeroizing::new(
-        general_purpose::STANDARD
-            .decode(hash_base64)
-            .map_err(|e| CryptoError::HashingError(format!("Base64 decode error: {}", e)))?
-    );
-    
-    // Vérifier la longueur (32 bytes salt + 32 bytes hash)
+    verified_argon2_config(password, hash_base64).map(|_| ())
+}
+
+pub(crate) fn verified_argon2_config(
+    password: &str,
+    hash_base64: &str,
+) -> Result<Argon2Config, CryptoError> {
+    let decoded = Zeroizing::new(general_purpose::STANDARD.decode(hash_base64)
+        .map_err(|e| CryptoError::HashingError(format!("Base64 decode error: {e}")))?);
     if decoded.len() != 64 {
-        return Err(CryptoError::HashingError("Invalid hash length".to_string()));
+        return Err(CryptoError::HashingError("Invalid hash length".into()));
     }
-    
-    // Extraire salt et hash stocké
-    let salt = &decoded[..32];
-    let stored_hash = &decoded[32..];
-    
-    // Recalculer le hash avec la config actuelle de la plateforme
-    let config = default_argon2_config();
-    
-    let computed_hash = derive_key_from_password_with_config(password, salt, &config)?;
-    
-    // Comparaison constant-time pour éviter timing attacks
-    if constant_time_compare(computed_hash.expose_secret(), stored_hash) {
-        return Ok(());
-    }
-    
-    // Sur Android, le hash a pu être créé avec l'ancienne config desktop (64 MiB).
-    // Essayer avec la config legacy avant de déclarer le mot de passe invalide.
-    #[cfg(target_os = "android")]
-    {
-        let legacy_config = legacy_desktop_argon2_config();
-        if let Ok(legacy_hash) = derive_key_from_password_with_config(password, salt, &legacy_config) {
-            if constant_time_compare(legacy_hash.expose_secret(), stored_hash) {
-                return Ok(());
-            }
+    let (salt, expected) = decoded.split_at(32);
+    for config in supported_argon2_profiles() {
+        let computed = derive_key_from_password_with_config(password, salt, &config)?;
+        if constant_time_compare(computed.expose_secret(), expected) {
+            return Ok(config);
         }
     }
-    
     Err(CryptoError::VerificationError)
+}
+
+pub(crate) fn derive_key_with_config(
+    password: &str,
+    salt: &[u8],
+    config: &Argon2Config,
+) -> Result<SecureKey, CryptoError> {
+    let key = derive_key_from_password_with_config(password, salt, config)?;
+    Ok(SecureKey::new(key.expose_secret().to_vec()))
 }
 
 /// Comparaison constant-time pour éviter les attaques par timing
@@ -461,6 +434,21 @@ pub fn decrypt_file_stream_secure<R: std::io::Read, W: std::io::Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_recovers_the_original_platform_kdf_profile() {
+        let password = "mot de passe de vérification";
+        let salt = [23; 32];
+        let other = argon2_profile(!cfg!(target_os = "android"));
+        let hash = derive_key_from_password_with_config(password, &salt, &other).unwrap();
+        let encoded = general_purpose::STANDARD.encode([salt.as_slice(), hash.expose_secret()].concat());
+        let selected = verified_argon2_config(password, &encoded).unwrap();
+        assert_eq!(selected.memory_cost, other.memory_cost);
+        let expected = derive_key_with_config(password, &[64; 32], &other).unwrap();
+        let recovered = derive_key_with_config(password, &[64; 32], &selected).unwrap();
+        assert!(expected.secure_eq(&recovered));
+        assert!(verified_argon2_config("incorrect", &encoded).is_err());
+    }
 
     #[test]
     fn test_password_hashing_and_verification() {

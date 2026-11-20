@@ -10,7 +10,6 @@ macro_rules! debug_log {
 pub mod database;
 pub mod crypto;
 mod secure_storage;
-mod totp;
 mod threat_reactor;
 pub mod config;
 mod security_monitor;
@@ -22,7 +21,6 @@ mod path_validator;
 pub mod secure_key;
 pub mod transfer;
 mod biometric;
-mod passkey;
 mod signed_log;
 pub mod commands;
 pub mod vault_key_cache;
@@ -65,6 +63,7 @@ pub async fn validate_session(state: &AppState) -> Result<i64, String> {
     let last_activity = *state.last_activity.lock().await;
     if last_activity.elapsed() > std::time::Duration::from_secs(24 * 3600) {
         // Invalider la session expirée
+        commands::session::clear_session_key(state, user_id).await;
         *state.session_token.lock().await = None;
         *state.current_user_id.lock().await = None;
         return Err("Session expirée — reconnexion requise".to_string());
@@ -81,58 +80,72 @@ pub fn generate_random_key_bytes() -> Vec<u8> {
     key
 }
 
-/// Récupère la clé vault depuis le cache sécurisé, ou depuis le Keychain si le cache
-/// est vide/expiré, puis met en cache le résultat.
-///
-/// Ce helper centralise la logique cache-or-fetch pour éviter de dupliquer
-/// le pattern dans les 20+ commandes Tauri.
-///
-/// **Variable d'environnement** : `UTILISATION_CACHE`
-/// - `true` (défaut) : utilise le cache XOR-masked en mémoire
-/// - `false` : accès direct au Keychain à chaque appel (ancien comportement)
-///
-/// **Sécurité** :
-/// - Le cache utilise XOR-masking (NIST SP 800-57 key splitting)
-/// - mlock sur tous les buffers (anti-swap)
-/// - TTL de 3 minutes (OWASP: minimiser le temps en clair)
-/// - Rotation du masque toutes les 30s
-/// - Zeroize + munlock au drop
-pub async fn get_or_fetch_vault_key(state: &AppState, user_id: i64) -> Result<secure_key::SecureKey, String> {
-    if !state.cache_enabled {
-        // Mode sans cache : accès direct au Keychain (ancien comportement)
-        return secure_storage::retrieve_encryption_key_secure(user_id)
-            .map_err(|e| format!("Erreur récupération clé: {}", e));
-    }
-
-    // 1. Essayer le cache d'abord
+/// Garde la clé du coffre en mémoire pendant la session sur mobile.
+pub(crate) async fn store_session_key(
+    state: &AppState,
+    user_id: i64,
+    key: &secure_key::SecureKey,
+) -> Result<(), String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        let mut cache = state.vault_key_cache.lock().await;
-        if let Some(key) = cache.get(user_id) {
-            return Ok(key);
+        if let Some(dir) = state.data_dir.lock().await.as_ref() {
+            secure_storage::remove_legacy_session_key(dir, user_id);
         }
+        if let Ok(dir) = hidden_storage::get_hidden_database_dir() {
+            secure_storage::remove_legacy_session_key(&dir, user_id);
+        }
+        *state.mobile_session_key.lock().await =
+            Some((user_id, key.use_key(|bytes| Ok::<_, String>(secure_key::SecureKey::from_slice(bytes)))?));
+        Ok(())
     }
 
-    // 2. Cache miss : aller chercher dans le Keychain
-    let key_from_keychain = secure_storage::retrieve_encryption_key_secure(user_id)
-        .map_err(|e| format!("Erreur récupération clé: {}", e))?;
-
-    // 3. Mettre en cache (XOR-masked + mlock)
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let key_bytes = key_from_keychain.to_vec();
-        let mut cache = state.vault_key_cache.lock().await;
-        cache.store(user_id, &key_bytes);
-        // key_bytes est Zeroizing<Vec<u8>>, sera zéroïsé automatiquement ici
+        key.use_key(|bytes| secure_storage::store_encryption_key(user_id, bytes))
+            .map_err(|e| format!("Erreur stockage clé sécurisée: {e}"))?;
+        if state.cache_enabled {
+            state.vault_key_cache.lock().await.store(user_id, &key.to_vec());
+        }
+        Ok(())
+    }
+}
+
+pub async fn get_or_fetch_vault_key(state: &AppState, user_id: i64) -> Result<secure_key::SecureKey, String> {
+    if validate_session(state).await? != user_id {
+        return Err("Session invalide".into());
     }
 
-    // 4. Retourner depuis le cache (pour garantir la cohérence du chemin)
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        let mut cache = state.vault_key_cache.lock().await;
-        cache.get(user_id).ok_or_else(|| "Erreur interne: cache vault vide après store".to_string())
+        let key = state.mobile_session_key.lock().await;
+        return match key.as_ref() {
+            Some((owner, key)) if *owner == user_id => key.use_key(|bytes| {
+                Ok(secure_key::SecureKey::from_slice(bytes))
+            }),
+            _ => Err("Clé de session indisponible".into()),
+        };
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        if state.cache_enabled {
+            if let Some(key) = state.vault_key_cache.lock().await.get(user_id) {
+                return Ok(key);
+            }
+        }
+
+        let key = secure_storage::retrieve_encryption_key_secure(user_id)
+            .map_err(|e| format!("Erreur récupération clé: {e}"))?;
+        if state.cache_enabled {
+            state.vault_key_cache.lock().await.store(user_id, &key.to_vec());
+        }
+        Ok(key)
     }
 }
 
 // État global de l'application
 pub struct AppState {
+    pub auth_lifecycle: Mutex<()>,
     pub db: Arc<Mutex<Option<Database>>>,
     pub current_user_id: Arc<Mutex<Option<i64>>>,
     pub session_token: Arc<Mutex<Option<String>>>,
@@ -157,12 +170,13 @@ pub struct AppState {
     pub vault_key_cache: Arc<Mutex<VaultKeyCache>>,
     /// Cache activé ou non (configurable via UTILISATION_CACHE)
     pub cache_enabled: bool,
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub mobile_session_key: Mutex<Option<(i64, secure_key::SecureKey)>>,
 }
 
 // Structures pour les requêtes
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginRequest {
-    pub username: String,
     pub password: String,
 }
 
@@ -172,6 +186,7 @@ pub struct LoginResponse {
     pub token: Option<String>,
     pub message: String,
     pub user_id: Option<i64>,
+    pub username: Option<String>,
     pub email: Option<String>,
 }
 
@@ -247,30 +262,11 @@ pub struct SecurityEvent {
 // Commandes Tauri
 
 
-/// Nettoyage sécurisé des fichiers déchiffrés temporaires (M01 — audit sécurité)
-/// Écrase le contenu avec des zéros avant suppression pour empêcher la récupération
+/// Supprime les copies temporaires créées dans le cache privé de l’application.
 pub async fn secure_cleanup_decrypted_files(temp_files: &Arc<Mutex<Vec<String>>>) {
-    let mut files = temp_files.lock().await;
-    for path in files.drain(..) {
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            let size = metadata.len() as usize;
-            // Écraser avec des zéros avant suppression
-            if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&path) {
-                use std::io::Write;
-                let zeros = vec![0u8; size.min(1024 * 1024)]; // Blocs de 1 MiB max
-                let mut remaining = size;
-                while remaining > 0 {
-                    let chunk = remaining.min(zeros.len());
-                    if file.write_all(&zeros[..chunk]).is_err() {
-                        break;
-                    }
-                    remaining -= chunk;
-                }
-                let _ = file.flush();
-            }
-            let _ = std::fs::remove_file(&path);
-            debug_log!("🧹 Fichier temporaire nettoyé de manière sécurisée: {}", path);
-        }
+    let files = std::mem::take(&mut *temp_files.lock().await);
+    for file in files {
+        let _ = std::fs::remove_file(file);
     }
 }
 
@@ -375,6 +371,7 @@ pub fn run() {
     // Créer services
     let session_token = Arc::new(Mutex::new(None));
     let app_state = AppState {
+        auth_lifecycle: Mutex::new(()),
         db: Arc::new(Mutex::new(None)),
         current_user_id: Arc::new(Mutex::new(None)),
         session_token: session_token.clone(),
@@ -404,6 +401,8 @@ pub fn run() {
             config.cache_mask_rotation_secs,
         ))),
         cache_enabled: config.cache_enabled,
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        mobile_session_key: Mutex::new(None),
     };
 
     let builder = tauri::Builder::default()
@@ -444,7 +443,6 @@ pub fn run() {
             create_secure_file,
             create_secure_file_from_path,
             get_secure_files,
-            decrypt_file,
             decrypt_file_to_path,
             cleanup_decrypted_files,
             delete_secure_file,
@@ -458,11 +456,6 @@ pub fn run() {
             delete_secure_key,
             get_security_events,
             create_test_logs,
-            // 2FA commands
-            setup_2fa,
-            verify_and_enable_2fa,
-            disable_2fa,
-            verify_2fa_login,
             // Biometric commands
             check_biometric,
             enable_biometric,
@@ -470,12 +463,6 @@ pub fn run() {
             biometric_login,
             biometric_login_with_key,
             biometric_emergency_lock,
-            // Passkey commands
-            check_passkey,
-            register_passkey,
-            passkey_login,
-            passkey_authenticate,
-            delete_passkey,
             // Threat reaction commands
             analyze_and_react,
             // Maintenance commands
@@ -525,14 +512,12 @@ pub fn run() {
             transfer::commands::transfer_cancel,
             transfer::commands::transfer_set_visibility,
             transfer::commands::transfer_get_visibility,
-            transfer::commands::transfer_sync_trust_store,
             transfer::commands::transfer_get_sync_settings,
             transfer::commands::transfer_set_sync_enabled,
             transfer::commands::transfer_add_sync_device,
             transfer::commands::transfer_remove_sync_device,
             transfer::commands::transfer_start_sync_pairing,
             transfer::commands::transfer_join_sync_pairing,
-            transfer::commands::transfer_auto_sync_with_peer,
             ]);
             move |invoke| {
                 stacker::maybe_grow(2 * 1024 * 1024, 4 * 1024 * 1024, || {

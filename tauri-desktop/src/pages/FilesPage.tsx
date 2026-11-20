@@ -1,20 +1,20 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { open, save } from '@tauri-apps/plugin-dialog'
-import { readFile } from '@tauri-apps/plugin-fs'
+import { readFile, stat } from '@tauri-apps/plugin-fs'
+import { hasAndroidStorage, saveFileToPublic } from '../lib/public-storage'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
-import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
   Upload, Download, Trash2, FileText, Image, Film, Music, Archive,
-  File as FileIcon, AlertCircle, Share2, FolderLock, ShieldAlert,
+  File as FileIcon, AlertCircle,
 } from 'lucide-react'
 import { files as filesSvc, type SecureFile } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
-import { AppShell } from '../design-system/layouts'
-import { Button, Input, Spinner, Badge } from '../design-system/atoms'
-import { SearchBar, EmptyState, Modal } from '../design-system/molecules'
+import { WorkspacePage } from '../design-system/layouts'
+import { Button, Spinner } from '../design-system/atoms'
+import { SearchBar, Modal } from '../design-system/molecules'
 import { useToast } from '../design-system/organisms'
 
 /** If a backend error indicates expired session, logout and redirect */
@@ -59,10 +59,6 @@ const FilesPage = () => {
   const guardSession = useSessionGuard()
   const [search, setSearch] = useState('')
   const [showUpload, setShowUpload] = useState(false)
-  const [showShare, setShowShare] = useState(false)
-  const [shareTarget, setShareTarget] = useState<SecureFile | null>(null)
-  const [shareEmail, setShareEmail] = useState('')
-  const [shareExpiry, setShareExpiry] = useState('7')
   const [selectedName, setSelectedName] = useState<string | null>(null)
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [uploadErr, setUploadErr] = useState('')
@@ -152,6 +148,10 @@ const FilesPage = () => {
       // On Android, file dialog returns content:// URIs that Rust can't open directly.
       // Read via Tauri's fs plugin (handles content:// URIs) and send base64 to backend.
       if (selectedPath.startsWith('content://') || selectedPath.startsWith('file://')) {
+        const fileInfo = await stat(selectedPath)
+        if (fileInfo.size > 32 * 1024 * 1024) {
+          throw new Error('Sur Android, cet import accepte les fichiers de 32 Mio maximum.')
+        }
         const bytes = await readFile(selectedPath)
         const uint8 = new Uint8Array(bytes)
         // Chunked base64 encoding to avoid call stack overflow on large files
@@ -175,116 +175,66 @@ const FilesPage = () => {
 
   const handleDownload = async (f: SecureFile) => {
     setShowProgress(true); setProgress(0); setProgressMsg('Préparation…')
-    const dest = await save({ defaultPath: f.filename })
-    if (!dest) { setShowProgress(false); return }
     try {
-      await filesSvc.decryptToPath(f.id, dest)
-      toast(`"${f.filename}" téléchargé`, 'success')
-    } catch (e) { toast('Erreur téléchargement : ' + e, 'error') }
-    finally { setShowProgress(false) }
+      if (hasAndroidStorage()) {
+        const stagedPath = await filesSvc.decryptToPath(f.id)
+        const destination = saveFileToPublic(stagedPath, f.filename, f.mime_type || 'application/octet-stream')
+        toast(`Fichier exporté dans ${destination}`, 'success')
+      } else {
+        const destination = await save({ defaultPath: f.filename })
+        if (!destination) return
+        await filesSvc.decryptToPath(f.id, destination)
+        toast(`« ${f.filename} » exporté`, 'success')
+      }
+    } catch (error) {
+      toast(`Export impossible. ${String(error)}`, 'error')
+    } finally {
+      setShowProgress(false)
+    }
+
   }
-
-  const handleShareSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!shareTarget || !shareEmail.trim()) return
-    try {
-      const res = await invoke<{ success: boolean; share_link: string; expires_at: string }>('share_file', {
-        request: { file_id: shareTarget.id, recipient_email: shareEmail, expiration_days: parseInt(shareExpiry) }
-      })
-      if (res.success) { await writeText(res.share_link); toast('Lien copié dans le presse-papiers', 'success') }
-      setShowShare(false); setShareTarget(null); setShareEmail(''); setShareExpiry('7')
-    } catch (e) { toast('Erreur partage : ' + e, 'error') }
-  }
-
-  if (isLoading) return <AppShell><div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-16)' }}><Spinner size={32} /></div></AppShell>
-
-  if (isError) return (
-    <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-4)', padding: 'var(--space-16)' }}>
-        <AlertCircle size={40} style={{ color: 'var(--danger)' }} />
-        <p style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-body)', fontSize: 'var(--text-base)' }}>
-          Erreur de chargement des fichiers
-        </p>
-        <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: 'var(--text-sm)', textAlign: 'center', maxWidth: 400 }}>
-          {String(queryError)}
-        </p>
-        <Button onClick={() => refetch()}>Réessayer</Button>
-      </div>
-    </AppShell>
-  )
 
   return (
-    <AppShell>
-      <div className="page-content flex flex-col gap-6">
-        {/* Header */}
-        <div className="page-header flex-col items-start sm:flex-row sm:items-center gap-4">
-          <div>
-            <h1 className="font-display text-3xl text-tx-primary flex items-center gap-3">
-              <FolderLock size={28} className="text-accent" />
-              Fichiers sécurisés
-            </h1>
-            <p className="text-sm text-tx-muted font-body mt-1">
-              {list.length} fichier{list.length !== 1 ? 's' : ''} chiffré{list.length !== 1 ? 's' : ''}
-            </p>
-          </div>
-          <Button icon={Upload} onClick={() => setShowUpload(true)} disabled={isReadonly} className="w-full sm:w-auto">Ajouter</Button>
-        </div>
-
-        {/* Readonly banner */}
-        {isReadonly && (
-          <div className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm bg-danger-muted border border-danger text-danger font-body">
-            <ShieldAlert size={16} />
-            Coffre-fort en lecture seule — modifications bloquées
-          </div>
-        )}
-
+    <WorkspacePage title="Fichiers chiffrés" description="Ajoutez des documents au coffre et exportez-les lorsque vous en avez besoin."
+      actions={<>
+        <Link to="/shares" className="workspace-link">Fichiers partagés</Link>
+        <Button icon={Upload} onClick={() => setShowUpload(true)} disabled={isReadonly}>Ajouter un fichier</Button>
+      </>}>
+      {isReadonly && <p role="status" className="workspace-error">Le coffre est en lecture seule. Les modifications sont désactivées.</p>}
+      {showProgress && <section className="workspace-panel workspace-stack" role="status">
+        <div className="workspace-actions"><h2>{progressMsg}</h2><span className="workspace-label">{progress} %</span></div>
+        <progress value={progress} max={100} aria-label={progressMsg || 'Opération sur un fichier'} />
+      </section>}
+      <section className="workspace-panel workspace-stack" aria-labelledby="file-list">
+        <h2 id="file-list">Documents du coffre</h2>
         <SearchBar value={search} onChange={setSearch} placeholder="Rechercher un fichier…" />
-
-        {/* Progress bar (visible during encrypt/decrypt) */}
-        {showProgress && (
-          <div className="bg-surface border border-bd rounded-xl p-4 flex flex-col gap-2">
-            <div className="flex justify-between text-sm font-body">
-              <span className="text-tx-secondary">{progressMsg}</span>
-              <span className="text-accent font-semibold">{progress}%</span>
-            </div>
-            <div className="w-full h-1.5 bg-input rounded-full overflow-hidden">
-              <div className="h-full bg-accent rounded-full transition-all duration-300 ease-out" style={{ width: `${progress}%` }} />
-            </div>
-          </div>
-        )}
-
-        {/* File list */}
-        {filtered.length === 0 ? (
-          <EmptyState icon={FolderLock} title={search ? 'Aucun résultat' : 'Aucun fichier'} description={search ? undefined : 'Ajoutez votre premier fichier sécurisé'}
-            action={!search ? <Button icon={Upload} onClick={() => setShowUpload(true)}>Ajouter</Button> : undefined} />
+        {isLoading ? <p role="status" className="workspace-label"><Spinner size={18} /> Chargement…</p> :
+          isError ? <div className="workspace-stack">
+            <p role="alert" className="workspace-error">Impossible de charger les fichiers. {String(queryError)}</p>
+            <div><Button variant="secondary" onClick={() => void refetch()}>Réessayer</Button></div>
+          </div> : filtered.length === 0 ? (
+          <p className="workspace-empty">{search ? 'Aucun fichier ne correspond à votre recherche.' : 'Ajoutez votre premier document pour le chiffrer.'}</p>
         ) : (
-          <div className="flex flex-col gap-3">
-            {filtered.map((f) => (
-              <div key={f.id} className="bg-surface sm:border sm:border-bd rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all duration-200">
-                <div className="flex items-start gap-4 min-w-0 flex-1">
-                  <div className="w-12 h-12 rounded-full bg-elevated border border-bd flex items-center justify-center shrink-0">
-                    {mimeIcon(f.mime_type)}
-                  </div>
-                  <div className="flex-1 min-w-0 py-0.5">
-                    <p className="text-base font-semibold text-tx-primary font-body truncate" title={f.filename}>{f.filename}</p>
-                    <div className="flex flex-wrap items-center gap-2 mt-1">
-                      <span className="text-xs text-tx-muted font-mono bg-elevated px-2 py-0.5 rounded-md border border-bd/50">{fmtSize(f.file_size)}</span>
-                      <span className="text-xs text-tx-disabled font-body">{fmtDate(f.created_at)}</span>
-                    </div>
-                  </div>
+          <ul className="workspace-list">
+            {filtered.map((file) => (
+              <li key={file.id} className="workspace-row">
+                <span className="workspace-icon" aria-hidden="true">{mimeIcon(file.mime_type)}</span>
+                <div className="workspace-row-copy">
+                  <strong>{file.filename}</strong>
+                  <span>{fmtSize(file.file_size)} · {fmtDate(file.created_at)}</span>
                 </div>
-                
-                <div className="flex items-center gap-2 pl-[64px] sm:pl-0 shrink-0">
-                  <Button size="sm" icon={Download} onClick={() => handleDownload(f)} className="flex-1 sm:flex-none">Télécharger</Button>
-                  <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Supprimer "${f.filename}" ?`)) deleteMut.mutate(f.id) }} disabled={isReadonly} className="w-9 h-9 p-0 flex items-center justify-center text-danger hover:bg-danger-muted shrink-0" title="Supprimer">
-                    <Trash2 size={18} />
-                  </Button>
+                <div className="workspace-actions">
+                  <Button variant="secondary" size="sm" icon={Download} onClick={() => void handleDownload(file)}
+                    aria-label={`Exporter ${file.filename}`}>Exporter</Button>
+                  <Button variant="ghost" size="sm" icon={Trash2} disabled={isReadonly}
+                    aria-label={`Supprimer ${file.filename}`}
+                    onClick={() => { if (confirm(`Supprimer « ${file.filename} » ?`)) deleteMut.mutate(file.id) }} />
                 </div>
-              </div>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
-      </div>
+      </section>
 
       {/* Upload modal */}
       <Modal open={showUpload} onClose={closeUpload} title="Ajouter un fichier">
@@ -295,7 +245,7 @@ const FilesPage = () => {
             cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--space-2)',
             transition: 'border-color var(--transition-fast)',
           }}>
-            <Upload size={18} /> Cliquer pour choisir un fichier
+            <Upload size={18} /> Choisir un fichier
           </button>
 
           {selectedName && (
@@ -313,7 +263,7 @@ const FilesPage = () => {
           )}
 
           <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', fontFamily: 'var(--font-body)' }}>
-            Les fichiers sont chiffrés sur disque — aucune limite de taille.
+            Le document est chiffré dès son ajout au coffre.
           </p>
 
           <div style={{ display: 'flex', gap: 'var(--space-3)', paddingTop: 'var(--space-2)' }}>
@@ -323,36 +273,7 @@ const FilesPage = () => {
         </div>
       </Modal>
 
-      {/* Share modal */}
-      <Modal open={showShare && !!shareTarget} onClose={() => { setShowShare(false); setShareTarget(null) }} title="Partager le fichier">
-        {shareTarget && (
-          <form onSubmit={handleShareSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-            <div style={{ background: 'var(--bg-elevated)', borderRadius: 'var(--radius-md)', padding: 'var(--space-3)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-              {mimeIcon(shareTarget.mime_type)}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shareTarget.filename}</p>
-                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{fmtSize(shareTarget.file_size)}</p>
-              </div>
-            </div>
-            <Input label="Email du destinataire" type="email" value={shareEmail} onChange={(e) => setShareEmail(e.target.value)} placeholder="user@example.com" required />
-            <div>
-              <label style={{ display: 'block', fontSize: 'var(--text-xs)', fontWeight: 500, color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', letterSpacing: 'var(--tracking-wide)', textTransform: 'uppercase', marginBottom: 'var(--space-1)' }}>Expiration</label>
-              <select value={shareExpiry} onChange={(e) => setShareExpiry(e.target.value)} style={{ width: '100%', padding: '10px 12px', background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', color: 'var(--text-primary)', fontFamily: 'var(--font-body)', fontSize: 'var(--text-sm)', outline: 'none' }}>
-                <option value="1">1 jour</option><option value="3">3 jours</option><option value="7">7 jours</option><option value="14">14 jours</option><option value="30">30 jours</option>
-              </select>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-2)', padding: 'var(--space-3)', background: 'color-mix(in srgb, var(--accent) 8%, transparent)', borderRadius: 'var(--radius-md)' }}>
-              <AlertCircle size={16} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 2 }} />
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)' }}>Lien sécurisé chiffré — authentification requise.</span>
-            </div>
-            <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
-              <Button type="submit" fullWidth icon={Share2}>Partager</Button>
-              <Button type="button" variant="secondary" fullWidth onClick={() => { setShowShare(false); setShareTarget(null) }}>Annuler</Button>
-            </div>
-          </form>
-        )}
-      </Modal>
-    </AppShell>
+    </WorkspacePage>
   )
 }
 

@@ -69,7 +69,6 @@ function AppRoutes() {
         <>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
-          <Route path="/reset-vault" element={<ResetVaultPage />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </>
       ) : (
@@ -83,6 +82,7 @@ function AppRoutes() {
           <Route path="/shares" element={<SharesPage />} />
           <Route path="/backup" element={<BackupRestorePage />} />
           <Route path="/transfer" element={<TransferPage />} />
+          <Route path="/reset-vault" element={<ResetVaultPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </>
