@@ -21,6 +21,7 @@ pub mod session;
 pub mod trust_store;
 pub mod reencrypt;
 pub mod commands;
+mod registry_sync;
 
 use serde::{Serialize, Deserialize};
 

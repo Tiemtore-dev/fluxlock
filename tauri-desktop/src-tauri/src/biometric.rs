@@ -9,8 +9,13 @@ use zeroize::Zeroizing;
 #[cfg(not(any(target_os = "macos", target_os = "android")))]
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+mod macos_compatibility;
+
 const MAX_FAILED_ATTEMPTS: u32 = 3;
 const NATIVE_KEYCHAIN_FORMAT: u8 = 1;
+#[cfg(target_os = "macos")]
+const COMPATIBILITY_KEYCHAIN_FORMAT: u8 = 2;
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
@@ -55,6 +60,9 @@ pub struct BiometricStatus {
     pub requires_password: bool,
     /// Human-readable reason when requires_password is true
     pub password_reason: Option<String>,
+    pub unavailable_reason: Option<String>,
+    pub compatibility_available: bool,
+    pub compatibility_enrolled: bool,
     /// Number of consecutive biometric failures this session
     pub failed_attempts: u32,
 }
@@ -66,6 +74,9 @@ struct BiometricEnrollment {
     /// Version of the native Keychain enrollment on macOS.
     #[serde(default)]
     keychain_format: u8,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compatibility_id: Option<uuid::Uuid>,
     #[serde(default)]
     restriction: Option<PasswordRestriction>,
 }
@@ -206,6 +217,7 @@ extern "C" {
     fn biometric_get_type() -> i32;
     fn biometric_authenticate(reason: *const std::os::raw::c_char) -> bool;
     // Secure Enclave keychain with biometric access control (SecAccessControl)
+    fn biometric_keychain_has_identity() -> bool;
     fn biometric_keychain_store(account: *const std::os::raw::c_char, data: *const u8, data_len: i32) -> i32;
     fn biometric_keychain_retrieve(account: *const std::os::raw::c_char, reason: *const std::os::raw::c_char, out_data: *mut u8, out_data_capacity: i32) -> i32;
     fn biometric_keychain_delete(account: *const std::os::raw::c_char) -> i32;
@@ -428,10 +440,15 @@ fn platform_authenticate(_reason: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
+const MACOS_SIGNATURE_REQUIRED: &str =
+    "Cette version de FluXlock n’a pas la signature macOS requise pour Touch ID. Utilisez votre mot de passe maître.";
+
+#[cfg(target_os = "macos")]
 fn keychain_error(status: i32) -> String {
     match status {
-        -34018 => "Cette version macOS ne dispose pas des autorisations de signature pour Touch ID. Utilisez votre mot de passe maître.".into(),
+        -34018 => MACOS_SIGNATURE_REQUIRED.into(),
         -128 => "Authentification biométrique annulée.".into(),
+        -25291 => "Secure Enclave indisponible. Utilisez votre mot de passe maître.".into(),
         -25300 | -26275 => "Clé biométrique indisponible. Déverrouillez le coffre au mot de passe, puis réactivez la biométrie dans Paramètres.".into(),
         -25293 => "Touch ID a refusé l’authentification. Utilisez votre mot de passe maître si le capteur est verrouillé.".into(),
         _ => format!("Le trousseau macOS a refusé l’opération biométrique ({status})."),
@@ -457,8 +474,56 @@ fn store_enrollment(dir: &Path, enrollment: &BiometricEnrollment) -> Result<(), 
     Ok(())
 }
 
-fn is_current_enrollment(enrollment: &BiometricEnrollment) -> bool {
-    !cfg!(target_os = "macos") || enrollment.keychain_format == NATIVE_KEYCHAIN_FORMAT
+fn is_current_enrollment(_enrollment: &BiometricEnrollment) -> bool {
+    #[cfg(target_os = "macos")]
+    return match (_enrollment.keychain_format, _enrollment.compatibility_id) {
+        (NATIVE_KEYCHAIN_FORMAT, None) => true,
+        (COMPATIBILITY_KEYCHAIN_FORMAT, Some(id)) => !id.is_nil(),
+        _ => false,
+    };
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn macos_enrollment_format(compatibility: bool, native: bool, enclave: bool) -> Result<u8, String> {
+    match (compatibility, native, enclave) {
+        (false, true, _) => Ok(NATIVE_KEYCHAIN_FORMAT),
+        (true, false, true) => Ok(COMPATIBILITY_KEYCHAIN_FORMAT),
+        (true, true, _) => Err("Cette version de FluXlock peut utiliser le trousseau de protection des données.".into()),
+        (true, false, false) => Err(keychain_error(-25291)),
+        (false, false, true) => Err("Activez explicitement le mode compatibilité Touch ID dans Paramètres.".into()),
+        (false, false, false) => Err(MACOS_SIGNATURE_REQUIRED.into()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn save_compatibility_enrollment(
+    dir: &Path, enrollment: &BiometricEnrollment, id: uuid::Uuid, key: &[u8],
+) -> Result<(), String> {
+    macos_compatibility::store(enrollment.user_id, id, key)?;
+    let saved = (|| {
+        // Remove any weaker pre-2.3 key before reporting the new enrollment active.
+        macos_compatibility::delete_legacy(enrollment.user_id)?;
+        retire_compatibility_enrollment(dir, enrollment.user_id)?;
+        store_enrollment(dir, enrollment)
+    })();
+    if saved.is_err() {
+        let _ = macos_compatibility::delete(enrollment.user_id, id);
+    }
+    saved
+}
+
+#[cfg(target_os = "macos")]
+fn retire_compatibility_enrollment(dir: &Path, user_id: i64) -> Result<(), String> {
+    if let Some(existing) = get_enrollment(dir).filter(|enrollment| enrollment.user_id == user_id
+        && enrollment.keychain_format == COMPATIBILITY_KEYCHAIN_FORMAT)
+    {
+        if let Some(id) = existing.compatibility_id {
+            macos_compatibility::delete(user_id, id)?;
+        }
+    }
+    Ok(())
 }
 
 fn password_requirement(enrollment: &BiometricEnrollment) -> Option<&'static str> {
@@ -499,23 +564,84 @@ pub fn emergency_lock(dir: &Path) -> Result<(), String> {
 }
 
 pub fn check_biometric_status(dir: &Path) -> BiometricStatus {
-    let enrollment = get_enrollment(dir).filter(is_current_enrollment);
-    let reason = enrollment.as_ref().and_then(password_requirement);
+    let hardware_available = platform_is_available();
+    let raw_enrollment = get_enrollment(dir);
+    let enrollment = raw_enrollment.as_ref().filter(|enrollment| is_current_enrollment(enrollment));
     let enrolled = enrollment.is_some();
+    let legacy = raw_enrollment.is_some() && !enrolled;
+    let reason = enrollment.and_then(password_requirement).or(legacy.then_some(
+        "Ouvrez le coffre au mot de passe maître, puis réactivez Touch ID pour cette version.",
+    ));
+
+    #[cfg(target_os = "macos")]
+    let (available, unavailable_reason, compatibility_available, compatibility_enrolled) = {
+        let native = hardware_available && unsafe { biometric_keychain_has_identity() };
+        let enclave = hardware_available && macos_compatibility::is_available();
+        let compatibility_available = enclave && !native;
+        let compatibility_enrolled = enrollment.is_some_and(|entry|
+            entry.keychain_format == COMPATIBILITY_KEYCHAIN_FORMAT);
+        let available = match enrollment {
+            Some(_) if compatibility_enrolled => enclave,
+            Some(_) => native,
+            None => native || compatibility_available,
+        };
+        let unavailable_reason = if hardware_available && !available {
+            Some(if compatibility_enrolled { keychain_error(-25291) }
+                 else { MACOS_SIGNATURE_REQUIRED.to_owned() })
+        } else {
+            None
+        };
+        (available, unavailable_reason, compatibility_available, compatibility_enrolled)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (available, unavailable_reason, compatibility_available, compatibility_enrolled) =
+        (hardware_available, None, false, false);
+
     BiometricStatus {
-        available: platform_is_available(),
+        available,
         biometric_type: platform_get_type(),
         enrolled,
-        enrolled_username: enrollment.map(|entry| entry.username),
-        requires_password: reason.is_some() || !enrolled,
+        enrolled_username: enrollment.map(|entry| entry.username.clone()),
+        requires_password: reason.is_some() || !enrolled || !available,
         password_reason: reason.map(str::to_owned),
+        unavailable_reason,
+        compatibility_available,
+        compatibility_enrolled,
         failed_attempts: with_runtime(|runtime| runtime.failed_attempts),
     }
 }
 
-pub fn enable_biometric(dir: &Path, user_id: i64, username: &str, encryption_key: &[u8]) -> Result<Option<String>, String> {
+pub fn enable_biometric(
+    dir: &Path, user_id: i64, username: &str, encryption_key: &[u8], compatibility: bool,
+) -> Result<Option<String>, String> {
     if !platform_is_available() {
         return Err("Biométrie indisponible sur cet appareil. Vérifiez son état dans les réglages système.".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    let keychain_format = macos_enrollment_format(compatibility,
+        unsafe { biometric_keychain_has_identity() }, macos_compatibility::is_available())?;
+    #[cfg(not(target_os = "macos"))]
+    let keychain_format = {
+        if compatibility {
+            return Err("Le mode compatibilité Touch ID est réservé à macOS.".into());
+        }
+        NATIVE_KEYCHAIN_FORMAT
+    };
+
+    let enrollment = BiometricEnrollment {
+        user_id,
+        username: username.to_string(),
+        keychain_format,
+        #[cfg(target_os = "macos")]
+        compatibility_id: (keychain_format == COMPATIBILITY_KEYCHAIN_FORMAT).then(uuid::Uuid::new_v4),
+        restriction: None,
+    };
+    #[cfg(target_os = "macos")]
+    if let Some(id) = enrollment.compatibility_id {
+        save_compatibility_enrollment(dir, &enrollment, id, encryption_key)?;
+        with_runtime(|runtime| runtime.failed_attempts = 0);
+        return Ok(None);
     }
 
     let key_b64 = Zeroizing::new(general_purpose::STANDARD.encode(encryption_key));
@@ -524,13 +650,8 @@ pub fn enable_biometric(dir: &Path, user_id: i64, username: &str, encryption_key
         platform_authenticate("Activez la biométrie pour FluXlock")?;
         store_key_in_keychain(user_id, &key_b64)?;
     }
-
-    let enrollment = BiometricEnrollment {
-        user_id,
-        username: username.to_string(),
-        keychain_format: NATIVE_KEYCHAIN_FORMAT,
-        restriction: None,
-    };
+    #[cfg(target_os = "macos")]
+    retire_compatibility_enrollment(dir, user_id)?;
     store_enrollment(dir, &enrollment)?;
     with_runtime(|runtime| runtime.failed_attempts = 0);
 
@@ -543,6 +664,8 @@ pub fn enable_biometric(dir: &Path, user_id: i64, username: &str, encryption_key
 pub fn disable_biometric(dir: &Path) -> Result<(), String> {
     #[cfg(not(target_os = "android"))]
     if let Some(enrollment) = get_enrollment(dir) {
+        #[cfg(target_os = "macos")]
+        retire_compatibility_enrollment(dir, enrollment.user_id)?;
         let _ = delete_key_from_keychain(enrollment.user_id);
     }
     match std::fs::remove_file(enrollment_path(dir)) {
@@ -564,8 +687,24 @@ fn authorized_enrollment(dir: &Path, target_username: &str) -> Result<BiometricE
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn biometric_login(dir: &Path, target_username: &str) -> Result<(i64, String, Vec<u8>), String> {
+pub fn biometric_login(
+    dir: &Path, target_username: &str, target_user_id: i64,
+) -> Result<(i64, String, Vec<u8>), String> {
     let enrollment = authorized_enrollment(dir, target_username)?;
+    if enrollment.user_id != target_user_id {
+        return Err("Biométrie non configurée pour ce compte.".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(id) = enrollment.compatibility_id {
+            let key = macos_compatibility::retrieve(enrollment.user_id, id)?;
+            with_runtime(|runtime| runtime.failed_attempts = 0);
+            return Ok((enrollment.user_id, enrollment.username, key.to_vec()));
+        }
+        if !unsafe { biometric_keychain_has_identity() } {
+            return Err(MACOS_SIGNATURE_REQUIRED.into());
+        }
+    }
 
     // The macOS keychain prompts once when it releases the protected item.
     #[cfg(not(target_os = "macos"))]
@@ -607,6 +746,8 @@ mod tests {
             user_id: 1,
             username: "fixture".into(),
             keychain_format: NATIVE_KEYCHAIN_FORMAT,
+            #[cfg(target_os = "macos")]
+            compatibility_id: None,
             restriction: None,
         }
     }
@@ -637,6 +778,24 @@ mod tests {
         assert!(authorized_enrollment(vault.path(), "fixture").unwrap_err().contains("urgence"));
         notify_password_login_success(vault.path()).unwrap();
         assert!(authorized_enrollment(vault.path(), "fixture").is_ok());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn compatibility_requires_explicit_enrollment_and_a_secure_enclave() {
+        assert_eq!(macos_enrollment_format(false, true, true).unwrap(), NATIVE_KEYCHAIN_FORMAT);
+        assert_eq!(macos_enrollment_format(true, false, true).unwrap(), COMPATIBILITY_KEYCHAIN_FORMAT);
+        assert!(macos_enrollment_format(false, false, true).is_err());
+        assert!(macos_enrollment_format(true, false, false).is_err());
+        assert!(macos_enrollment_format(true, true, true).is_err());
+
+        let mut entry = enrollment();
+        entry.keychain_format = COMPATIBILITY_KEYCHAIN_FORMAT;
+        assert!(!is_current_enrollment(&entry));
+        entry.compatibility_id = Some(uuid::Uuid::new_v4());
+        assert!(is_current_enrollment(&entry));
+        entry.keychain_format = NATIVE_KEYCHAIN_FORMAT;
+        assert!(!is_current_enrollment(&entry));
     }
 
     #[test]

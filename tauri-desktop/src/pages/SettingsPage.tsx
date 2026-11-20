@@ -20,7 +20,7 @@ export default function SettingsPage() {
   const [color, setColor] = useState(localStorage.getItem('color-theme') || 'default')
   const [autoLock, setAutoLock] = useState(sessionStorage.getItem('autoLock') !== 'false')
   const [minutes, setMinutes] = useState(sessionStorage.getItem('lockTimeout') || '15')
-  const [enroll, setEnroll] = useState(false)
+  const [enrollMode, setEnrollMode] = useState<'native' | 'compatibility'>()
   const [password, setPassword] = useState('')
   const bio = useQuery({ queryKey: ['biometric-settings'], queryFn: biometric.checkStatus, staleTime: 0 })
   const isolation = useQuery({ queryKey: ['isolation-mode'], queryFn: isolationMode.get, staleTime: 0 })
@@ -28,10 +28,13 @@ export default function SettingsPage() {
   const bioAvailable = android ? androidBiometricAvailable() : bio.data?.available
   const bioAlias = username ? biometricAccount(username) : undefined
   const enrolled = bio.data?.enrolled && (!android || !!bioAlias && androidHasStoredKey(bioAlias))
+  const compatibilityAvailable = !android && bio.data?.compatibility_available
+  const activationLabel = compatibilityAvailable ? 'Activer Touch ID en mode compatibilité' : 'Activer la biométrie'
+  const openEnrollment = () => setEnrollMode(compatibilityAvailable ? 'compatibility' : 'native')
 
   const refreshBio = () => { void client.invalidateQueries({ queryKey: ['biometric-settings'] }) }
   const closeEnroll = () => {
-    setEnroll(false)
+    setEnrollMode(undefined)
     setPassword('')
     enable.reset()
   }
@@ -39,7 +42,7 @@ export default function SettingsPage() {
   const enable = useMutation({
     mutationFn: () => {
       if (!username) throw new Error('Le compte est indisponible.')
-      return enrollBiometrics(password, username)
+      return enrollBiometrics(password, username, enrollMode === 'compatibility')
     },
     onSuccess: () => {
       closeEnroll()
@@ -132,22 +135,24 @@ export default function SettingsPage() {
 
         <section className="workspace-panel workspace-stack" aria-labelledby="biometric-title">
           <h2 id="biometric-title">Biométrie</h2>
-          {bio.isPending ? <p role="status">Vérification du capteur…</p> : !bioAvailable ? (
-            <p>Cette option nécessite un capteur biométrique configuré sur cet appareil.</p>
-          ) : enrolled ? (
+          {bio.isPending ? <p role="status">Vérification du capteur…</p> : enrolled ? (
             <>
-              <p>Le déverrouillage biométrique est activé. {bio.data?.requires_password && bio.data.password_reason}</p>
+              <p>{bio.data?.compatibility_enrolled ? 'Touch ID est activé en mode compatibilité.' : 'Le déverrouillage biométrique est activé.'} {bio.data?.requires_password && (bio.data.password_reason || bio.data.unavailable_reason)}</p>
               <div className="workspace-actions">
+                {!bioAvailable && compatibilityAvailable && <Button variant="secondary" icon={Fingerprint}
+                  onClick={openEnrollment}>{activationLabel}</Button>}
                 <Button variant="secondary" loading={emergency.isPending} disabled={disable.isPending}
                   onClick={() => emergency.mutate()}>Exiger le mot de passe</Button>
                 <Button variant="secondary" loading={disable.isPending} disabled={emergency.isPending}
                   onClick={() => disable.mutate()}>Désactiver</Button>
               </div>
             </>
-          ) : <>
+          ) : bioAvailable || compatibilityAvailable ? <>
             <p>Confirmez une fois votre mot de passe maître pour pouvoir déverrouiller le coffre avec le capteur de cet appareil.</p>
-            <div><Button variant="secondary" icon={Fingerprint} onClick={() => setEnroll(true)}>Activer la biométrie</Button></div>
-          </>}
+            <div><Button variant="secondary" icon={Fingerprint} onClick={openEnrollment}>{activationLabel}</Button></div>
+          </> : (
+            <p>{(!android && bio.data?.unavailable_reason) || 'Cette option nécessite un capteur biométrique configuré sur cet appareil.'}</p>
+          )}
           {(disable.isError || emergency.isError) && <p role="alert" className="workspace-error">{String(disable.error || emergency.error)}</p>}
         </section>
 
@@ -169,8 +174,10 @@ export default function SettingsPage() {
         <Link className="workspace-link" to="/reset-vault">Ouvrir la réinitialisation <ArrowRight size={16} aria-hidden="true" /></Link>
       </section>
 
-      <Modal open={enroll} onClose={() => { if (!enable.isPending) closeEnroll() }} title="Activer la biométrie">
+      <Modal open={!!enrollMode} onClose={() => { if (!enable.isPending) closeEnroll() }}
+        title={enrollMode === 'compatibility' ? 'Activer Touch ID en mode compatibilité' : 'Activer la biométrie'}>
         <form className="workspace-stack" onSubmit={submitBiometric}>
+          {enrollMode === 'compatibility' && <p>Le trousseau macOS conserve la clé du coffre chiffrée. Seul le Secure Enclave de ce Mac peut la déchiffrer après validation de votre empreinte.</p>}
           <p>Saisissez votre mot de passe maître. L’appareil vous demandera ensuite une vérification biométrique.</p>
           <Input label="Mot de passe maître" type="password" autoComplete="current-password" required autoFocus
             value={password} onChange={(event) => setPassword(event.target.value)} disabled={enable.isPending} />

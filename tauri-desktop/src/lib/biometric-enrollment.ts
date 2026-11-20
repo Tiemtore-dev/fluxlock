@@ -5,8 +5,8 @@ export function biometricAccount(username: string) {
   return `user_bio_${username.toLowerCase()}`
 }
 
-export async function enrollBiometrics(password: string, username: string) {
-  const response = await biometric.enable(password)
+export async function enrollBiometrics(password: string, username: string, compatibility?: boolean) {
+  const response = await biometric.enable(password, compatibility)
   if (!hasAndroidKeystore()) return
 
   const account = biometricAccount(username)

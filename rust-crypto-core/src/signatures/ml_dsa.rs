@@ -84,6 +84,12 @@ impl Drop for MlDsaKeyPair {
     }
 }
 
+pub fn validate_verifying_key(vk_der: &[u8]) -> Result<()> {
+    ml_dsa::VerifyingKey::<MlDsa65>::from_public_key_der(vk_der)
+        .map(|_| ())
+        .map_err(|error| CryptoError::SignatureError(format!("ML-DSA import vk: {error}")))
+}
+
 /// Vérifie une signature ML-DSA-65 avec une clé de vérification SPKI DER
 pub fn verify_ml_dsa(
     vk_der: &[u8],

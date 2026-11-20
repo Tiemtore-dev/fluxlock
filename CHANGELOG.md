@@ -7,6 +7,16 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.3.1] - 2026-11-20
+
+### Corrigé
+
+- Sur macOS, Touch ID dispose d’un mode compatibilité sans profil Apple. Le Secure Enclave protège le déchiffrement de la clé du coffre.
+- Les transferts utilisent le port annoncé par l’appareil et essaient les adresses découvertes jusqu’à authentifier l’offre.
+- L’appairage est compatible avec la 2.2.23. Les appareils appairés et visibles resynchronisent leurs registres de confiance signés sur le réseau local.
+
+---
+
 ## [2.3.0] - 2026-11-20
 
 ### Modifié

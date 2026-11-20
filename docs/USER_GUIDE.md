@@ -341,21 +341,19 @@ Après l’activation, l’empreinte permet de déverrouiller le coffre à l’o
 
 | Plateforme | Protection |
 | :--- | :--- |
-| macOS | Touch ID et trousseau de protection des données. L’activation exige une application signée avec les autorisations Apple correspondantes. |
+| macOS | Touch ID et trousseau de protection des données pour les paquets signés et provisionnés. Le mode compatibilité utilise le Secure Enclave et conserve uniquement la clé chiffrée dans le trousseau de session. |
 | Android | Android Keystore et vérification forte à chaque utilisation de la clé. |
 | Windows | Windows Hello après une connexion au mot de passe. |
 
 Après une migration depuis une ancienne version macOS, une restauration ou une modification des empreintes de l’appareil, ouvrez d’abord le coffre au mot de passe et réactivez la biométrie.
 
+Sur un Mac compatible qui utilise un paquet sans profil Apple, ouvrez **Paramètres → Biométrie → Activer Touch ID en mode compatibilité**, puis confirmez avec votre mot de passe maître et votre empreinte.
+
 ### Synchronisation entre appareils
 
-Dans **Paramètres**, ouvrez **Synchroniser les appareils de confiance**. Les deux appareils doivent utiliser une version compatible.
+Dans **Transferts → Appareils**, créez un code d’appairage sur le premier appareil, puis saisissez-le sur le second. Les appareils compatibles échangent leurs listes signées de pairs de confiance au moment du jumelage.
 
-1. Sur l'appareil A, cliquez sur **Lancer le jumelage** → un code s'affiche
-2. Sur l'appareil B, saisissez ce code et cliquez sur **Rejoindre**
-3. Les appareils sont appairés et échangent leurs listes signées de pairs de confiance.
-
-Vous pouvez voir les appareils jumelés et les supprimer si nécessaire.
+Pour resynchroniser ces listes automatiquement, déverrouillez les deux coffres et choisissez **Rendre cet appareil visible** dans **Découverte et pairs de confiance** sur chacun. Les deux appareils doivent utiliser une version qui prend en charge cette synchronisation et être sur le même réseau local. Les mots de passe et les fichiers s’échangent depuis **Envoyer** et **Recevoir**.
 
 ### Mode isolation
 

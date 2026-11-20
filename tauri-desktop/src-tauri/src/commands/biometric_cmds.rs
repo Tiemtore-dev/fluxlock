@@ -24,7 +24,10 @@ pub async fn check_biometric(state: State<'_, AppState>) -> Result<biometric::Bi
 /// On Android: returns JSON `{"message":"...","key_b64":"..."}` so the frontend
 /// can store the key in Android Keystore (TEE/StrongBox).
 #[tauri::command]
-pub async fn enable_biometric(password: String, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn enable_biometric(
+    password: String, compatibility: Option<bool>, state: State<'_, AppState>,
+) -> Result<String, String> {
+    let password = zeroize::Zeroizing::new(password);
     let _lifecycle = state.auth_lifecycle.lock().await;
     let user_id = state.current_user_id.lock().await
         .ok_or("Non authentifié")?;
@@ -43,8 +46,10 @@ pub async fn enable_biometric(password: String, state: State<'_, AppState>) -> R
     validate_enrolled_key(&user, user_id, &secure_key)?;
 
     // Enable biometric (prompts Touch ID, stores key in biometric keychain on desktop)
-    let key_vec = secure_key.to_vec();
-    let key_b64_opt = biometric::enable_biometric(&biometric_dir(&state).await?, user_id, &user.username, &key_vec)?;
+    let dir = biometric_dir(&state).await?;
+    let key_b64_opt = secure_key.use_key(|key| {
+        biometric::enable_biometric(&dir, user_id, &user.username, key, compatibility.unwrap_or_default())
+    })?;
 
     let _ = db.log_action(user_id, "BIOMETRIC_ENABLED", "security", None).await;
 
@@ -92,7 +97,9 @@ pub async fn biometric_login(state: State<'_, AppState>) -> Result<LoginResponse
         let db_guard = state.db.lock().await;
         let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
         let user = available_owner(db).await?;
-        let (id, _, key) = biometric::biometric_login(&biometric_dir(&state).await?, &user.username)?;
+        let (id, _, key) = biometric::biometric_login(
+            &biometric_dir(&state).await?, &user.username, user.id,
+        )?;
         finish_biometric_login(&state, db, user, id, SecureKey::new(key)).await
     }
 }

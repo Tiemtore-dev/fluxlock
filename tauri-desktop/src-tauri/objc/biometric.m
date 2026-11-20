@@ -87,6 +87,17 @@ static NSDictionary *biometricQuery(NSString *account) {
     };
 }
 
+bool biometric_keychain_has_identity(void) {
+    SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+    if (task == NULL) return false;
+    CFTypeRef identity = SecTaskCopyValueForEntitlement(task, CFSTR("com.apple.application-identifier"), NULL);
+    bool available = identity != NULL && CFGetTypeID(identity) == CFStringGetTypeID()
+        && CFStringGetLength((CFStringRef)identity) != 0;
+    if (identity != NULL) CFRelease(identity);
+    CFRelease(task);
+    return available;
+}
+
 int biometric_keychain_store(const char *account, const void *data, int data_len) {
     if (!account || !data || data_len <= 0) return errSecParam;
     NSString *name = [NSString stringWithUTF8String:account];

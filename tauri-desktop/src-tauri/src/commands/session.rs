@@ -19,14 +19,14 @@ pub(crate) async fn clear_session_key(state: &AppState, user_id: i64) {
 pub(crate) async fn clear_transfer_state(state: &AppState) {
     if let Some(manager) = state.transfer_manager.lock().await.as_ref() {
         *manager.visible.lock().await = false;
-        manager.discovery.unregister_mdns_service().await;
+        manager.stop_offers().await;
+        manager.stop_registry_sync().await;
         manager.trust_store.lock().await.lock();
         manager.active_transfers.lock().await.clear();
         manager.active_sessions.lock().await.clear();
         manager.active_connections.lock().await.clear();
         manager.transfer_roles.lock().await.clear();
         manager.pending_items.lock().await.clear();
-        manager.active_listener.lock().await.take();
     }
 }
 

@@ -93,7 +93,7 @@ pub enum TransferMessage {
 
     /// Synchronisation du trust store entre pairs (serverless P2P sync)
     TrustStoreSync {
-        /// JSON chiffré par la session (déjà dans SecureSession, double protection)
+        /// Registre JSON signé, échangé après authentification du canal.
         trust_data: String,
     },
 
@@ -107,6 +107,7 @@ pub enum TransferMessage {
     SyncPairRequest {
         device_name: String,
         verifying_key_b64: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         trust_data: String,
     },
 
@@ -115,7 +116,17 @@ pub enum TransferMessage {
         device_name: String,
         verifying_key_b64: String,
         accepted: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         trust_data: String,
+    },
+
+    /// The receiver authenticated and decoded the transfer offer.
+    OfferReady,
+
+    /// Proof of device identity bound to this TLS connection and its role.
+    RegistrySyncProof {
+        verifying_key_b64: String,
+        signature: String,
     },
 
     /// Erreur
@@ -318,6 +329,32 @@ mod tests {
             }
             _ => panic!("Expected KemCiphertext message"),
         }
+    }
+
+    #[test]
+    fn pairing_messages_preserve_the_legacy_wire_shape() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        enum LegacyPairing {
+            SyncPairRequest { device_name: String, verifying_key_b64: String },
+            SyncPairResponse { device_name: String, verifying_key_b64: String, accepted: bool },
+        }
+        let legacy_request = LegacyPairing::SyncPairRequest {
+            device_name: "old-device".into(),
+            verifying_key_b64: "key".into(),
+        };
+        let request: TransferMessage = rmp_serde::from_slice(&rmp_serde::to_vec(&legacy_request).unwrap()).unwrap();
+        assert!(matches!(&request, TransferMessage::SyncPairRequest { trust_data, .. } if trust_data.is_empty()));
+        assert_eq!(rmp_serde::from_slice::<LegacyPairing>(&rmp_serde::to_vec(&request).unwrap()).unwrap(), legacy_request);
+
+        let response = TransferMessage::SyncPairResponse {
+            device_name: "new-device".into(), verifying_key_b64: "key".into(),
+            accepted: true, trust_data: String::new(),
+        };
+        let serialized = rmp_serde::to_vec(&response).unwrap();
+        assert!(matches!(rmp_serde::from_slice::<LegacyPairing>(&serialized).unwrap(),
+            LegacyPairing::SyncPairResponse { accepted: true, .. }));
+        assert!(matches!(rmp_serde::from_slice::<TransferMessage>(&serialized).unwrap(),
+            TransferMessage::SyncPairResponse { trust_data, .. } if trust_data.is_empty()));
     }
 
     #[test]

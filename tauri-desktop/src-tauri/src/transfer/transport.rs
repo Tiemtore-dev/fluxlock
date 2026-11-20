@@ -18,7 +18,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::time::Duration;
 use std::sync::Arc;
 
 use super::ConnectionMethod;
@@ -30,6 +31,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin> AsyncReadWrite for T {}
 
 /// Connexion de transport unifiée (TLS)
 pub struct TransportConnection {
+    pub(crate) channel_binding: [u8; 32],
     pub stream: Box<dyn AsyncReadWrite>,
     pub method: ConnectionMethod,
     pub peer_addr: String,
@@ -79,8 +81,11 @@ impl TransportListener {
                 .map_err(|e| format!("Accept: {}", e))?;
 
             // TCP → TLS upgrade
-            match self.tls_acceptor.accept(tcp_stream).await {
-                Ok(tls_stream) => {
+            match tokio::time::timeout(CONNECT_TIMEOUT, self.tls_acceptor.accept(tcp_stream)).await {
+                Ok(Ok(tls_stream)) => {
+                    let channel_binding = tls_stream.get_ref().1.export_keying_material(
+                        [0; 32], SYNC_EXPORTER_LABEL, None,
+                    ).map_err(|error| format!("Identifiant de canal TLS : {error}"))?;
                     // Déterminer la méthode de connexion
                     let method = if peer_addr.ip().is_ipv6() {
                         if let std::net::IpAddr::V6(v6) = peer_addr.ip() {
@@ -98,14 +103,18 @@ impl TransportListener {
 
                     return Ok(TransportConnection {
                         stream: Box::new(tls_stream),
+                        channel_binding,
                         method,
                         peer_addr: peer_addr.to_string(),
                     });
                 }
-                Err(e) => {
+                failure => {
                     attempts += 1;
-                    eprintln!("[TRANSPORT] TLS handshake failed from {} (attempt {}/{}): {}",
-                        peer_addr, attempts, MAX_ACCEPT_ATTEMPTS, e);
+                    let error = match failure {
+                        Ok(Err(error)) => error.to_string(),
+                        _ => "délai dépassé".into(),
+                    };
+                    eprintln!("[TRANSPORT] Échec TLS depuis {peer_addr} ({attempts}/{MAX_ACCEPT_ATTEMPTS}) : {error}");
                     if attempts >= MAX_ACCEPT_ATTEMPTS {
                         return Err(format!(
                             "Trop de tentatives TLS échouées ({}/{}), abandon",
@@ -119,64 +128,60 @@ impl TransportListener {
     }
 }
 
-/// Établit une connexion TLS vers un pair découvert
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const SYNC_EXPORTER_LABEL: &[u8] = b"EXPORTER-FluXlock-Trust-Sync-v1";
+
+pub(crate) fn peer_socket_addr(address: &str, port: u16) -> Result<SocketAddr, String> {
+    let address = address.strip_prefix('[').and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(address);
+    if let Ok(ip) = address.parse::<Ipv4Addr>() {
+        return Ok(SocketAddrV4::new(ip, port).into());
+    }
+    let (ip, scope) = match address.rsplit_once('%') {
+        Some((ip, scope)) => (ip, scope.parse::<u32>()
+            .map_err(|_| format!("Interface IPv6 invalide : {address}"))?),
+        None => (address, 0),
+    };
+    let ip = ip.parse().map_err(|_| format!("Adresse de pair invalide : {address}"))?;
+    Ok(SocketAddrV6::new(ip, port, 0, scope).into())
+}
+
+/// Établit une connexion TLS vers un pair découvert.
 pub async fn connect_to_peer(peer: &DiscoveredPeer) -> Result<TransportConnection, String> {
-    let addr: SocketAddr = format!("{}:{}", peer.addr, peer.port)
-        .parse()
-        .map_err(|e| format!("Parse addr: {}", e))?;
+    let addr = peer_socket_addr(&peer.addr, peer.port)?;
+    let tcp_stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await
+        .map_err(|_| "Délai de connexion TCP dépassé".to_string())?
+        .map_err(|error| format!("Connexion TCP au pair : {error}"))?;
 
-    let tcp_stream = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        TcpStream::connect(addr),
-    ).await
-        .map_err(|_| "Timeout connexion au pair".to_string())?
-        .map_err(|e| format!("Connexion au pair: {}", e))?;
-
-    // TCP → TLS upgrade (cert verification disabled, auth via SPAKE2)
     let tls_connector = create_client_tls_connector()?;
     let server_name = rustls::pki_types::ServerName::try_from("fluxlock.local")
-        .map_err(|e| format!("ServerName: {}", e))?;
-    let tls_stream = tls_connector.connect(server_name.to_owned(), tcp_stream).await
-        .map_err(|e| format!("TLS connect: {}", e))?;
-
-    let method = match peer.method.as_str() {
-        "IPv6" => ConnectionMethod::DirectIPv6,
-        "mDNS" => ConnectionMethod::MdnsLocal,
-        _ => ConnectionMethod::Relay,
-    };
-
+        .map_err(|error| format!("Nom du pair TLS : {error}"))?;
+    let tls_stream = tokio::time::timeout(CONNECT_TIMEOUT, tls_connector.connect(server_name, tcp_stream)).await
+        .map_err(|_| "Délai de négociation TLS dépassé".to_string())?
+        .map_err(|error| format!("Connexion TLS au pair : {error}"))?;
+    let channel_binding = tls_stream.get_ref().1.export_keying_material(
+        [0; 32], SYNC_EXPORTER_LABEL, None,
+    ).map_err(|error| format!("Identifiant de canal TLS : {error}"))?;
+    let method = if addr.is_ipv6() { ConnectionMethod::DirectIPv6 } else { ConnectionMethod::MdnsLocal };
     Ok(TransportConnection {
         stream: Box::new(tls_stream),
+        channel_binding,
         method,
-        peer_addr: peer.addr.clone(),
+        peer_addr: addr.to_string(),
     })
 }
 
-/// Tente de se connecter au pair en essayant IPv6 direct → mDNS → relay
-pub async fn establish_connection(peers: &[DiscoveredPeer]) -> Result<TransportConnection, String> {
-    // Trier : IPv6 d'abord, puis mDNS
-    let mut sorted = peers.to_vec();
-    sorted.sort_by(|a, b| {
-        let priority = |p: &DiscoveredPeer| match p.method.as_str() {
-            "IPv6" => 0,
-            "mDNS" => 1,
-            _ => 2,
-        };
-        priority(a).cmp(&priority(b))
-    });
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut last_err = String::new();
-    for peer in &sorted {
-        match connect_to_peer(peer).await {
-            Ok(conn) => return Ok(conn),
-            Err(e) => {
-                last_err = e;
-                continue;
-            }
-        }
+    #[test]
+    fn parses_ipv4_bracketed_ipv6_and_scoped_ipv6() {
+        assert_eq!(peer_socket_addr("192.0.2.1", 17).unwrap().to_string(), "192.0.2.1:17");
+        assert_eq!(peer_socket_addr("[::1]", 17).unwrap().to_string(), "[::1]:17");
+        assert_eq!(peer_socket_addr("fe80::1%4", 17).unwrap().to_string(), "[fe80::1%4]:17");
+        assert!(peer_socket_addr("fe80::1%invalid", 17).is_err());
     }
-
-    Err(format!("Aucun pair joignable. Dernière erreur: {}", last_err))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

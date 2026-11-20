@@ -12,7 +12,12 @@ export function TransferDevices({ active, disabled }: { active: boolean; disable
   const [joinCode, setJoinCode] = useState('')
   const [offer, setOffer] = useState<SyncPairingOffer>()
   const [joinedName, setJoinedName] = useState('')
-  const sync = useQuery({ queryKey: ['sync-settings'], queryFn: transfer.getSyncSettings, enabled: active })
+  const sync = useQuery({
+    queryKey: ['sync-settings'],
+    queryFn: transfer.getSyncSettings,
+    enabled: active,
+    refetchInterval: (query) => query.state.data?.enabled ? 15000 : false,
+  })
   const canPair = !disabled && sync.isSuccess
 
   function refreshLists() {

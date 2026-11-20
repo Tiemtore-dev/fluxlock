@@ -173,9 +173,12 @@ async fn authenticate_for_csv_op(
             {
                 // ── Biometric authentication path ──
                 // This triggers the OS-level biometric prompt (Touch ID / Face ID / Windows Hello)
-                let (bio_uid, _bio_name, key_bytes) =
-                    crate::biometric::biometric_login(&super::biometric_cmds::biometric_dir(state).await?, &user.username)
-                        .map_err(|e| format!("Échec de l'authentification biométrique: {}", e))?;
+                let (bio_uid, _bio_name, key_bytes) = crate::biometric::biometric_login(
+                    &super::biometric_cmds::biometric_dir(state).await?,
+                    &user.username,
+                    user_id,
+                )
+                .map_err(|e| format!("Échec de l'authentification biométrique: {}", e))?;
 
                 // Verify biometric identity matches current session
                 if bio_uid != user_id {
@@ -185,7 +188,7 @@ async fn authenticate_for_csv_op(
                     );
                 }
 
-                let key = crate::secure_key::SecureKey::from_slice(&key_bytes);
+                let key = crate::secure_key::SecureKey::new(key_bytes);
                 Ok((user_id, key))
             }
         }

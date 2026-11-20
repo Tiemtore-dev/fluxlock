@@ -131,12 +131,16 @@ export default function LoginPage() {
     }
   }
 
-  const showBiometrics = hasAccount && (bioAvailable || enrolled)
-  const biometricHint = setupBiometrics
+  const unavailableReason = !android ? status?.unavailable_reason : undefined
+  const hasCompatibilitySetup = !android && status?.compatibility_available && !status.compatibility_enrolled
+  const showBiometrics = hasAccount && !unavailableReason && !hasCompatibilitySetup && (bioAvailable || enrolled)
+  const biometricHint = hasCompatibilitySetup
+    ? 'Ouvrez le coffre au mot de passe maître pour activer le mode compatibilité Touch ID dans Paramètres.'
+    : unavailableReason ?? (setupBiometrics
     ? 'Saisissez votre mot de passe maître, puis confirmez avec le capteur de votre appareil.'
-    : enrolled && status?.requires_password
-      ? status.password_reason || 'Saisissez votre mot de passe maître pour réactiver la biométrie.'
-      : enrolled && !bioAvailable ? 'Le capteur est indisponible. Utilisez votre mot de passe maître.' : undefined
+    : status?.password_reason ?? (enrolled && status?.requires_password
+      ? 'Saisissez votre mot de passe maître pour réactiver la biométrie.'
+      : enrolled && !bioAvailable ? 'Le capteur est indisponible. Utilisez votre mot de passe maître.' : undefined))
   const biometricLabel = enrolled ? 'Déverrouiller avec la biométrie' : 'Activer la biométrie'
 
   return (

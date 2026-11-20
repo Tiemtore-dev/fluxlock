@@ -2,17 +2,20 @@
 //!
 //! Stratégie (ordonnée par préférence) :
 //! 1. mDNS/DNS-SD : annonce le service `_fluxlock-transfer._tcp.local.`
-//! 2. IPv6 link-local : scan des interfaces pour trouver des pairs directs
+//! 2. Balises UDP sur le réseau local
 //!
 //! Le module expose un `DiscoveryService` qui gère à la fois l'annonce et la
 //! découverte, et retourne une liste de `DiscoveredPeer`.
 
 use serde::{Serialize, Deserialize};
-use std::net::{IpAddr, SocketAddr};
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::protocol::DEFAULT_TRANSFER_PORT;
+use super::protocol::MDNS_SERVICE_TYPE;
 
 /// Pair découvert sur le réseau
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,11 +35,30 @@ const BEACON_PORT: u16 = 52_821;
 /// Multicast group for LAN discovery (works on Android where broadcast is blocked)
 const MULTICAST_GROUP: &str = "239.255.77.77";
 
-/// Service de découverte réseau
+const BEACON_TTL: Duration = Duration::from_secs(10);
+const REGISTRY_MDNS_SERVICE: &str = "_fluxlock-sync._tcp.local.";
+
+struct MdnsPeer {
+    endpoints: Vec<DiscoveredPeer>,
+    fingerprint: Option<String>,
+}
+
+struct LanPeer {
+    peer: DiscoveredPeer,
+    fingerprint: String,
+    sync_port: u16,
+    seen: Instant,
+}
+
+/// Service de découverte réseau.
+#[derive(Clone)]
 pub struct DiscoveryService {
-    peers: Arc<Mutex<Vec<DiscoveredPeer>>>,
+    peers: Arc<Mutex<HashMap<String, MdnsPeer>>>,
+    lan_peers: Arc<Mutex<HashMap<String, LanPeer>>>,
+    offer_port: Arc<AtomicU16>,
+    sync_port: Arc<AtomicU16>,
     instance_name: String,
-    port: u16,
+    service_instance: String,
     mdns_daemon: Arc<Mutex<Option<mdns_sd::ServiceDaemon>>>,
     discovery_started: Arc<Mutex<bool>>,
     /// Drapeau de visibilité — le beacon ne diffuse que quand visible = true (E-01)
@@ -48,22 +70,20 @@ pub struct DiscoveryService {
 }
 
 impl DiscoveryService {
-    pub fn new(instance_name: &str, port: u16, visible: Arc<Mutex<bool>>) -> Self {
+    pub fn new(instance_name: &str, visible: Arc<Mutex<bool>>) -> Self {
         Self {
-            peers: Arc::new(Mutex::new(Vec::new())),
+            peers: Arc::new(Mutex::new(HashMap::new())),
+            lan_peers: Arc::new(Mutex::new(HashMap::new())),
+            offer_port: Arc::new(AtomicU16::new(0)),
+            sync_port: Arc::new(AtomicU16::new(0)),
             instance_name: instance_name.to_string(),
-            port,
+            service_instance: format!("FluXlock-{}", uuid::Uuid::new_v4().simple()),
             mdns_daemon: Arc::new(Mutex::new(None)),
             discovery_started: Arc::new(Mutex::new(false)),
             visible,
             trusted_fingerprints: Arc::new(Mutex::new(Vec::new())),
             device_fingerprint: Arc::new(Mutex::new(None)),
         }
-    }
-
-    /// Update the instance name (e.g. after login with actual username)
-    pub fn set_instance_name(&mut self, name: &str) {
-        self.instance_name = name.to_string();
     }
 
     /// V-08: Met à jour les empreintes de confiance et le fingerprint de cet appareil.
@@ -104,83 +124,41 @@ impl DiscoveryService {
         // "fluxlock-transfer" = 17 chars — extend limit so mDNS queries work.
         let _ = daemon.set_service_name_len_max(24);
 
-        let service_type = "_fluxlock-transfer._tcp.local.";
-        let receiver = match daemon.browse(service_type) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[DISCOVERY] mDNS browse failed (UDP beacon still active): {}", e);
-                let _ = daemon.shutdown();
-                return Ok(());
+        for service in [MDNS_SERVICE_TYPE, REGISTRY_MDNS_SERVICE] {
+            match daemon.browse(service) {
+                Ok(receiver) => self.collect_mdns_peers(receiver, service),
+                Err(error) => eprintln!("[DISCOVERY] Recherche mDNS {service} : {error}"),
             }
-        };
-
-        // Auto-register this device so peers can discover us — seulement si visible (E-01)
-        if *self.visible.lock().await {
-            self.register_mdns_with_daemon(&daemon, service_type);
         }
-
-        // Store daemon for later registration / shutdown
         *self.mdns_daemon.lock().await = Some(daemon);
+        Ok(())
+    }
 
+    fn collect_mdns_peers(&self, receiver: mdns_sd::Receiver<mdns_sd::ServiceEvent>, service: &'static str) {
         let peers = self.peers.clone();
-        let own_name = self.instance_name.clone();
-
+        let own_instance = format!("{}.{service}", self.service_instance);
+        let suffix = format!(".{service}");
         tokio::spawn(async move {
-            loop {
-                match receiver.recv_async().await {
-                    Ok(event) => {
-                        match event {
-                            mdns_sd::ServiceEvent::ServiceResolved(info) => {
-                                let fullname = info.get_fullname().to_string();
-                                // Skip our own registration
-                                if fullname.contains(&own_name) {
-                                    continue;
-                                }
-                                let port = info.get_port();
-                                // Extract clean peer name from mDNS instance name
-                                // fullname is like "username._fluxlock-transfer._tcp.local."
-                                let clean_name = fullname
-                                    .split("._fluxlock")
-                                    .next()
-                                    .unwrap_or(&fullname)
-                                    .to_string();
-                                // Pick only ONE address per peer (prefer IPv4 over IPv6)
-                                let addrs: Vec<_> = info.get_addresses().iter().cloned().collect();
-                                let best_addr = addrs.iter()
-                                    .find(|a| a.is_ipv4())
-                                    .or_else(|| addrs.first());
-                                if let Some(addr) = best_addr {
-                                    let peer = DiscoveredPeer {
-                                        name: clean_name.clone(),
-                                        addr: addr.to_string(),
-                                        port,
-                                        method: "mDNS".to_string(),
-                                        verified: false,
-                                    };
-                                    let mut guard = peers.lock().await;
-                                    // Deduplicate: one entry per clean_name
-                                    guard.retain(|p| p.name != clean_name);
-                                    guard.push(peer);
-                                }
-                            }
-                            mdns_sd::ServiceEvent::ServiceRemoved(_, fullname) => {
-                                let clean_name = fullname
-                                    .split("._fluxlock")
-                                    .next()
-                                    .unwrap_or(&fullname)
-                                    .to_string();
-                                let mut guard = peers.lock().await;
-                                guard.retain(|p| p.name != clean_name);
-                            }
-                            _ => {}
+            while let Ok(event) = receiver.recv_async().await {
+                match event {
+                    mdns_sd::ServiceEvent::ServiceResolved(info) => {
+                        let fullname = info.get_fullname().to_owned();
+                        if fullname == own_instance {
+                            continue;
                         }
+                        let name = info.get_property_val_str("name")
+                            .or_else(|| fullname.strip_suffix(&suffix)).unwrap_or(&fullname);
+                        let endpoints = mdns_endpoints(&info, name);
+                        let fingerprint = info.get_property_val_str("fingerprint").map(str::to_owned);
+                        peers.lock().await.insert(fullname, MdnsPeer { endpoints, fingerprint });
                     }
-                    Err(_) => break, // channel closed or daemon shutdown
+                    mdns_sd::ServiceEvent::ServiceRemoved(_, fullname) => {
+                        peers.lock().await.remove(&fullname);
+                    }
+                    _ => {}
                 }
             }
         });
-
-        Ok(())
     }
 
     /// UDP broadcast beacon — reliable P2P discovery on the LAN.
@@ -256,8 +234,9 @@ impl DiscoveryService {
             .map(|ip| ip.to_string())
             .collect();
         let own_name = self.instance_name.clone();
-        let transfer_port = self.port;
-        let peers = self.peers.clone();
+        let offer_port = self.offer_port.clone();
+        let sync_port = self.sync_port.clone();
+        let peers = self.lan_peers.clone();
         let broadcast_targets = get_broadcast_addresses(BEACON_PORT);
 
         // ── Announce task: send periodic UDP broadcasts (seulement si visible, E-01) ──
@@ -268,10 +247,12 @@ impl DiscoveryService {
         tokio::spawn(async move {
             let mut send_error_count: u32 = 0;
             loop {
-                if *visible_flag.lock().await {
+                let transfer_port = offer_port.load(Ordering::Relaxed);
+                if transfer_port != 0 || *visible_flag.lock().await {
                     // V-08: include device fingerprint in beacon for trust verification
                     let fp = device_fp.lock().await.clone().unwrap_or_default();
-                    let msg = format!("FLUXLOCK|{}|{}|{}", name_tx, transfer_port, fp);
+                    let sync_port = sync_port.load(Ordering::Relaxed);
+                    let msg = format!("FLUXLOCK|{name_tx}|{transfer_port}|{fp}|{sync_port}");
                     for target in &broadcast_targets {
                         if let Err(e) = socket_tx.send_to(msg.as_bytes(), target).await {
                             // Only log first few errors to avoid log spam
@@ -291,7 +272,6 @@ impl DiscoveryService {
 
         // ── Listen task: receive announcements from other devices ──
         let own_ips_rx = own_ips;
-        let own_name_rx = own_name;
         let trusted_fps = self.trusted_fingerprints.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 512];
@@ -304,7 +284,7 @@ impl DiscoveryService {
                             let parts: Vec<&str> = rest.splitn(3, '|').collect();
                             if parts.len() >= 2 {
                                 let name = parts[0].to_string();
-                                let port: u16 = parts[1].trim().parse().unwrap_or(DEFAULT_TRANSFER_PORT);
+                                let Ok(port) = parts[1].trim().parse::<u16>() else { continue };
                                 let peer_fp = if parts.len() >= 3 {
                                     parts[2].trim().to_string()
                                 } else {
@@ -320,11 +300,6 @@ impl DiscoveryService {
                                 if own_ips_rx.iter().any(|ip| ip == &clean_ip) {
                                     continue;
                                 }
-                                // Also skip by name in case IP check missed
-                                if name == own_name_rx {
-                                    continue;
-                                }
-
                                 // V-08: check if fingerprint matches a trusted peer
                                 let verified = if !peer_fp.is_empty() {
                                     trusted_fps.lock().await.iter().any(|fp| fp == &peer_fp)
@@ -334,14 +309,17 @@ impl DiscoveryService {
 
                                 let peer = DiscoveredPeer {
                                     name: name.clone(),
-                                    addr: clean_ip,
+                                    addr: clean_ip.clone(),
                                     port,
                                     method: "LAN".to_string(),
                                     verified,
                                 };
-                                let mut guard = peers.lock().await;
-                                guard.retain(|p| p.name != name);
-                                guard.push(peer);
+                                peers.lock().await.insert(clean_ip, LanPeer {
+                                    peer,
+                                    fingerprint: peer_fp,
+                                    sync_port: parts.get(3).and_then(|port| port.parse().ok()).unwrap_or(0),
+                                    seen: Instant::now(),
+                                });
                             }
                         }
                     }
@@ -354,125 +332,112 @@ impl DiscoveryService {
         });
     }
 
-    /// Enregistre ce noeud comme service mDNS (pour être découvert par d'autres)
-    pub async fn register_mdns_service(&self) -> Result<(), String> {
-        self.register_mdns_service_on_port(self.port).await
+    pub async fn advertise_offer(&self, port: u16) -> Result<(), String> {
+        self.offer_port.store(port, Ordering::Relaxed);
+        self.publish_mdns_service(MDNS_SERVICE_TYPE, &self.service_instance, port, &[]).await
     }
 
-    /// Enregistre ce noeud comme service mDNS sur un port spécifique
-    /// (utilisé quand le listener a dû choisir un port différent du défaut)
-    pub async fn register_mdns_service_on_port(&self, port: u16) -> Result<(), String> {
-        // Ensure discovery daemon exists
-        let daemon_guard = self.mdns_daemon.lock().await;
-        let daemon = daemon_guard.as_ref()
-            .ok_or_else(|| "mDNS daemon not started — call start_mdns_discovery first".to_string())?;
-
-        let service_type = "_fluxlock-transfer._tcp.local.";
-        let host = format!("{}.local.", self.instance_name);
-
-        // Provide real local IPv4 addresses so other peers can reach us
-        let ip_str = get_local_ipv4_addresses()
-            .iter()
-            .map(|ip| ip.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let service_info = mdns_sd::ServiceInfo::new(
-            service_type,
-            &self.instance_name,
-            &host,
-            &ip_str,
-            port,
-            None,
-        ).map_err(|e| format!("ServiceInfo: {}", e))?;
-
-        daemon.register(service_info)
-            .map_err(|e| format!("mDNS register: {}", e))?;
-
-        Ok(())
+    pub async fn clear_offer(&self) {
+        self.offer_port.store(0, Ordering::Relaxed);
+        self.remove_mdns_service(MDNS_SERVICE_TYPE, &self.service_instance).await;
     }
 
-    /// Unregister mDNS service (when transfer is done or app quits)
-    pub async fn unregister_mdns_service(&self) {
+    async fn publish_mdns_service(
+        &self, service: &str, instance: &str, port: u16, extra: &[(&str, &str)],
+    ) -> Result<(), String> {
+        let guard = self.mdns_daemon.lock().await;
+        let daemon = guard.as_ref().ok_or("Découverte mDNS indisponible")?;
+        let mut addresses: HashSet<IpAddr> = get_local_ipv4_addresses().into_iter().map(IpAddr::V4).collect();
+        addresses.extend(if_addrs::get_if_addrs().unwrap_or_default().into_iter()
+            .filter(|interface| !interface.is_loopback()).map(|interface| interface.addr.ip()));
+        let mut properties = vec![("name", self.instance_name.as_str())];
+        properties.extend_from_slice(extra);
+        let info = mdns_sd::ServiceInfo::new(
+            service, instance, &format!("{}.local.", self.service_instance),
+            addresses.into_iter().collect::<Vec<_>>().as_slice(), port, properties.as_slice(),
+        ).map_err(|error| format!("Service mDNS : {error}"))?;
+        daemon.register(info).map_err(|error| format!("Annonce mDNS : {error}"))
+    }
+
+    async fn remove_mdns_service(&self, service: &str, instance: &str) {
         if let Some(daemon) = self.mdns_daemon.lock().await.as_ref() {
-            let service_type = "_fluxlock-transfer._tcp.local.";
-            let fullname = format!("{}.{}", self.instance_name, service_type);
-            let _ = daemon.unregister(&fullname);
-        }
-    }
-
-    /// Scan IPv6 link-local des interfaces réseau
-    pub async fn scan_ipv6_link_local(&self) -> Result<Vec<DiscoveredPeer>, String> {
-        let mut found = Vec::new();
-
-        let addrs = get_ipv6_link_local_addresses();
-
-        for (addr, scope_id) in &addrs {
-            // Format the scoped address for connecting (required for link-local)
-            let scoped_addr = format!("{}%{}", addr, scope_id);
-            let sock_str = format!("[{}%{}]:{}", addr, scope_id, DEFAULT_TRANSFER_PORT);
-            let socket_addr: SocketAddr = match sock_str.parse() {
-                Ok(sa) => sa,
-                Err(_) => {
-                    // Fallback: build SocketAddrV6 manually
-                    SocketAddr::V6(std::net::SocketAddrV6::new(*addr, DEFAULT_TRANSFER_PORT, 0, *scope_id))
-                }
-            };
-
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(300),
-                tokio::net::TcpStream::connect(socket_addr),
-            ).await {
-                Ok(Ok(_stream)) => {
-                    found.push(DiscoveredPeer {
-                        name: format!("FluXlock@{}", scoped_addr),
-                        addr: addr.to_string(),
-                        port: DEFAULT_TRANSFER_PORT,
-                        method: "IPv6".to_string(),
-                        verified: false,
-                    });
-                }
-                _ => {}
+            if let Ok(status) = daemon.unregister(&format!("{instance}.{service}")) {
+                let _ = tokio::time::timeout(Duration::from_secs(1), status.recv_async()).await;
             }
         }
-
-        Ok(found)
     }
 
-    /// Retourne les pairs découverts (mDNS + cached)
     pub async fn get_discovered_peers(&self) -> Vec<DiscoveredPeer> {
-        self.peers.lock().await.clone()
+        let mdns = self.peers.lock().await;
+        let mut lan = self.lan_peers.lock().await;
+        lan.retain(|_, entry| entry.seen.elapsed() < BEACON_TTL);
+        let mut peers: Vec<_> = mdns.iter()
+            .filter(|(name, _)| name.ends_with(MDNS_SERVICE_TYPE))
+            .flat_map(|(_, peer)| peer.endpoints.iter().cloned()).collect();
+        peers.extend(lan.values().map(|entry| entry.peer.clone()));
+        unique_endpoints(&mut peers);
+        peers
     }
 
-    /// Register this device with the given mDNS daemon (using real local IPs).
-    fn register_mdns_with_daemon(&self, daemon: &mdns_sd::ServiceDaemon, service_type: &str) {
-        let host = format!("{}.local.", self.instance_name);
-        let local_ips: Vec<std::net::Ipv4Addr> = get_local_ipv4_addresses()
-            .iter()
-            .copied()
-            .collect();
-        let ip_str = local_ips
-            .iter()
-            .map(|ip| ip.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        match mdns_sd::ServiceInfo::new(
-            service_type,
-            &self.instance_name,
-            &host,
-            &ip_str,
-            self.port,
-            None,
-        ) {
-            Ok(info) => {
-                if let Err(e) = daemon.register(info) {
-                    eprintln!("[DISCOVERY] mDNS register failed: {}", e);
-                }
-            }
-            Err(e) => eprintln!("[DISCOVERY] ServiceInfo error: {}", e),
+    pub(crate) async fn advertise_registry_sync(&self, port: u16) {
+        if self.sync_port.swap(port, Ordering::Relaxed) == port {
+            return;
+        }
+        if port == 0 {
+            self.remove_mdns_service(REGISTRY_MDNS_SERVICE, &self.service_instance).await;
+        } else if let Some(fingerprint) = self.device_fingerprint.lock().await.clone() {
+            let _ = self.publish_mdns_service(REGISTRY_MDNS_SERVICE, &self.service_instance,
+                port, &[("fingerprint", &fingerprint)]).await;
         }
     }
+
+    pub(crate) async fn get_registry_sync_peers(
+        &self, fingerprints: &HashSet<String>,
+    ) -> Vec<DiscoveredPeer> {
+        let mdns = self.peers.lock().await;
+        let mut lan = self.lan_peers.lock().await;
+        lan.retain(|_, entry| entry.seen.elapsed() < BEACON_TTL);
+        let mut peers: Vec<_> = mdns.iter()
+            .filter(|(name, peer)| name.ends_with(REGISTRY_MDNS_SERVICE)
+                && peer.fingerprint.as_ref().is_some_and(|fingerprint| fingerprints.contains(fingerprint)))
+            .flat_map(|(_, peer)| peer.endpoints.iter().cloned()).collect();
+        peers.extend(lan.values().filter(|entry| entry.sync_port != 0 && fingerprints.contains(&entry.fingerprint))
+            .map(|entry| DiscoveredPeer { port: entry.sync_port, ..entry.peer.clone() }));
+        unique_endpoints(&mut peers);
+        peers
+    }
+}
+
+fn unique_endpoints(peers: &mut Vec<DiscoveredPeer>) {
+    let mut endpoints = HashSet::new();
+    peers.retain(|peer| endpoints.insert((peer.addr.clone(), peer.port)));
+}
+
+fn mdns_endpoints(info: &mdns_sd::ServiceInfo, name: &str) -> Vec<DiscoveredPeer> {
+    let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+    let local_addresses: HashSet<_> = interfaces.iter().map(|interface| interface.addr.ip()).collect();
+    let scopes: HashSet<_> = interfaces.iter().filter_map(|interface| match interface.addr.ip() {
+        IpAddr::V6(ip) if ip.is_unicast_link_local() => interface.index.filter(|index| *index != 0),
+        _ => None,
+    }).collect();
+    let build = |addr: String| DiscoveredPeer {
+        name: name.to_owned(), addr, port: info.get_port(), method: "mDNS".into(), verified: false,
+    };
+    let mut peers = Vec::new();
+    for ip in info.get_addresses() {
+        if ip.is_loopback() || local_addresses.contains(ip) {
+            continue;
+        }
+        match ip {
+            // DNS-SD returns no scope. Try the local interfaces that carry a link-local address.
+            IpAddr::V6(ip) if ip.is_unicast_link_local() => {
+                peers.extend(scopes.iter().map(|scope| build(format!("{ip}%{scope}"))));
+            }
+            _ => peers.push(build(ip.to_string())),
+        }
+    }
+    peers.sort_by_key(|peer| peer.addr.contains(':'));
+    peers
 }
 
 /// Create a UDP socket with SO_REUSEADDR (+ SO_REUSEPORT on Unix) so multiple
@@ -548,68 +513,6 @@ fn get_broadcast_addresses(port: u16) -> Vec<String> {
 
     eprintln!("[DISCOVERY] Beacon targets: {:?}", addrs);
     addrs
-}
-
-/// Récupère les adresses IPv6 link-local du système avec le scope_id
-fn get_ipv6_link_local_addresses() -> Vec<(std::net::Ipv6Addr, u32)> {
-    let mut addrs = Vec::new();
-
-    // Use if-addrs crate for reliable interface enumeration
-    if let Ok(ifaces) = if_addrs::get_if_addrs() {
-        for iface in ifaces {
-            if iface.is_loopback() {
-                continue;
-            }
-            if let IpAddr::V6(v6) = iface.addr.ip() {
-                // link-local: fe80::/10
-                if v6.segments()[0] & 0xffc0 == 0xfe80 {
-                    // Extract scope_id from the interface index
-                    // On macOS/Linux, the scope_id corresponds to the interface index
-                    let scope_id = get_interface_index(&iface.name).unwrap_or(0);
-                    if !addrs.iter().any(|(a, _)| a == &v6) {
-                        addrs.push((v6, scope_id));
-                    }
-                }
-            }
-        }
-    }
-
-    addrs
-}
-
-/// Get the OS interface index by name (needed for IPv6 scope_id)
-fn get_interface_index(name: &str) -> Option<u32> {
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
-    {
-        use std::ffi::CString;
-        if let Ok(cname) = CString::new(name) {
-            let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
-            if idx > 0 {
-                return Some(idx);
-            }
-        }
-        None
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // On Windows, use the if_addrs interface index from the adapter name
-        // The Windows API `if_nametoindex` is available via iphlpapi.dll
-        // We approximate by matching the interface name in if_addrs
-        if let Ok(ifaces) = if_addrs::get_if_addrs() {
-            for (idx, iface) in ifaces.iter().enumerate() {
-                if iface.name == name {
-                    return Some((idx + 1) as u32);
-                }
-            }
-        }
-        let _ = name;
-        None
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", target_os = "windows")))]
-    {
-        let _ = name;
-        None
-    }
 }
 
 /// Récupère les adresses IPv4 locales (non-loopback) du système.
@@ -691,35 +594,23 @@ pub fn get_public_ipv6_address() -> Option<std::net::Ipv6Addr> {
 pub const RECEIVER_MDNS_SERVICE: &str = "_fluxlock-recv._tcp.local.";
 
 impl DiscoveryService {
-    /// Register this node as a receiver reverse listener (for when sender can't accept incoming).
+    /// Advertise a temporary listener for the reverse connection.
     pub async fn register_receiver_mdns(&self, port: u16) -> Result<(), String> {
-        let daemon_guard = self.mdns_daemon.lock().await;
-        let daemon = daemon_guard.as_ref()
-            .ok_or_else(|| "mDNS daemon not started — call start_mdns_discovery first".to_string())?;
+        self.publish_mdns_service(RECEIVER_MDNS_SERVICE,
+            &format!("{}-{port}", self.service_instance), port, &[]).await
+    }
 
-        let local_ips: Vec<std::net::Ipv4Addr> = get_local_ipv4_addresses()
-            .iter()
-            .copied()
-            .collect();
-        let ip_str = local_ips
-            .iter()
-            .map(|ip| ip.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+    pub async fn unregister_receiver_mdns(&self, port: u16) {
+        self.remove_mdns_service(RECEIVER_MDNS_SERVICE,
+            &format!("{}-{port}", self.service_instance)).await;
+    }
+}
 
-        let service_info = mdns_sd::ServiceInfo::new(
-            RECEIVER_MDNS_SERVICE,
-            &self.instance_name,
-            &format!("{}.local.", self.instance_name),
-            &ip_str,
-            port,
-            None,
-        ).map_err(|e| format!("ServiceInfo receiver: {}", e))?;
+struct TemporaryDaemon(mdns_sd::ServiceDaemon);
 
-        daemon.register(service_info)
-            .map_err(|e| format!("mDNS register receiver: {}", e))?;
-
-        Ok(())
+impl Drop for TemporaryDaemon {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown();
     }
 }
 
@@ -727,45 +618,34 @@ impl DiscoveryService {
 /// Creates its own daemon so it can be used from a spawned task.
 /// Returns the first resolved receiver peer within the timeout.
 pub async fn discover_receiver_peer(timeout_secs: u64) -> Result<DiscoveredPeer, String> {
-    let daemon = mdns_sd::ServiceDaemon::new()
-        .map_err(|e| format!("mDNS daemon: {}", e))?;
+    let daemon = TemporaryDaemon(mdns_sd::ServiceDaemon::new()
+        .map_err(|e| format!("mDNS daemon: {}", e))?);
 
     // Extend service name length limit for consistency across all daemons
-    let _ = daemon.set_service_name_len_max(24);
+    let _ = daemon.0.set_service_name_len_max(24);
 
-    let browse_chan = daemon.browse(RECEIVER_MDNS_SERVICE)
+    let browse_chan = daemon.0.browse(RECEIVER_MDNS_SERVICE)
         .map_err(|e| format!("mDNS browse receivers: {}", e))?;
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
     loop {
-        let remaining = deadline - tokio::time::Instant::now();
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            let _ = daemon.shutdown();
             return Err("Timeout : aucun receiver trouvé via mDNS".to_string());
         }
 
         match tokio::time::timeout(remaining, browse_chan.recv_async()).await {
             Ok(Ok(mdns_sd::ServiceEvent::ServiceResolved(info))) => {
-                let port = info.get_port();
-                if let Some(addr) = info.get_addresses().iter().next() {
-                    let _ = daemon.shutdown();
-                    return Ok(DiscoveredPeer {
-                        name: info.get_fullname().to_string(),
-                        addr: addr.to_string(),
-                        port,
-                        method: "mDNS-reverse".to_string(),
-                        verified: false,
-                    });
+                if let Some(peer) = mdns_endpoints(&info, info.get_fullname()).into_iter().next() {
+                    return Ok(peer);
                 }
             }
             Ok(Ok(_)) => continue, // Other mDNS events, keep waiting
             Ok(Err(_)) => {
-                let _ = daemon.shutdown();
                 return Err("mDNS channel closed".to_string());
             }
             Err(_) => {
-                let _ = daemon.shutdown();
                 return Err("Timeout : aucun receiver trouvé via mDNS".to_string());
             }
         }

@@ -34,8 +34,10 @@ jobs:
         include:
           - platform: "macos-latest"
             args: "--target aarch64-apple-darwin"
+            target: aarch64-apple-darwin
           - platform: "macos-latest"
             args: "--target x86_64-apple-darwin"
+            target: x86_64-apple-darwin
           - platform: "ubuntu-22.04"
             args: ""
           - platform: "windows-latest"
@@ -122,12 +124,29 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a") as f:
               f.write(f"\nTAURI_SIGNING_PRIVATE_KEY={final_key}\n")
 
-      - name: Build Tauri app (draft release dans repo privé)
+      - name: Préparer les autorisations Touch ID macOS
+        if: matrix.platform == 'macos-latest'
+        id: macos-signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          python3 scripts/macos-signing.py prepare "$RUNNER_TEMP/fluxlock-macos"
+          echo "args=--config $RUNNER_TEMP/fluxlock-macos/config.json" >> "$GITHUB_OUTPUT"
+
+      - name: Build Tauri app (release interne)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
         with:
           projectPath: "./tauri-desktop"
           tagName: ${{ github.ref_name }}
@@ -135,7 +154,12 @@ jobs:
           releaseBody: "Release interne — assets copiés vers fluxlock-releases."
           releaseDraft: false
           prerelease: false
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ steps.macos-signing.outputs.args }}
+
+      - name: Vérifier le paquet macOS signé
+        if: matrix.platform == 'macos-latest'
+        run: |
+          python3 scripts/macos-signing.py verify "tauri-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/FluXlock.app"
 
   # ──────────────────────────────────────────────────────────
   # ÉTAPE 1b — APK Android (signé, utilisé par la mise à jour in-app)

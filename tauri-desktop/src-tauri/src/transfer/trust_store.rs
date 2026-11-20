@@ -18,7 +18,7 @@
 //! les pairs vérifient la signature avant de fusionner.
 
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::io::Write;
 use zeroize::Zeroize;
@@ -68,6 +68,8 @@ pub struct SyncDevice {
 #[derive(Debug, Serialize, Deserialize)]
 struct TrustStoreData {
     peers: HashMap<String, TrustedPeer>,
+    #[serde(default)]
+    revoked_peers: HashSet<String>,
     /// Clé de signature ML-DSA-65 de cet appareil (PKCS#8 DER, base64)
     #[serde(default)]
     device_signing_key: Option<String>,
@@ -93,6 +95,7 @@ struct SyncExportData {
 /// Store de confiance chiffré ChaCha20-Poly1305
 pub struct TrustStore {
     peers: HashMap<String, TrustedPeer>,
+    revoked_peers: HashSet<String>,
     store_path: PathBuf,
     /// Sous-clé HKDF dédiée au chiffrement du trust store (None = pas encore déverrouillé)
     ts_key: Option<SecureKey>,
@@ -114,6 +117,7 @@ impl TrustStore {
         // Il sera migré automatiquement au premier `unlock()`
         Ok(Self {
             peers: HashMap::new(),
+            revoked_peers: HashSet::new(),
             store_path,
             ts_key: None,
             device_keypair: None,
@@ -139,6 +143,7 @@ impl TrustStore {
         self.device_keypair = None;
         self.sync_enabled = false;
         self.peers.clear();
+        self.revoked_peers.clear();
         self.sync_devices.clear();
     }
 
@@ -162,6 +167,7 @@ impl TrustStore {
                 .map_err(|e| format!("Lecture legacy trust store: {}", e))?;
             if let Ok(legacy) = serde_json::from_str::<TrustStoreData>(&data) {
                 self.peers = legacy.peers;
+                self.revoked_peers = legacy.revoked_peers;
                 // Sauvegarder en format chiffré
                 self.save()?;
                 // Supprimer l'ancien fichier non chiffré
@@ -182,6 +188,7 @@ impl TrustStore {
                     let data: TrustStoreData = serde_json::from_str(&json)
                         .map_err(|e| format!("Parse trust store: {}", e))?;
                     self.peers = data.peers;
+                    self.revoked_peers = data.revoked_peers;
                     self.sync_enabled = data.sync_enabled;
                     self.sync_devices = data.sync_devices;
 
@@ -248,6 +255,7 @@ impl TrustStore {
 
         let data = TrustStoreData {
             peers: self.peers.clone(),
+            revoked_peers: self.revoked_peers.clone(),
             device_signing_key,
             device_verifying_key,
             sync_enabled: self.sync_enabled,
@@ -281,7 +289,8 @@ impl TrustStore {
     /// Ajoute un pair de confiance
     pub fn trust_peer(&mut self, name: &str, fingerprint: &str) -> Result<(), String> {
         let now = chrono::Utc::now().to_rfc3339();
-        self.peers.insert(fingerprint.to_string(), TrustedPeer {
+        let was_revoked = self.revoked_peers.remove(fingerprint);
+        let previous = self.peers.insert(fingerprint.to_string(), TrustedPeer {
             name: name.to_string(),
             fingerprint: fingerprint.to_string(),
             trusted_since: now.clone(),
@@ -290,7 +299,17 @@ impl TrustStore {
             signature: None,
             signer_vk: None,
         });
-        self.save()
+        if let Err(error) = self.save() {
+            self.peers.remove(fingerprint);
+            if let Some(previous) = previous {
+                self.peers.insert(fingerprint.into(), previous);
+            }
+            if was_revoked {
+                self.revoked_peers.insert(fingerprint.into());
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Met à jour la date du dernier contact et le compteur
@@ -305,11 +324,14 @@ impl TrustStore {
 
     /// Supprime un pair de confiance
     pub fn revoke_trust(&mut self, fingerprint: &str) -> Result<bool, String> {
-        let removed = self.peers.remove(fingerprint).is_some();
-        if removed {
-            self.save()?;
+        let Some(peer) = self.peers.remove(fingerprint) else { return Ok(false); };
+        self.revoked_peers.insert(fingerprint.into());
+        if let Err(error) = self.save() {
+            self.revoked_peers.remove(fingerprint);
+            self.peers.insert(fingerprint.into(), peer);
+            return Err(error);
         }
-        Ok(removed)
+        Ok(true)
     }
 
     /// Liste tous les pairs de confiance
@@ -348,16 +370,26 @@ impl TrustStore {
     /// Vérifie les signatures ML-DSA-65 avant la fusion.
     /// Stratégie de fusion : garder le pair avec le `transfer_count` le plus élevé
     pub fn merge_from_sync(&mut self, json: &str) -> Result<u32, String> {
+        self.merge_sync_data(json, None)
+    }
+
+    pub(crate) fn merge_authenticated_sync(&mut self, json: &str, key: &str) -> Result<u32, String> {
+        self.merge_sync_data(json, Some(key))
+    }
+
+    fn merge_sync_data(&mut self, json: &str, expected_key: Option<&str>) -> Result<u32, String> {
         if !self.is_unlocked() || !self.sync_enabled {
             return Err("La synchronisation du registre doit être activée".into());
         }
         let data: SyncExportData = serde_json::from_str(json).map_err(|e| e.to_string())?;
         let signer = data.signer_verifying_key;
-        if !self.sync_devices.iter().any(|d| d.verifying_key == signer) {
+        if expected_key.is_some_and(|expected| expected != signer)
+            || !self.sync_devices.iter().any(|d| d.verifying_key == signer)
+        {
             return Err("Appareil non autorisé pour la synchronisation".into());
         }
 
-        let vk_der = B64.decode(&signer).map_err(|e| e.to_string())?;
+        let vk_der = decode_sync_key(&signer)?;
         let remote_peers = data.peers;
         for (index, peer) in &remote_peers {
             if index != &peer.fingerprint || peer.signer_vk.as_deref() != Some(signer.as_str()) {
@@ -376,6 +408,9 @@ impl TrustStore {
         let devices_before = self.sync_devices.clone();
         let mut merged_count = 0u32;
         for (fingerprint, remote_peer) in remote_peers {
+            if self.revoked_peers.contains(&fingerprint) {
+                continue;
+            }
             match self.peers.get(&fingerprint) {
                 Some(local_peer) if local_peer.transfer_count >= remote_peer.transfer_count => {
                     // Local est plus récent ou égal, on garde le local
@@ -399,14 +434,24 @@ impl TrustStore {
         Ok(merged_count)
     }
 
+    pub(crate) fn pair_device(&mut self, name: &str, key: &str) -> Result<(), String> {
+        self.pair_device_with(name, key, |store| store.save())
+    }
+
     pub(crate) fn pair_and_merge(&mut self, name: &str, key: &str, trust_data: &str) -> Result<u32, String> {
+        self.pair_device_with(name, key, |store| store.merge_authenticated_sync(trust_data, key))
+    }
+
+    fn pair_device_with<T>(
+        &mut self, name: &str, key: &str, save: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
         if !self.is_unlocked() {
             return Err("Registre de confiance verrouillé".into());
         }
-        let data: SyncExportData = serde_json::from_str(trust_data).map_err(|e| e.to_string())?;
-        if data.signer_verifying_key != key || key.len() > 4096 || name.len() > 256 {
+        if name.is_empty() || name.len() > 256 || key == self.device_verifying_key_b64()? {
             return Err("Identité de l’appareil incohérente".into());
         }
+        decode_sync_key(key)?;
         let previous_devices = self.sync_devices.clone();
         let previous_status = self.sync_enabled;
         if !self.sync_devices.iter().any(|device| device.verifying_key == key) {
@@ -418,12 +463,49 @@ impl TrustStore {
             });
         }
         self.sync_enabled = true;
-        let result = self.merge_from_sync(trust_data);
+        let result = save(self);
         if result.is_err() {
             self.sync_devices = previous_devices;
             self.sync_enabled = previous_status;
         }
         result
+    }
+
+    pub(crate) fn registry_sync_fingerprints(&self) -> HashSet<String> {
+        if !self.is_unlocked() || !self.is_sync_enabled() {
+            return Default::default();
+        }
+        self.sync_devices.iter().filter_map(|device| B64.decode(&device.verifying_key).ok())
+            .map(|der| Self::compute_fingerprint(&der)).collect()
+    }
+
+    pub(crate) fn local_sync_fingerprint(&self) -> Result<String, String> {
+        let key = self.device_verifying_key_b64()?;
+        Ok(Self::compute_fingerprint(&decode_sync_key(&key)?))
+    }
+
+    pub(crate) fn sign_registry_sync(&self, message: &[u8]) -> Result<String, String> {
+        if !self.is_unlocked() || !self.is_sync_enabled() || self.sync_devices.is_empty() {
+            return Err("Synchronisation du registre indisponible".into());
+        }
+        let key = self.device_keypair.as_ref().ok_or("Clé ML-DSA indisponible")?;
+        key.sign(message).map(|signature| B64.encode(signature)).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn verify_registry_sync(
+        &self, key: &str, message: &[u8], signature: &str,
+    ) -> Result<(), String> {
+        if !self.is_unlocked() || !self.is_sync_enabled()
+            || !self.sync_devices.iter().any(|device| device.verifying_key == key)
+        {
+            return Err("Appareil non autorisé pour la synchronisation".into());
+        }
+        let der = decode_sync_key(key)?;
+        let signature = B64.decode(signature).map_err(|error| error.to_string())?;
+        if !secure_vault_crypto::verify_ml_dsa(&der, message, &signature).map_err(|error| error.to_string())? {
+            return Err("Authentification du canal de synchronisation refusée".into());
+        }
+        Ok(())
     }
 
     /// Retourne la clé de vérification ML-DSA-65 de cet appareil (base64 SPKI DER)
@@ -486,6 +568,16 @@ impl TrustStore {
             .collect::<Vec<_>>()
             .join(":")
     }
+}
+
+fn decode_sync_key(key: &str) -> Result<Vec<u8>, String> {
+    if key.len() > 4096 {
+        return Err("Clé d’appairage invalide".into());
+    }
+    let der = B64.decode(key).map_err(|error| error.to_string())?;
+    secure_vault_crypto::signatures::ml_dsa::validate_verifying_key(&der)
+        .map_err(|error| error.to_string())?;
+    Ok(der)
 }
 
 fn signed_peer_bytes(peer: &TrustedPeer) -> Result<Vec<u8>, String> {

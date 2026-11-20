@@ -157,6 +157,9 @@ export interface BiometricStatus {
   enrolled_username?: string
   requires_password: boolean
   password_reason?: string
+  unavailable_reason?: string
+  compatibility_available?: boolean
+  compatibility_enrolled?: boolean
   failed_attempts: number
 }
 
@@ -174,7 +177,8 @@ export const biometric = {
       } as BiometricStatus
     }),
 
-  enable: (password: string) => invoke<string>('enable_biometric', { password }),
+  enable: (password: string, compatibility?: boolean) =>
+    invoke<string>('enable_biometric', { password, compatibility }),
 
   disable: () => invoke<string>('disable_biometric'),
 

@@ -139,7 +139,13 @@ pub async fn toggle_isolation_mode(state: State<'_, AppState>, enabled: bool) ->
     if enabled {
         if let Some(manager) = state.transfer_manager.lock().await.as_ref() {
             *manager.visible.lock().await = false;
-            manager.discovery.unregister_mdns_service().await;
+            manager.stop_offers().await;
+            manager.stop_registry_sync().await;
+            manager.active_transfers.lock().await.clear();
+            manager.active_sessions.lock().await.clear();
+            manager.active_connections.lock().await.clear();
+            manager.transfer_roles.lock().await.clear();
+            manager.pending_items.lock().await.clear();
         }
     }
     let status = if enabled {

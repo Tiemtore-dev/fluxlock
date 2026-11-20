@@ -17,14 +17,15 @@
 
 use serde::{Serialize, Deserialize};
 use tokio::sync::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use std::sync::Arc;
 use zeroize::Zeroize;
 
 use super::discovery::{DiscoveryService, DiscoveredPeer};
 use super::handshake;
 use super::trust_store::TrustStore;
-use super::transport::{TransportListener, TransportConnection, connect_to_peer, establish_connection};
+use super::transport::{TransportListener, TransportConnection, connect_to_peer};
 use super::protocol::{self, TransferMessage, TransferItem, TransferItemType, DEFAULT_TRANSFER_PORT, CHUNK_DATA_SIZE};
 use super::session::SecureSession;
 use super::{ConnectionMethod, TransferState, TransferInfo, WORMHOLE_TTL_SECS};
@@ -82,8 +83,9 @@ pub struct TransferManager {
     pub discovery: DiscoveryService,
     pub trust_store: Arc<Mutex<TrustStore>>,
     pub active_transfers: Arc<Mutex<HashMap<String, TransferInfo>>>,
-    /// Active TCP/TLS listener for the sender side (if any)
-    pub active_listener: Mutex<Option<Arc<TransportListener>>>,
+    /// Only one local offer can own the advertised endpoint.
+    active_offer: Arc<Mutex<Option<(String, tokio::task::JoinHandle<()>)>>>,
+    registry_sync_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Active transport connections keyed by transfer_id
     pub active_connections: Arc<Mutex<HashMap<String, TransportConnection>>>,
     /// Active secure sessions keyed by transfer_id (post-handshake)
@@ -101,13 +103,14 @@ impl TransferManager {
     pub fn new(app_data_dir: &std::path::Path, peer_name: &str) -> Result<Self, String> {
         let trust_store = TrustStore::load(app_data_dir)?;
         let visible = Arc::new(Mutex::new(false));
-        let discovery = DiscoveryService::new(peer_name, DEFAULT_TRANSFER_PORT, visible.clone());
+        let discovery = DiscoveryService::new(peer_name, visible.clone());
 
         Ok(Self {
             discovery,
             trust_store: Arc::new(Mutex::new(trust_store)),
             active_transfers: Arc::new(Mutex::new(HashMap::new())),
-            active_listener: Mutex::new(None),
+            active_offer: Arc::new(Mutex::new(None)),
+            registry_sync_task: Mutex::new(None),
             active_connections: Arc::new(Mutex::new(HashMap::new())),
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
             transfer_roles: Arc::new(Mutex::new(HashMap::new())),
@@ -117,11 +120,309 @@ impl TransferManager {
         })
     }
 
-    /// Update the peer name (called after login with the actual username)
-    pub fn set_peer_name(&mut self, name: &str) {
-        self.peer_name = name.to_string();
-        self.discovery.set_instance_name(name);
+    async fn start_registry_sync(&self, state: &crate::AppState) -> Result<(), String> {
+        let mut task = self.registry_sync_task.lock().await;
+        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return Ok(());
+        }
+        let token = state.session_token.lock().await.clone().ok_or("Session inactive")?;
+        let fingerprint = self.trust_store.lock().await.local_sync_fingerprint()?;
+        self.discovery.set_trust_info(Some(fingerprint), Vec::new()).await;
+        let listener = TransportListener::bind(0).await?;
+        let worker = super::registry_sync::RegistrySync {
+            trust_store: self.trust_store.clone(),
+            session_token: state.session_token.clone(),
+            isolation: state.isolation_mode.clone(),
+            token,
+        };
+        *task = Some(tokio::spawn(worker.run(listener, self.discovery.clone())));
+        Ok(())
     }
+
+    pub(crate) async fn stop_registry_sync(&self) {
+        if let Some(task) = self.registry_sync_task.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.discovery.advertise_registry_sync(0).await;
+    }
+
+    pub(crate) async fn stop_offers(&self) {
+        let mut offer = self.active_offer.lock().await;
+        if let Some((id, task)) = offer.take() {
+            task.abort();
+            let _ = task.await;
+            if let Some(info) = self.active_transfers.lock().await.get_mut(&id) {
+                info.state = TransferState::Failed { reason: "Offre annulée".into() };
+            }
+        }
+        self.discovery.clear_offer().await;
+    }
+
+}
+
+const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(12);
+const DIRECT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OfferKind {
+    Transfer,
+    Pairing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PairingProtocol {
+    Legacy,
+    SignedRegistry,
+}
+
+const OFFER_ACK_CAPABILITY: &str = "offer-ready-v1";
+
+struct PeerHello {
+    name: String,
+    pairing_protocol: PairingProtocol,
+    acknowledge_offer: bool,
+}
+
+fn capabilities(kind: OfferKind) -> Vec<String> {
+    let mut capabilities = vec!["pqc-kem".into(), "chacha20".into()];
+    if kind == OfferKind::Pairing {
+        capabilities.extend(["sync-pair-v2".into(), "sync-pair".into()]);
+    } else {
+        capabilities.push(OFFER_ACK_CAPABILITY.into());
+    }
+    capabilities
+}
+
+fn read_hello(message: TransferMessage, kind: OfferKind) -> Result<PeerHello, String> {
+    let TransferMessage::Hello { peer_name, protocol_version, capabilities } = message else {
+        return Err("Le pair n’a pas envoyé de message Hello".into());
+    };
+    if protocol_version != protocol::PROTOCOL_VERSION {
+        return Err("Version du protocole incompatible. Mettez à jour les deux appareils.".into());
+    }
+    let pairing = if capabilities.iter().any(|capability| capability == "sync-pair-v2") {
+        Some(PairingProtocol::SignedRegistry)
+    } else if capabilities.iter().any(|capability| capability == "sync-pair") {
+        Some(PairingProtocol::Legacy)
+    } else {
+        None
+    };
+    let pairing_protocol = match (kind, pairing) {
+        (OfferKind::Pairing, Some(pairing)) => pairing,
+        (OfferKind::Transfer, None) => PairingProtocol::Legacy,
+        _ => return Err("Le code correspond à un autre type d’offre (transfert ou appairage).".into()),
+    };
+    Ok(PeerHello {
+        name: peer_name,
+        pairing_protocol,
+        acknowledge_offer: capabilities.iter().any(|capability| capability == OFFER_ACK_CAPABILITY),
+    })
+}
+
+fn parse_access_code(raw_code: &str) -> Result<(&str, Option<DiscoveredPeer>), String> {
+    let raw_code = raw_code.trim();
+    let Some((code, endpoint)) = raw_code.split_once('@') else {
+        return Ok((raw_code, None));
+    };
+    let address: std::net::SocketAddr = endpoint.parse()
+        .map_err(|_| "Adresse ou port invalide dans le code temporaire")?;
+    if address.port() == 0 {
+        return Err("Port invalide dans le code temporaire".into());
+    }
+    let addr = match address {
+        std::net::SocketAddr::V6(v6) if v6.scope_id() != 0 => format!("{}%{}", v6.ip(), v6.scope_id()),
+        _ => address.ip().to_string(),
+    };
+    Ok((code, Some(DiscoveredPeer {
+        name: "Adresse du code".into(),
+        addr,
+        port: address.port(),
+        method: "Direct".into(),
+        verified: false,
+    })))
+}
+
+async fn listen_for_offer(
+    listener: &TransportListener,
+    deadline: tokio::time::Instant,
+) -> Result<TransportConnection, String> {
+    let reverse = async {
+        loop {
+            if let Ok(peer) = super::discovery::discover_receiver_peer(10).await {
+                if let Ok(connection) = connect_to_peer(&peer).await {
+                    return connection;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    tokio::time::timeout_at(deadline, async {
+        tokio::select! {
+            result = listener.accept() => result,
+            result = reverse => Ok(result),
+        }
+    }).await.map_err(|_| "Le code temporaire a expiré".to_string())?
+}
+
+struct NegotiatedOffer {
+    connection: TransportConnection,
+    session: SecureSession,
+    safety_number: String,
+    peer_name: String,
+    pairing_protocol: PairingProtocol,
+    first_message: TransferMessage,
+}
+
+async fn negotiate_offer(
+    mut connection: TransportConnection, code: &str, name: &str, kind: OfferKind,
+) -> Result<NegotiatedOffer, String> {
+    let stream = &mut connection.stream;
+    protocol::write_message(stream, &TransferMessage::Hello {
+        protocol_version: protocol::PROTOCOL_VERSION,
+        peer_name: name.to_owned(),
+        capabilities: capabilities(kind),
+    }).await?;
+    let peer = read_hello(protocol::read_message(stream).await?, kind)?;
+
+    let responder = handshake::HandshakeResponder::new(code)?;
+    protocol::write_message(stream, &TransferMessage::SpakeMessage {
+        body: responder.spake_message().to_vec(),
+    }).await?;
+    let TransferMessage::SpakeMessage { body } = protocol::read_message(stream).await? else {
+        return Err("Protocole invalide : message SPAKE2 attendu".into());
+    };
+    let TransferMessage::KemEncapsulation { ek_bytes } = protocol::read_message(stream).await? else {
+        return Err("Protocole invalide : encapsulation KEM attendue".into());
+    };
+    let (result, ct_bytes) = responder.complete_handshake(&body, &ek_bytes)?;
+    protocol::write_message(stream, &TransferMessage::KemCiphertext { ct_bytes }).await?;
+    let mut session = SecureSession::new(result.session_key, false)?;
+    let first_message = session.recv_message(stream).await?;
+    let valid = matches!(
+        (kind, &first_message),
+        (OfferKind::Transfer, TransferMessage::TransferOffer { .. })
+            | (OfferKind::Pairing, TransferMessage::SyncPairRequest { .. })
+    );
+    if !valid {
+        return Err("Le pair n’a pas transmis l’offre attendue".into());
+    }
+    if kind == OfferKind::Transfer && peer.acknowledge_offer {
+        session.send_message(stream, &TransferMessage::OfferReady).await?;
+    }
+    Ok(NegotiatedOffer {
+        connection, session, safety_number: result.safety_number.clone(),
+        peer_name: peer.name, pairing_protocol: peer.pairing_protocol, first_message,
+    })
+}
+
+async fn initiate_offer(
+    stream: &mut Box<dyn super::transport::AsyncReadWrite>, code: &str, name: &str, kind: OfferKind,
+) -> Result<(PeerHello, SecureSession, String), String> {
+    let peer = read_hello(protocol::read_message(stream).await?, kind)?;
+    protocol::write_message(stream, &TransferMessage::Hello {
+        protocol_version: protocol::PROTOCOL_VERSION,
+        peer_name: name.to_owned(),
+        capabilities: capabilities(kind),
+    }).await?;
+    let TransferMessage::SpakeMessage { body } = protocol::read_message(stream).await? else {
+        return Err("Protocole invalide : message SPAKE2 attendu".into());
+    };
+    let initiator = handshake::HandshakeInitiator::new(code)?;
+    protocol::write_message(stream, &TransferMessage::SpakeMessage {
+        body: initiator.spake_message().to_vec(),
+    }).await?;
+    let spake = initiator.complete_spake2(&body)?;
+    protocol::write_message(stream, &TransferMessage::KemEncapsulation {
+        ek_bytes: spake.ek_bytes.clone(),
+    }).await?;
+    let TransferMessage::KemCiphertext { ct_bytes } = protocol::read_message(stream).await? else {
+        return Err("Protocole invalide : encapsulation KEM attendue".into());
+    };
+    let result = spake.finalize_with_kem(&ct_bytes)?;
+    let session = SecureSession::new(result.session_key, true)?;
+    Ok((peer, session, result.safety_number.clone()))
+}
+
+async fn send_transfer_offer(
+    stream: &mut Box<dyn super::transport::AsyncReadWrite>,
+    session: &mut SecureSession,
+    items: Vec<TransferItem>,
+    total_size: u64,
+    acknowledge_offer: bool,
+) -> Result<(), String> {
+    session.send_message(stream, &TransferMessage::TransferOffer { items, total_size }).await?;
+    if acknowledge_offer && !matches!(session.recv_message(stream).await?, TransferMessage::OfferReady) {
+        return Err("Le destinataire n’a pas confirmé l’offre de transfert".into());
+    }
+    Ok(())
+}
+
+async fn receive_offer(
+    discovery: &DiscoveryService,
+    code: &str,
+    name: &str,
+    kind: OfferKind,
+    direct_peers: Vec<DiscoveredPeer>,
+) -> Result<NegotiatedOffer, String> {
+    // Validate the code even when there is no network candidate.
+    handshake::HandshakeResponder::new(code)?;
+    if let Err(error) = discovery.start_mdns_discovery().await {
+        eprintln!("[TRANSFER] Démarrage de la découverte : {error}");
+    }
+    let deadline = tokio::time::Instant::now() + DIRECT_DISCOVERY_TIMEOUT;
+    let mut attempted = HashSet::new();
+    let mut last_error = None;
+    loop {
+        let mut peers = direct_peers.clone();
+        peers.extend(discovery.get_discovered_peers().await);
+        for peer in peers {
+            if peer.port == 0 || !attempted.insert((peer.addr.clone(), peer.port)) {
+                continue;
+            }
+            let result = tokio::time::timeout(NEGOTIATION_TIMEOUT, async {
+                let conn = connect_to_peer(&peer).await?;
+                negotiate_offer(conn, code, name, kind).await
+            }).await.unwrap_or_else(|_| Err("Délai de négociation avec le pair dépassé".into()));
+            match result {
+                Ok(offer) => return Ok(offer),
+                Err(error) => last_error = Some(error),
+            }
+            if attempted.len() >= 8 {
+                break;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline || attempted.len() >= 8 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let listener = TransportListener::bind(0).await?;
+    let port = listener.local_port;
+    if let Err(error) = discovery.register_receiver_mdns(port).await {
+        return Err(last_error.unwrap_or(error));
+    }
+    let reverse_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let result = loop {
+        let Ok(connection) = tokio::time::timeout_at(reverse_deadline, listener.accept()).await else {
+            break Err(last_error.unwrap_or_else(|| {
+                "Aucune offre joignable. Vérifiez que l’autre appareil attend la connexion.".into()
+            }));
+        };
+        let connection = match connection {
+            Ok(connection) => connection,
+            Err(error) => break Err(error),
+        };
+        let deadline = reverse_deadline.min(tokio::time::Instant::now() + NEGOTIATION_TIMEOUT);
+        match tokio::time::timeout_at(deadline, negotiate_offer(connection, code, name, kind)).await {
+            Ok(Ok(offer)) => break Ok(offer),
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => last_error = Some("Délai de négociation inverse dépassé".into()),
+        }
+    };
+    discovery.unregister_receiver_mdns(port).await;
+    result
+
 }
 
 const MAX_TRANSFER_ITEM_BYTES: usize = 32 * 1024 * 1024;
@@ -162,6 +463,56 @@ fn validate_transfer_chunk(
 #[cfg(test)]
 mod transfer_limits_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tcp_offer_requires_the_receiver_to_authenticate_before_confirming() {
+        let listener = TransportListener::bind(0).await.unwrap();
+        let peer = DiscoveredPeer {
+            name: "instance de test".into(),
+            addr: "127.0.0.1".into(),
+            port: listener.local_port,
+            method: "Direct".into(),
+            verified: false,
+        };
+        let code = handshake::generate_wormhole_code();
+        let wrong_code = loop {
+            let candidate = handshake::generate_wormhole_code();
+            if candidate != code { break candidate; }
+        };
+        for (receiver_code, should_connect) in [(&wrong_code, false), (&code, true)] {
+            let (sender, receiver) = tokio::time::timeout(Duration::from_secs(5), async {
+                let (sender, receiver) = tokio::join!(listener.accept(), connect_to_peer(&peer));
+                let mut sender = sender.unwrap();
+                let receiver = receiver.unwrap();
+                assert_eq!(sender.channel_binding, receiver.channel_binding);
+                let outgoing = async {
+                    let (hello, mut session, number) =
+                        initiate_offer(&mut sender.stream, &code, "sender", OfferKind::Transfer).await?;
+                    send_transfer_offer(&mut sender.stream, &mut session, vec![TransferItem {
+                        item_type: TransferItemType::Password, name: "fixture".into(),
+                        size: 12, integrity_hash: String::new(),
+                    }], 12, hello.acknowledge_offer).await?;
+                    let confirmation = session.recv_message(&mut sender.stream).await?;
+                    assert!(matches!(confirmation, TransferMessage::SafetyNumberConfirm { confirmed: true }));
+                    Ok::<_, String>(number)
+                };
+                let incoming = async {
+                    let mut offer = negotiate_offer(receiver, receiver_code, "receiver", OfferKind::Transfer).await?;
+                    assert!(matches!(offer.first_message, TransferMessage::TransferOffer { total_size: 12, .. }));
+                    offer.session.send_message(&mut offer.connection.stream,
+                        &TransferMessage::SafetyNumberConfirm { confirmed: true }).await?;
+                    Ok::<_, String>(offer.safety_number)
+                };
+                tokio::join!(outgoing, incoming)
+            }).await.unwrap();
+            if should_connect {
+                assert_eq!(sender.unwrap(), receiver.unwrap());
+            } else {
+                assert!(sender.is_err());
+                assert!(receiver.is_err());
+            }
+        }
+    }
 
     #[test]
     fn chunks_must_be_ordered_bounded_and_end_on_item_boundary() {
@@ -290,11 +641,10 @@ pub async fn transfer_create_offer(
     let base_wormhole_code = handshake::generate_wormhole_code();
     let transfer_id = uuid::Uuid::new_v4().to_string();
 
-    // Store pending items for C3
-    tm.pending_items.lock().await.insert(
-        transfer_id.clone(),
-        (request.item_type.clone(), request.item_ids.clone()),
-    );
+    let mut active_offer = tm.active_offer.lock().await;
+    if active_offer.is_some() {
+        return Err("Une offre est déjà en attente sur cet appareil.".into());
+    }
 
     // Start TCP/TLS listener
     let listener = match TransportListener::bind(DEFAULT_TRANSFER_PORT).await {
@@ -309,7 +659,7 @@ pub async fn transfer_create_offer(
     if let Err(e) = tm.discovery.start_mdns_discovery().await {
         eprintln!("[TRANSFER] start_mdns_discovery failed: {}", e);
     }
-    if let Err(e) = tm.discovery.register_mdns_service_on_port(actual_port).await {
+    if let Err(e) = tm.discovery.advertise_offer(actual_port).await {
         eprintln!("[TRANSFER] register_mdns_service_on_port({}) failed: {}", actual_port, e);
     }
 
@@ -327,9 +677,14 @@ pub async fn transfer_create_offer(
         base_wormhole_code.clone()
     };
 
+    // Store pending items for C3
+    tm.pending_items.lock().await.insert(
+        transfer_id.clone(),
+        (request.item_type.clone(), request.item_ids.clone()),
+    );
+
     // Store listener for accept phase
     let listener = Arc::new(listener);
-    *tm.active_listener.lock().await = Some(listener.clone());
 
     // Enregistrer le transfert
     let now_epoch = std::time::SystemTime::now()
@@ -360,7 +715,9 @@ pub async fn transfer_create_offer(
     let offer_total_size = total_size;
 
     // Spawn background task: accept incoming connection OR discover receiver + connect out
-    tokio::spawn(async move {
+    let discovery = tm.discovery.clone();
+    let active_slot = tm.active_offer.clone();
+    let task = tokio::spawn(async move {
         let result: Result<(), String> = async {
             // ═══ V-03 SPAKE2 rate-limiting ═══
             // Retry loop with exponential backoff to throttle brute-force attempts.
@@ -388,30 +745,10 @@ pub async fn transfer_create_offer(
                     handshake_failures, MAX_HANDSHAKE_ATTEMPTS, remaining
                 );
 
-                // Race: Path A (receiver connects to our listener) vs
-                //       Path B (we discover receiver's reverse listener via mDNS and connect OUT)
-                let conn = match tokio::time::timeout(remaining, async {
-                    tokio::select! {
-                        accept_result = listener.accept() => {
-                            eprintln!("[TRANSFER] Sender: accept() won the race");
-                            accept_result
-                        }
-                        discover_result = async {
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            eprintln!("[TRANSFER] Sender: scanning mDNS for receiver reverse listener...");
-                            let peer = super::discovery::discover_receiver_peer(55).await?;
-                            eprintln!("[TRANSFER] Sender: found receiver at {}:{}", peer.addr, peer.port);
-                            connect_to_peer(&peer).await
-                        } => {
-                            eprintln!("[TRANSFER] Sender: mDNS discover won the race");
-                            discover_result
-                        }
-                    }
-                })
-                .await
-                {
-                    Ok(Ok(c)) => c,
-                    Ok(Err(e)) => {
+                let conn = match listen_for_offer(&listener, deadline).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        if tokio::time::Instant::now() >= deadline { return Err(e); }
                         // Connection-level error (not handshake); count as failure too
                         handshake_failures += 1;
                         eprintln!(
@@ -428,107 +765,35 @@ pub async fn transfer_create_offer(
                         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         continue;
                     }
-                    Err(_) => {
-                        return Err(format!(
-                            "Code wormhole expiré après {} secondes",
-                            WORMHOLE_TTL_SECS
-                        ));
-                    }
                 };
 
                 let peer_addr_log = conn.peer_addr.clone();
                 eprintln!("[TRANSFER] Sender: connected to {}! Starting handshake...", peer_addr_log);
 
                 // ─── Attempt full SPAKE2 + ML-KEM handshake ───
-                let handshake_result: Result<(), String> = async {
-                    let mut stream = conn.stream;
-                    let peer_addr = peer_addr_log.clone();
-                    let method = conn.method.clone();
+                let handshake_result: Result<(), String> = tokio::time::timeout(remaining.min(NEGOTIATION_TIMEOUT), async {
+                    let mut conn = conn;
+                    let stream = &mut conn.stream;
 
-                    // Read Hello from receiver
-                    let receiver_hello = protocol::read_message(&mut stream).await?;
-                    let receiver_name = match &receiver_hello {
-                        TransferMessage::Hello { peer_name, .. } => peer_name.clone(),
-                        _ => "FluXlock Peer".to_string(),
-                    };
-
-                    // Send our Hello
-                    let hello = TransferMessage::Hello {
-                        protocol_version: protocol::PROTOCOL_VERSION,
-                        peer_name: peer_name_clone.clone(),
-                        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string()],
-                    };
-                    protocol::write_message(&mut stream, &hello).await?;
-
-                    // Update state
                     if let Some(info) = active_transfers.lock().await.get_mut(&tid) {
                         info.state = TransferState::Handshaking;
-                        info.peer_name = Some(receiver_name.clone());
                     }
+                    let (peer, mut secure_session, safety_number) =
+                        initiate_offer(stream, &wc, &peer_name_clone, OfferKind::Transfer).await?;
+                    send_transfer_offer(
+                        stream, &mut secure_session, offer_items.clone(), offer_total_size, peer.acknowledge_offer,
+                    ).await?;
 
-                    // Read receiver's SPAKE2 message
-                    let receiver_spake = protocol::read_message(&mut stream).await?;
-                    let receiver_spake_body = match receiver_spake {
-                        TransferMessage::SpakeMessage { body } => body,
-                        _ => return Err("Protocole invalide : message SPAKE2 attendu".to_string()),
-                    };
-
-                    // Create initiator and complete SPAKE2 (phase 1)
-                    let initiator = handshake::HandshakeInitiator::new(&wc)?;
-
-                    // Send our SPAKE2 message
-                    let spake_msg = TransferMessage::SpakeMessage {
-                        body: initiator.spake_message().to_vec(),
-                    };
-                    protocol::write_message(&mut stream, &spake_msg).await?;
-
-                    // Phase 1: SPAKE2 finish + KEM keypair generation
-                    let phase1 = initiator.complete_spake2(&receiver_spake_body)?;
-
-                    // Send KEM public key
-                    let kem_pub = TransferMessage::KemEncapsulation {
-                        ek_bytes: phase1.ek_bytes.clone(),
-                    };
-                    protocol::write_message(&mut stream, &kem_pub).await?;
-
-                    // Read KEM ciphertext from receiver
-                    let kem_ct_msg = protocol::read_message(&mut stream).await?;
-                    let ct_bytes = match kem_ct_msg {
-                        TransferMessage::KemCiphertext { ct_bytes } => ct_bytes,
-                        _ => return Err("Protocole invalide : KEM ciphertext attendu".to_string()),
-                    };
-
-                    // Phase 2: KEM decapsulation + hybrid key derivation
-                    let hs_result = phase1.finalize_with_kem(&ct_bytes)?;
-
-                    // Create SecureSession from handshake key (initiator)
-                    let mut secure_session = SecureSession::new(hs_result.session_key, true)?;
-
-                    // Send the transfer offer via SecureSession (encrypted)
-                    let offer = TransferMessage::TransferOffer {
-                        items: offer_items.clone(),
-                        total_size: offer_total_size,
-                    };
-                    secure_session.send_message(&mut stream, &offer).await?;
-
-                    // Update state with safety number
+                    active_connections.lock().await.insert(tid.clone(), conn);
+                    active_sessions.lock().await.insert(tid.clone(), secure_session);
                     if let Some(info) = active_transfers.lock().await.get_mut(&tid) {
                         info.state = TransferState::ConfirmingSafetyNumber;
-                        info.safety_number = Some(hs_result.safety_number.clone());
-                        info.peer_name = Some(receiver_name);
+                        info.safety_number = Some(safety_number);
+                        info.peer_name = Some(peer.name);
                     }
 
-                    // Store connection and session for the confirm phase
-                    active_connections.lock().await.insert(tid.clone(), TransportConnection {
-                        stream,
-                        method,
-                        peer_addr,
-                    });
-                    active_sessions.lock().await.insert(tid.clone(), secure_session);
-
                     Ok(())
-                }
-                .await;
+                }).await.unwrap_or_else(|_| Err("Délai de négociation dépassé".into()));
 
                 match handshake_result {
                     Ok(()) => return Ok(()),
@@ -562,7 +827,13 @@ pub async fn transfer_create_offer(
                 info.state = TransferState::Failed { reason: e };
             }
         }
+        let mut active = active_slot.lock().await;
+        if active.as_ref().is_some_and(|(id, _)| id == &tid) {
+            discovery.clear_offer().await;
+            active.take();
+        }
     });
+    *active_offer = Some((transfer_id.clone(), task));
 
     Ok(CreateOfferResponse {
         transfer_id,
@@ -590,226 +861,37 @@ pub async fn transfer_connect(
     // Vérifier l'authentification
     crate::validate_session(&state).await?;
 
-    let tm_guard = state.transfer_manager.lock().await;
-    let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
-
-    let transfer_id = uuid::Uuid::new_v4().to_string();
-
-    // ── Parse wormhole code: extract IPv6 endpoint if present ──
-    // Format A: "42-alpha-beacon-drift" (same network — mDNS or Peers tab)
-    // Format B: "42-alpha-beacon-drift@[2001:db8::1]:52820" (cross-network IPv6)
-    let raw_code = request.wormhole_code.trim().to_string();
-    // EXP-009: Ne pas logger le code wormhole en production
-    #[cfg(debug_assertions)]
-    eprintln!("[TRANSFER] Receiver: raw wormhole code = {}", raw_code);
-
-    let (spake_code, ipv6_endpoint) = if let Some(idx) = raw_code.find('@') {
-        let code_part = raw_code[..idx].to_string();
-        let endpoint_part = raw_code[idx + 1..].to_string();
-        // Parse "[IPv6]:port"
-        let parsed = if endpoint_part.starts_with('[') {
-            if let Some(bracket_end) = endpoint_part.find(']') {
-                let ip = endpoint_part[1..bracket_end].to_string();
-                let port = endpoint_part.get(bracket_end + 2..)
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or(DEFAULT_TRANSFER_PORT);
-                Some((ip, port))
-            } else { None }
-        } else { None };
-        (code_part, parsed)
-    } else {
-        (raw_code.clone(), None)
+    let session_token = state.session_token.lock().await.clone();
+    let (discovery, name) = {
+        let tm = state.transfer_manager.lock().await;
+        let tm = tm.as_ref().ok_or("Module de transfert non initialisé")?;
+        (tm.discovery.clone(), tm.peer_name.clone())
     };
-
-    // ── Strategy 1: Direct peer from Peers tab (mDNS discovered) ──
-    let mut conn: Option<TransportConnection> = None;
-
-    if let (Some(addr), Some(port)) = (&request.peer_addr, request.peer_port) {
-        let direct_peer = DiscoveredPeer {
-            name: "discovered-peer".to_string(),
-            addr: addr.clone(),
-            port,
-            method: "mDNS-Direct".to_string(),
-            verified: false,
-        };
-        eprintln!("[TRANSFER] Receiver: trying discovered peer {}:{}", addr, port);
-        match connect_to_peer(&direct_peer).await {
-            Ok(c) => { eprintln!("[TRANSFER] Receiver: discovered peer connection OK!"); conn = Some(c); }
-            Err(e) => { eprintln!("[TRANSFER] Receiver: discovered peer failed: {}", e); }
-        }
-    }
-
-    // ── Strategy 2: Cross-network IPv6 from wormhole code ──
-    if conn.is_none() {
-        if let Some((ref ip, port)) = ipv6_endpoint {
-            let v6_peer = DiscoveredPeer {
-                name: "ipv6-endpoint".to_string(),
-                addr: ip.clone(),
-                port,
-                method: "IPv6-Direct".to_string(),
-                verified: false,
-            };
-            eprintln!("[TRANSFER] Receiver: trying IPv6 {}:{}", ip, port);
-            match connect_to_peer(&v6_peer).await {
-                Ok(c) => { eprintln!("[TRANSFER] Receiver: IPv6 connection OK!"); conn = Some(c); }
-                Err(e) => { eprintln!("[TRANSFER] Receiver: IPv6 failed: {}", e); }
-            }
-        }
-    }
-
-    // ── Strategy 3: mDNS + IPv6 link-local discovery ──
-    if conn.is_none() {
-        if let Err(e) = tm.discovery.start_mdns_discovery().await {
-            eprintln!("[TRANSFER] Receiver: start_mdns_discovery failed: {}", e);
-        }
-        // Short wait for mDNS
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        let mut peers = tm.discovery.get_discovered_peers().await;
-        if let Ok(v6_peers) = tm.discovery.scan_ipv6_link_local().await {
-            peers.extend(v6_peers);
-        }
-
-        if !peers.is_empty() {
-            if let Ok(c) = establish_connection(&peers).await {
-                conn = Some(c);
-            }
-        }
-    }
-
-    // ── Strategy 3: Localhost fallback (same machine testing) ──
-    if conn.is_none() {
-        let localhost = DiscoveredPeer {
-            name: "localhost".to_string(),
-            addr: "127.0.0.1".to_string(),
-            port: DEFAULT_TRANSFER_PORT,
-            method: "Direct".to_string(),
-            verified: false,
-        };
-        if let Ok(c) = connect_to_peer(&localhost).await {
-            conn = Some(c);
-        }
-    }
-
-    // ── Strategy 4: Reverse connection — start our own listener, let sender connect to us ──
-    // This handles the case where the sender is on Android (which blocks incoming TCP).
-    // We start a TLS listener, advertise it via mDNS, and wait for the sender to connect OUT.
-    if conn.is_none() {
-        if let Err(e) = tm.discovery.start_mdns_discovery().await {
-            eprintln!("[TRANSFER] Receiver: start_mdns_discovery for reverse failed: {}", e);
-        }
-
-        let reverse_listener = match TransportListener::bind(DEFAULT_TRANSFER_PORT).await {
-            Ok(l) => l,
-            Err(_) => TransportListener::bind(0).await
-                .map_err(|e| format!("Reverse listener : {}", e))?,
-        };
-        let reverse_port = reverse_listener.local_port;
-
-        eprintln!("[TRANSFER] Receiver: starting reverse listener on port {}", reverse_port);
-        // Advertise our reverse listener via mDNS so sender can find us
-        if let Err(e) = tm.discovery.register_receiver_mdns(reverse_port).await {
-            eprintln!("[TRANSFER] Receiver: register_receiver_mdns failed: {}", e);
-        }
-        eprintln!("[TRANSFER] Receiver: registered mDNS _fluxlock-recv._tcp on port {}", reverse_port);
-
-        // Wait up to 60s for the sender to discover us and connect
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            reverse_listener.accept(),
-        ).await {
-            Ok(Ok(c)) => { eprintln!("[TRANSFER] Receiver: sender connected to our reverse listener!"); conn = Some(c); }
-            Ok(Err(e)) => { eprintln!("[TRANSFER] Receiver: reverse accept error: {}", e); }
-            Err(_) => { eprintln!("[TRANSFER] Receiver: reverse listener timeout (60s)"); }
-        }
-    }
-
-    let conn = conn.ok_or_else(|| {
-        if ipv6_endpoint.is_some() {
-            "Impossible de se connecter via IPv6. Vérifiez que l'autre appareil est accessible et a créé une offre.".to_string()
-        } else if request.peer_addr.is_some() {
-            "Impossible de se connecter au pair découvert. Vérifiez que l'autre appareil a bien créé une offre.".to_string()
-        } else {
-            "Pair introuvable. Utilisez l'onglet Pairs pour un appareil sur le même réseau, ou entrez le code complet avec @[IPv6] pour un réseau différent.".to_string()
-        }
-    })?;
-
-    let connection_method = format!("{:?}", conn.method);
-    let peer_addr = conn.peer_addr.clone();
-
-    // Perform SPAKE2 handshake as responder (use code portion only, without endpoint)
-    let responder = handshake::HandshakeResponder::new(&spake_code)?;
-
-    // Exchange SPAKE2 messages over the TLS connection
-    let mut stream = conn.stream;
-
-    // Send Hello
-    let hello = TransferMessage::Hello {
-        protocol_version: protocol::PROTOCOL_VERSION,
-        peer_name: tm.peer_name.clone(),
-        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string()],
-    };
-    protocol::write_message(&mut stream, &hello).await?;
-
-    // Read Hello from sender
-    let sender_hello = protocol::read_message(&mut stream).await?;
-    let sender_name = match &sender_hello {
-        TransferMessage::Hello { peer_name, .. } => peer_name.clone(),
-        _ => "FluXlock Peer".to_string(),
-    };
-
-    // Send our SPAKE2 message
-    let spake_msg = TransferMessage::SpakeMessage {
-        body: responder.spake_message().to_vec(),
-    };
-    protocol::write_message(&mut stream, &spake_msg).await?;
-
-    // Read sender's SPAKE2 message
-    let sender_spake = protocol::read_message(&mut stream).await?;
-    let sender_spake_body = match sender_spake {
-        TransferMessage::SpakeMessage { body } => body,
-        _ => return Err("Protocole invalide : message SPAKE2 attendu".to_string()),
-    };
-
-    // Read sender's KEM public key
-    let kem_msg = protocol::read_message(&mut stream).await?;
-    let ek_bytes = match kem_msg {
-        TransferMessage::KemEncapsulation { ek_bytes } => ek_bytes,
-        _ => return Err("Protocole invalide : KEM encapsulation attendue".to_string()),
-    };
-
-    // Complete handshake as responder
-    let (result, ct_bytes) = responder.complete_handshake(&sender_spake_body, &ek_bytes)?;
-
-    // Send KEM ciphertext back to sender
-    let kem_ct = TransferMessage::KemCiphertext { ct_bytes };
-    protocol::write_message(&mut stream, &kem_ct).await?;
-
-    // Create SecureSession for encrypted communication (responder)
-    let mut secure_session = SecureSession::new(result.session_key, false)?;
-
-    // Read transfer offer via SecureSession (encrypted end-to-end)
-    let offer_msg = secure_session.recv_message(&mut stream).await?;
-    let (items, total_size) = match offer_msg {
-        TransferMessage::TransferOffer { items, total_size } => {
-            let info_items: Vec<TransferItemInfo> = items.iter().map(|i| TransferItemInfo {
-                name: i.name.clone(),
-                item_type: format!("{:?}", i.item_type),
-                size: i.size,
-            }).collect();
-            (info_items, total_size)
-        }
-        _ => (Vec::new(), 0),
-    };
-
-    let safety_number = result.safety_number.clone();
-
-    // Store connection and session for the confirm phase
-    tm.active_connections.lock().await.insert(transfer_id.clone(), TransportConnection {
-        stream,
-        method: conn.method,
-        peer_addr,
+    let (code, endpoint) = parse_access_code(&request.wormhole_code)?;
+    let direct_peer = request.peer_addr.zip(request.peer_port).map(|(addr, port)| DiscoveredPeer {
+        name: "Pair découvert".into(), addr, port, method: "Direct".into(), verified: false,
     });
+    let offer = receive_offer(&discovery, code, &name, OfferKind::Transfer,
+        endpoint.into_iter().chain(direct_peer).collect()).await?;
+    let NegotiatedOffer {
+        connection, session: secure_session, safety_number, peer_name: sender_name,
+        first_message: TransferMessage::TransferOffer { items, total_size }, ..
+    } = offer else {
+        return Err("Offre de transfert invalide".into());
+    };
+    let items = items.into_iter().map(|i| TransferItemInfo {
+        name: i.name, item_type: format!("{:?}", i.item_type), size: i.size,
+    }).collect();
+    let method = connection.method.clone();
+    let connection_method = method.to_string();
+    let user_id = crate::validate_session(&state).await?;
+    let tm_guard = state.transfer_manager.lock().await;
+    if *state.isolation_mode.lock().await || *state.session_token.lock().await != session_token {
+        return Err("Transfert annulé".into());
+    }
+    let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    tm.active_connections.lock().await.insert(transfer_id.clone(), connection);
     tm.active_sessions.lock().await.insert(transfer_id.clone(), secure_session);
     tm.transfer_roles.lock().await.insert(transfer_id.clone(), TransferRole::Receiver);
 
@@ -817,7 +899,7 @@ pub async fn transfer_connect(
     tm.active_transfers.lock().await.insert(transfer_id.clone(), TransferInfo {
         transfer_id: transfer_id.clone(),
         state: TransferState::ConfirmingSafetyNumber,
-        connection_method: ConnectionMethod::MdnsLocal,
+        connection_method: method,
         safety_number: Some(safety_number.clone()),
         peer_name: Some(sender_name.clone()),
         created_at: std::time::SystemTime::now()
@@ -827,7 +909,6 @@ pub async fn transfer_connect(
     });
 
     drop(tm_guard);
-    let user_id = crate::validate_session(&state).await?;
     if let Some(db) = state.db.lock().await.as_ref() {
         let _ = db.log_action(user_id, "TRANSFER_CONNECT", "transfer", None).await;
     }
@@ -1485,16 +1566,19 @@ pub async fn transfer_cancel(
     crate::validate_session(&state).await?;
     let tm_guard = state.transfer_manager.lock().await;
     if let Some(ref tm) = *tm_guard {
+        let mut offer = tm.active_offer.lock().await;
+        if offer.as_ref().is_some_and(|(id, _)| id == &transfer_id) {
+            if let Some((_, task)) = offer.take() {
+                task.abort();
+                let _ = task.await;
+            }
+            tm.discovery.clear_offer().await;
+        }
         let removed = tm.active_transfers.lock().await.remove(&transfer_id).is_some();
         tm.active_connections.lock().await.remove(&transfer_id);
         tm.active_sessions.lock().await.remove(&transfer_id);
         tm.transfer_roles.lock().await.remove(&transfer_id);
         tm.pending_items.lock().await.remove(&transfer_id);
-        // Unregister mDNS when no more active transfers
-        if tm.active_transfers.lock().await.is_empty() {
-            tm.discovery.unregister_mdns_service().await;
-            *tm.active_listener.lock().await = None;
-        }
         Ok(removed)
     } else {
         Ok(false)
@@ -1516,28 +1600,15 @@ pub async fn transfer_set_visibility(
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
 
-    let mut vis = tm.visible.lock().await;
     if visible {
-        // Set visible BEFORE starting discovery so the beacon + mDNS registration see it
-        *vis = visible;
-        drop(vis);
-        if let Err(e) = tm.discovery.start_mdns_discovery().await {
-            eprintln!("[TRANSFER] Visibility: start_mdns_discovery failed: {}", e);
+        tm.discovery.start_mdns_discovery().await?;
+        if let Err(error) = tm.start_registry_sync(&state).await {
+            eprintln!("[SYNC] Synchronisation indisponible : {error}");
         }
-        // Use the actual listener port if a transfer is active, otherwise DEFAULT
-        let port = match tm.active_listener.lock().await.as_ref() {
-            Some(listener) => listener.local_port,
-            None => DEFAULT_TRANSFER_PORT,
-        };
-        if let Err(e) = tm.discovery.register_mdns_service_on_port(port).await {
-            eprintln!("[TRANSFER] Visibility: register_mdns on port {} failed: {}", port, e);
-        }
-        eprintln!("[TRANSFER] Visibility ON — device is now discoverable via mDNS (port {})", port);
+        *tm.visible.lock().await = true;
     } else {
-        *vis = visible;
-        drop(vis);
-        tm.discovery.unregister_mdns_service().await;
-        eprintln!("[TRANSFER] Visibility OFF — device is no longer discoverable");
+        *tm.visible.lock().await = false;
+        tm.stop_registry_sync().await;
     }
 
     Ok(visible)
@@ -1705,6 +1776,11 @@ pub async fn transfer_start_sync_pairing(
     let base_wormhole_code = handshake::generate_wormhole_code();
     let pairing_id = uuid::Uuid::new_v4().to_string();
 
+    let mut active_offer = tm.active_offer.lock().await;
+    if active_offer.is_some() {
+        return Err("Une offre est déjà en attente sur cet appareil.".into());
+    }
+
     // Start TCP/TLS listener
     let listener = match TransportListener::bind(DEFAULT_TRANSFER_PORT).await {
         Ok(l) => l,
@@ -1718,7 +1794,7 @@ pub async fn transfer_start_sync_pairing(
     if let Err(e) = tm.discovery.start_mdns_discovery().await {
         eprintln!("[SYNC-PAIR] start_mdns_discovery failed: {}", e);
     }
-    if let Err(e) = tm.discovery.register_mdns_service_on_port(actual_port).await {
+    if let Err(e) = tm.discovery.advertise_offer(actual_port).await {
         eprintln!("[SYNC-PAIR] register_mdns_service_on_port({}) failed: {}", actual_port, e);
     }
 
@@ -1736,7 +1812,6 @@ pub async fn transfer_start_sync_pairing(
     };
 
     let listener = Arc::new(listener);
-    *tm.active_listener.lock().await = Some(listener.clone());
 
     // Register pairing transfer state
     let now_epoch = std::time::SystemTime::now()
@@ -1766,122 +1841,77 @@ pub async fn transfer_start_sync_pairing(
 
 
     // ── Background task: accept connection → handshake → exchange ML-DSA keys ──
-    tokio::spawn(async move {
+    let discovery = tm.discovery.clone();
+    let active_slot = tm.active_offer.clone();
+    let task = tokio::spawn(async move {
         let result: Result<(), String> = async {
-            // Wait for joiner connection (same race logic as C1)
-            eprintln!("[SYNC-PAIR] Initiator: waiting for joiner, TTL={}s", WORMHOLE_TTL_SECS);
-            let conn = tokio::time::timeout(
-                std::time::Duration::from_secs(WORMHOLE_TTL_SECS),
-                async {
-                    tokio::select! {
-                        accept_result = listener.accept() => {
-                            eprintln!("[SYNC-PAIR] Initiator: accept() won the race");
-                            accept_result
-                        }
-                        discover_result = async {
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            eprintln!("[SYNC-PAIR] Initiator: scanning mDNS for joiner...");
-                            let peer = super::discovery::discover_receiver_peer(55).await?;
-                            eprintln!("[SYNC-PAIR] Initiator: found joiner at {}:{}", peer.addr, peer.port);
-                            connect_to_peer(&peer).await
-                        } => {
-                            eprintln!("[SYNC-PAIR] Initiator: mDNS discover won the race");
-                            discover_result
-                        }
-                    }
-                }
-            ).await
-            .map_err(|_| format!("Code wormhole expiré après {} secondes", WORMHOLE_TTL_SECS))??;
-
-            let mut stream = conn.stream;
-
-            // ── Hello exchange (initiator reads first, then sends) ──
-            let joiner_hello = protocol::read_message(&mut stream).await?;
-            let joiner_name = match &joiner_hello {
-                TransferMessage::Hello { peer_name, capabilities, protocol_version }
-                    if *protocol_version == protocol::PROTOCOL_VERSION
-                        && capabilities.iter().any(|c| c == "sync-pair-v2") => peer_name.clone(),
-                _ => return Err("L’autre appareil doit utiliser la même version de FluXlock".into()),
-            };
-
-            let hello = TransferMessage::Hello {
-                protocol_version: protocol::PROTOCOL_VERSION,
-                peer_name: name.clone(),
-                capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "sync-pair-v2".to_string()],
-            };
-            protocol::write_message(&mut stream, &hello).await?;
-
-            if let Some(info) = active_transfers.lock().await.get_mut(&pid) {
-                info.state = TransferState::Handshaking;
-                info.peer_name = Some(joiner_name.clone());
-            }
-
-            // ── SPAKE2 + ML-KEM handshake (initiator side) ──
-            let joiner_spake = protocol::read_message(&mut stream).await?;
-            let joiner_spake_body = match joiner_spake {
-                TransferMessage::SpakeMessage { body } => body,
-                _ => return Err("Protocole invalide : message SPAKE2 attendu".to_string()),
-            };
-
-            let initiator = handshake::HandshakeInitiator::new(&wc)?;
-            let spake_msg = TransferMessage::SpakeMessage {
-                body: initiator.spake_message().to_vec(),
-            };
-            protocol::write_message(&mut stream, &spake_msg).await?;
-
-            let phase1 = initiator.complete_spake2(&joiner_spake_body)?;
-            let kem_pub = TransferMessage::KemEncapsulation {
-                ek_bytes: phase1.ek_bytes.clone(),
-            };
-            protocol::write_message(&mut stream, &kem_pub).await?;
-
-            let kem_ct_msg = protocol::read_message(&mut stream).await?;
-            let ct_bytes = match kem_ct_msg {
-                TransferMessage::KemCiphertext { ct_bytes } => ct_bytes,
-                _ => return Err("Protocole invalide : KEM ciphertext attendu".to_string()),
-            };
-
-            let hs_result = phase1.finalize_with_kem(&ct_bytes)?;
-            let mut secure_session = SecureSession::new(hs_result.session_key, true)?;
-
-            // ── Exchange ML-DSA-65 keys via encrypted channel ──
-            // Initiator sends SyncPairRequest
-            if *isolation.lock().await || *session_token.lock().await != pairing_token
-                || !active_transfers.lock().await.contains_key(&pid)
-            {
-                return Err("Appairage annulé".into());
-            }
-            let request = TransferMessage::SyncPairRequest {
-                device_name: name.clone(),
-                verifying_key_b64: vk_b64.clone(),
-                trust_data: trust_store.lock().await.export_for_sync()?,
-            };
-            secure_session.send_message(&mut stream, &request).await?;
-
-            // Wait for SyncPairResponse from joiner
-            let response = secure_session.recv_message(&mut stream).await?;
-            match response {
-                TransferMessage::SyncPairResponse { device_name, verifying_key_b64, accepted, trust_data } => {
-                    if !accepted {
-                        return Err("L'autre appareil a refusé l'appairage".to_string());
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(WORMHOLE_TTL_SECS);
+            for attempt in 0..5 {
+                let mut conn = listen_for_offer(&listener, deadline).await?;
+                let stream = &mut conn.stream;
+                let negotiation_deadline = deadline.min(tokio::time::Instant::now() + NEGOTIATION_TIMEOUT);
+                let result = tokio::time::timeout_at(negotiation_deadline, async {
+                    let (peer, mut secure_session, _) =
+                        initiate_offer(stream, &wc, &name, OfferKind::Pairing).await?;
+                    let pairing_protocol = peer.pairing_protocol;
+                    if let Some(info) = active_transfers.lock().await.get_mut(&pid) {
+                        info.state = TransferState::Handshaking;
+                        info.peer_name = Some(peer.name);
                     }
 
+                    // ── Exchange ML-DSA-65 keys via encrypted channel ──
+                    // Initiator sends SyncPairRequest
                     if *isolation.lock().await || *session_token.lock().await != pairing_token
                         || !active_transfers.lock().await.contains_key(&pid)
                     {
                         return Err("Appairage annulé".into());
                     }
-                    trust_store.lock().await.pair_and_merge(&device_name, &verifying_key_b64, &trust_data)?;
+                    let request = TransferMessage::SyncPairRequest {
+                        device_name: name.clone(),
+                        verifying_key_b64: vk_b64.clone(),
+                        trust_data: match pairing_protocol {
+                            PairingProtocol::SignedRegistry => trust_store.lock().await.export_for_sync()?,
+                            PairingProtocol::Legacy => String::new(),
+                        },
+                    };
+                    secure_session.send_message(stream, &request).await?;
 
-                    if let Some(info) = active_transfers.lock().await.get_mut(&pid) {
-                        info.state = TransferState::Completed;
-                        info.peer_name = Some(device_name);
+                    // Wait for SyncPairResponse from joiner
+                    let response = secure_session.recv_message(stream).await?;
+                    match response {
+                        TransferMessage::SyncPairResponse { device_name, verifying_key_b64, accepted, trust_data } => {
+                            if !accepted {
+                                return Err("L'autre appareil a refusé l'appairage".to_string());
+                            }
+
+                            if *isolation.lock().await || *session_token.lock().await != pairing_token
+                                || !active_transfers.lock().await.contains_key(&pid)
+                            {
+                                return Err("Appairage annulé".into());
+                            }
+                            finish_pairing(&mut *trust_store.lock().await, pairing_protocol,
+                                &device_name, &verifying_key_b64, &trust_data)?;
+
+                            if let Some(info) = active_transfers.lock().await.get_mut(&pid) {
+                                info.state = TransferState::Completed;
+                                info.peer_name = Some(device_name);
+                            }
+                        }
+                        _ => return Err("Réponse d'appairage invalide".to_string()),
+                    }
+
+                    Ok(())
+                }).await.unwrap_or_else(|_| Err("Délai d’appairage dépassé".into()));
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(error) if attempt == 4 => return Err(error),
+                    Err(error) => {
+                        eprintln!("[SYNC-PAIR] Échec de la négociation : {error}");
+                        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                     }
                 }
-                _ => return Err("Réponse d'appairage invalide".to_string()),
             }
-
-            Ok(())
+            unreachable!("The last pairing attempt returns a result")
         }.await;
 
         if let Err(e) = result {
@@ -1890,7 +1920,13 @@ pub async fn transfer_start_sync_pairing(
                 info.state = TransferState::Failed { reason: e };
             }
         }
+        let mut active = active_slot.lock().await;
+        if active.as_ref().is_some_and(|(id, _)| id == &pid) {
+            discovery.clear_offer().await;
+            active.take();
+        }
     });
+    *active_offer = Some((pairing_id.clone(), task));
 
     Ok(SyncPairingOffer {
         pairing_id,
@@ -1917,187 +1953,40 @@ pub async fn transfer_join_sync_pairing(
     // Vérifier l'authentification
     crate::validate_session(&state).await?;
 
-    let tm_guard = state.transfer_manager.lock().await;
-    let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
-
-    // Vérifier que le trust store est déverrouillé et obtenir notre clé ML-DSA
-    let (our_vk_b64, our_name) = {
+    let session_token = state.session_token.lock().await.clone();
+    let (discovery, our_vk_b64, our_name) = {
+        let guard = state.transfer_manager.lock().await;
+        let tm = guard.as_ref().ok_or("Module de transfert non initialisé")?;
         let store = tm.trust_store.lock().await;
         if !store.is_unlocked() {
-            return Err("Trust store non déverrouillé".to_string());
+            return Err("Registre de confiance verrouillé".into());
         }
-        (store.device_verifying_key_b64()?, tm.peer_name.clone())
+        (tm.discovery.clone(), store.device_verifying_key_b64()?, tm.peer_name.clone())
     };
-
-    // ── Parse wormhole code: extract IPv6 endpoint if present ──
-    let raw_code = wormhole_code.trim().to_string();
-    eprintln!("[SYNC-PAIR] Joiner: raw wormhole code = {}", raw_code);
-
-    let (spake_code, ipv6_endpoint) = if let Some(idx) = raw_code.find('@') {
-        let code_part = raw_code[..idx].to_string();
-        let endpoint_part = raw_code[idx + 1..].to_string();
-        let parsed = if endpoint_part.starts_with('[') {
-            if let Some(bracket_end) = endpoint_part.find(']') {
-                let ip = endpoint_part[1..bracket_end].to_string();
-                let port = endpoint_part.get(bracket_end + 2..)
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or(DEFAULT_TRANSFER_PORT);
-                Some((ip, port))
-            } else { None }
-        } else { None };
-        (code_part, parsed)
-    } else {
-        (raw_code.clone(), None)
+    let (code, endpoint) = parse_access_code(&wormhole_code)?;
+    let offer = receive_offer(&discovery, code, &our_name, OfferKind::Pairing,
+        endpoint.into_iter().collect()).await?;
+    let NegotiatedOffer {
+        mut connection, session: mut secure_session, pairing_protocol,
+        first_message: TransferMessage::SyncPairRequest {
+            device_name: initiator_device_name, verifying_key_b64: initiator_vk_b64, trust_data,
+        }, ..
+    } = offer else {
+        return Err("Requête d’appairage invalide".into());
     };
-
-    // ── Multi-strategy connection (same as C2) ──
-    let mut conn: Option<TransportConnection> = None;
-
-    // Strategy 1: Cross-network IPv6 from wormhole code
-    if conn.is_none() {
-        if let Some((ref ip, port)) = ipv6_endpoint {
-            let v6_peer = super::discovery::DiscoveredPeer {
-                name: "ipv6-endpoint".to_string(),
-                addr: ip.clone(),
-                port,
-                method: "IPv6-Direct".to_string(),
-                verified: false,
-            };
-            eprintln!("[SYNC-PAIR] Joiner: trying IPv6 {}:{}", ip, port);
-            match connect_to_peer(&v6_peer).await {
-                Ok(c) => { eprintln!("[SYNC-PAIR] Joiner: IPv6 connection OK!"); conn = Some(c); }
-                Err(e) => { eprintln!("[SYNC-PAIR] Joiner: IPv6 failed: {}", e); }
-            }
-        }
-    }
-
-    // Strategy 2: mDNS + link-local
-    if conn.is_none() {
-        if let Err(e) = tm.discovery.start_mdns_discovery().await {
-            eprintln!("[SYNC-PAIR] Joiner: start_mdns_discovery failed: {}", e);
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        let mut peers = tm.discovery.get_discovered_peers().await;
-        if let Ok(v6_peers) = tm.discovery.scan_ipv6_link_local().await {
-            peers.extend(v6_peers);
-        }
-        if !peers.is_empty() {
-            if let Ok(c) = establish_connection(&peers).await {
-                conn = Some(c);
-            }
-        }
-    }
-
-    // Strategy 3: Localhost fallback (same machine testing)
-    if conn.is_none() {
-        let localhost = super::discovery::DiscoveredPeer {
-            name: "localhost".to_string(),
-            addr: "127.0.0.1".to_string(),
-            port: DEFAULT_TRANSFER_PORT,
-            method: "Direct".to_string(),
-            verified: false,
-        };
-        if let Ok(c) = connect_to_peer(&localhost).await {
-            conn = Some(c);
-        }
-    }
-
-    // Strategy 4: Reverse connection — start our own listener, let initiator connect to us
-    if conn.is_none() {
-        if let Err(e) = tm.discovery.start_mdns_discovery().await {
-            eprintln!("[SYNC-PAIR] Joiner: start_mdns for reverse failed: {}", e);
-        }
-        let reverse_listener = match TransportListener::bind(DEFAULT_TRANSFER_PORT).await {
-            Ok(l) => l,
-            Err(_) => TransportListener::bind(0).await
-                .map_err(|e| format!("Reverse listener : {}", e))?,
-        };
-        let reverse_port = reverse_listener.local_port;
-        eprintln!("[SYNC-PAIR] Joiner: starting reverse listener on port {}", reverse_port);
-        if let Err(e) = tm.discovery.register_receiver_mdns(reverse_port).await {
-            eprintln!("[SYNC-PAIR] Joiner: register_receiver_mdns failed: {}", e);
-        }
-
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            reverse_listener.accept(),
-        ).await {
-            Ok(Ok(c)) => { eprintln!("[SYNC-PAIR] Joiner: initiator connected via reverse"); conn = Some(c); }
-            Ok(Err(e)) => { eprintln!("[SYNC-PAIR] Joiner: reverse accept error: {}", e); }
-            Err(_) => { eprintln!("[SYNC-PAIR] Joiner: reverse listener timeout (60s)"); }
-        }
-    }
-
-    let conn = conn.ok_or_else(|| {
-        if ipv6_endpoint.is_some() {
-            "Impossible de se connecter via IPv6. Vérifiez que l'autre appareil attend l'appairage.".to_string()
-        } else {
-            "Appareil introuvable. Vérifiez le code wormhole et que l'autre appareil attend l'appairage.".to_string()
-        }
-    })?;
-
-    let mut stream = conn.stream;
-    drop(tm_guard); // Release lock before long I/O
-
-    // ── Hello exchange (joiner sends first, then reads) ──
-    let hello = TransferMessage::Hello {
-        protocol_version: protocol::PROTOCOL_VERSION,
-        peer_name: our_name.clone(),
-        capabilities: vec!["pqc-kem".to_string(), "chacha20".to_string(), "sync-pair-v2".to_string()],
-    };
-    protocol::write_message(&mut stream, &hello).await?;
-
-    match protocol::read_message(&mut stream).await? {
-        TransferMessage::Hello { capabilities, protocol_version, .. }
-            if protocol_version == protocol::PROTOCOL_VERSION
-                && capabilities.iter().any(|c| c == "sync-pair-v2") => {}
-        _ => return Err("L’autre appareil doit utiliser la même version de FluXlock".into()),
-    }
-
-    let responder = handshake::HandshakeResponder::new(&spake_code)?;
-    let spake_msg = TransferMessage::SpakeMessage {
-        body: responder.spake_message().to_vec(),
-    };
-    protocol::write_message(&mut stream, &spake_msg).await?;
-
-    let initiator_spake = protocol::read_message(&mut stream).await?;
-    let initiator_spake_body = match initiator_spake {
-        TransferMessage::SpakeMessage { body } => body,
-        _ => return Err("Protocole invalide : message SPAKE2 attendu".to_string()),
-    };
-
-    let kem_msg = protocol::read_message(&mut stream).await?;
-    let ek_bytes = match kem_msg {
-        TransferMessage::KemEncapsulation { ek_bytes } => ek_bytes,
-        _ => return Err("Protocole invalide : KEM encapsulation attendue".to_string()),
-    };
-
-    let (result, ct_bytes) = responder.complete_handshake(&initiator_spake_body, &ek_bytes)?;
-    let kem_ct = TransferMessage::KemCiphertext { ct_bytes };
-    protocol::write_message(&mut stream, &kem_ct).await?;
-
-    let mut secure_session = SecureSession::new(result.session_key, false)?;
-
-    // ── Receive SyncPairRequest from initiator ──
-    let request = secure_session.recv_message(&mut stream).await?;
-    let (initiator_device_name, initiator_vk_b64, trust_data) = match request {
-        TransferMessage::SyncPairRequest { device_name, verifying_key_b64, trust_data } => {
-            (device_name, verifying_key_b64, trust_data)
-        }
-        _ => return Err("Protocole invalide : SyncPairRequest attendu".to_string()),
-    };
-
     crate::validate_session(&state).await?;
-    if *state.isolation_mode.lock().await {
+    if *state.isolation_mode.lock().await || *state.session_token.lock().await != session_token {
         return Err("Appairage annulé".into());
     }
     let local_export = {
         let tm_guard = state.transfer_manager.lock().await;
         let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
         let mut store = tm.trust_store.lock().await;
-        let export = store.export_for_sync()?;
-        store.pair_and_merge(&initiator_device_name, &initiator_vk_b64, &trust_data)?;
+        let export = match pairing_protocol {
+            PairingProtocol::SignedRegistry => store.export_for_sync()?,
+            PairingProtocol::Legacy => String::new(),
+        };
+        finish_pairing(&mut store, pairing_protocol, &initiator_device_name, &initiator_vk_b64, &trust_data)?;
         export
     };
 
@@ -2107,7 +1996,7 @@ pub async fn transfer_join_sync_pairing(
         accepted: true,
         trust_data: local_export,
     };
-    secure_session.send_message(&mut stream, &response).await?;
+    secure_session.send_message(&mut connection.stream, &response).await?;
 
     Ok(SyncPairingResult {
         success: true,
@@ -2117,3 +2006,13 @@ pub async fn transfer_join_sync_pairing(
 
 // ─────────────────────────────────────────────────────────
 // C18 : Auto-sync avec un pair appairé découvert sur le même réseau
+
+fn finish_pairing(
+    store: &mut TrustStore, protocol: PairingProtocol, name: &str, key: &str, trust_data: &str,
+) -> Result<(), String> {
+    match protocol {
+        PairingProtocol::SignedRegistry => store.pair_and_merge(name, key, trust_data).map(|_| ()),
+        PairingProtocol::Legacy if trust_data.is_empty() => store.pair_device(name, key),
+        PairingProtocol::Legacy => Err("Registre inattendu pour un appairage de première génération".into()),
+    }
+}
