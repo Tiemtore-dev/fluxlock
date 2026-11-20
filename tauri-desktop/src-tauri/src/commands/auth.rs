@@ -69,6 +69,13 @@ pub async fn init_local_db(
         .await
         .map_err(|e| format!("Erreur initialisation database: {}", e))?;
 
+    #[cfg(target_os = "macos")]
+    match db.get_vault_owner().await {
+        Ok(Some(owner)) => crate::secure_storage::remove_legacy_macos_session_key(owner.id),
+        Ok(None) => {}
+        Err(error) => debug_log!("Impossible de vérifier l’ancienne clé de session macOS : {error}"),
+    }
+
     *state.db.lock().await = Some(db);
     
     // Initialiser le Transfer Manager

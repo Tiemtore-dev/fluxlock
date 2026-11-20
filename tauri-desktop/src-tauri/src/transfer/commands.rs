@@ -481,9 +481,8 @@ mod transfer_limits_tests {
         };
         for (receiver_code, should_connect) in [(&wrong_code, false), (&code, true)] {
             let (sender, receiver) = tokio::time::timeout(Duration::from_secs(5), async {
-                let (sender, receiver) = tokio::join!(listener.accept(), connect_to_peer(&peer));
-                let mut sender = sender.unwrap();
-                let receiver = receiver.unwrap();
+                let (mut sender, receiver) = tokio::try_join!(listener.accept(), connect_to_peer(&peer))
+                    .expect("the IPv4 loopback client should complete TCP/TLS negotiation");
                 assert_eq!(sender.channel_binding, receiver.channel_binding);
                 let outgoing = async {
                     let (hello, mut session, number) =

@@ -51,16 +51,10 @@ impl TransportListener {
         let tls_config = generate_server_tls_config()?;
         let tls_acceptor = TlsAcceptor::from(tls_config);
 
-        // Tente d'écouter sur IPv6 d'abord (dual-stack), sinon IPv4
-        let addr = format!("[::]:{}", port);
-        let listener = match TcpListener::bind(&addr).await {
-            Ok(l) => l,
-            Err(_) => {
-                let addr4 = format!("0.0.0.0:{}", port);
-                TcpListener::bind(&addr4).await
-                    .map_err(|e| format!("Bind transport listener: {}", e))?
-            }
-        };
+        let listener = bind_dual_stack(port).or_else(|_| bind_ipv4(port))
+            .map_err(|error| format!("Ouverture du port de transfert : {error}"))?;
+        let listener = TcpListener::from_std(listener)
+            .map_err(|error| format!("Initialisation de l’écoute TCP : {error}"))?;
 
         let local_port = listener.local_addr()
             .map_err(|e| format!("Local addr: {}", e))?
@@ -126,6 +120,25 @@ impl TransportListener {
             }
         }
     }
+}
+
+fn bind_dual_stack(port: u16) -> std::io::Result<std::net::TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6, socket2::Type::STREAM, Some(socket2::Protocol::TCP),
+    )?;
+    // Winsock creates IPv6-only sockets by default. Configure this before bind.
+    socket.set_only_v6(false)?;
+    let address = SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, port, 0, 0);
+    socket.bind(&SocketAddr::V6(address).into())?;
+    socket.set_nonblocking(true)?;
+    socket.listen(128)?;
+    Ok(socket.into())
+}
+
+fn bind_ipv4(port: u16) -> std::io::Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
 }
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);

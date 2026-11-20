@@ -1,16 +1,17 @@
 use crate::AppState;
 use crate::secure_cleanup_decrypted_files;
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 use crate::secure_storage;
 use tauri::State;
 
 pub(crate) async fn clear_session_key(state: &AppState, user_id: i64) {
     state.vault_key_cache.lock().await.invalidate();
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
     {
         let _ = user_id;
-        state.mobile_session_key.lock().await.take();
+        state.in_memory_session_key.lock().await.take();
     }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
     if let Err(error) = secure_storage::delete_encryption_key(user_id) {
         debug_log!("Erreur de suppression de la clé de session : {}", error);
     }

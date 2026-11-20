@@ -132,8 +132,16 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
         run: |
-          python3 scripts/macos-signing.py prepare "$RUNNER_TEMP/fluxlock-macos"
-          echo "args=--config $RUNNER_TEMP/fluxlock-macos/config.json" >> "$GITHUB_OUTPUT"
+          signing_dir="$RUNNER_TEMP/fluxlock-macos"
+          if [[ -z "$APPLE_CERTIFICATE" && -z "$APPLE_SIGNING_IDENTITY" && -z "$APPLE_PROVISIONING_PROFILE" ]]; then
+            mkdir -p "$signing_dir"
+            echo '{"bundle":{"macOS":{"signingIdentity":"-"}}}' > "$signing_dir/config.json"
+            echo "mode=compatibility" >> "$GITHUB_OUTPUT"
+          else
+            python3 scripts/macos-signing.py prepare "$signing_dir"
+            echo "mode=developer-id" >> "$GITHUB_OUTPUT"
+          fi
+          echo "args=--config $signing_dir/config.json" >> "$GITHUB_OUTPUT"
 
       - name: Build Tauri app (release interne)
         uses: tauri-apps/tauri-action@v0
@@ -158,8 +166,15 @@ jobs:
 
       - name: Vérifier le paquet macOS signé
         if: matrix.platform == 'macos-latest'
+        env:
+          SIGNING_MODE: ${{ steps.macos-signing.outputs.mode }}
         run: |
-          python3 scripts/macos-signing.py verify "tauri-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/FluXlock.app"
+          app="tauri-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/FluXlock.app"
+          case "$SIGNING_MODE" in
+            developer-id) python3 scripts/macos-signing.py verify "$app" ;;
+            compatibility) codesign --verify --deep --strict "$app" ;;
+            *) echo "::error::Mode de signature macOS inconnu"; exit 1 ;;
+          esac
 
   # ──────────────────────────────────────────────────────────
   # ÉTAPE 1b — APK Android (signé, utilisé par la mise à jour in-app)

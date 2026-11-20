@@ -1,16 +1,10 @@
-/// Module pour le stockage sécurisé des clés de chiffrement via le credential store OS
-///
-/// Utilise:
-/// - macOS: Keychain (protégé par hardware si Secure Enclave T2/M1+ disponible)
-/// - Windows: Credential Manager (protégé par DPAPI, chiffrement logiciel lié au compte Windows)
-/// - Linux: Secret Service (libsecret)
-///
-/// ⚠️ Sur Windows, ce n'est PAS un stockage hardware (TPM/Secure Enclave).
-///    Pour un vrai stockage hardware, il faudrait Windows Hello / CNG + TPM 2.0.
-///    Le Credential Manager reste néanmoins le standard recommandé pour les apps desktop.
+//! Clés de session persistées dans le gestionnaire d’identifiants sur Windows et Linux.
+//! Sur macOS, l’ancien enregistrement de session est uniquement supprimé.
 
 use keyring::{Entry, Error as KeyringError};
+#[cfg(any(test, not(target_os = "macos")))]
 use base64::{Engine as _, engine::general_purpose};
+#[cfg(any(test, not(target_os = "macos")))]
 use zeroize::Zeroize;
 #[cfg(target_os = "windows")]
 use std::{thread, time::Duration};
@@ -52,20 +46,8 @@ impl From<KeyringError> for SecureStorageError {
     }
 }
 
-/// Stocke la clé de chiffrement dans l'enclave sécurisée du système
-///
-/// Sur macOS, cela utilise le Keychain qui peut utiliser le Secure Enclave
-/// si disponible (T2/M1/M2 chips). La clé est protégée par hardware.
-///
-/// # Arguments
-/// * `user_id` - L'ID utilisateur (utilisé comme identifiant unique)
-/// * `encryption_key` - La clé de chiffrement AES-256 (32 bytes)
-///
-/// # Sécurité
-/// - Clé protégée par le système d'exploitation
-/// - Accès contrôlé par permissions système
-/// - Chiffrement hardware si disponible (Secure Enclave)
-/// - Pas de stockage en RAM non protégée
+/// Stocke la clé de session dans le gestionnaire d’identifiants de la plateforme.
+#[cfg(any(test, not(target_os = "macos")))]
 pub fn store_encryption_key(user_id: i64, encryption_key: &[u8]) -> Result<(), SecureStorageError> {
     let username = format!("user_{}", user_id);
     let entry = Entry::new(service_name(crate::hidden_storage::TEST_BUILD), &username)?;
@@ -83,6 +65,7 @@ pub fn store_encryption_key(user_id: i64, encryption_key: &[u8]) -> Result<(), S
 }
 
 /// Implémentation interne du stockage (platform-specific)
+#[cfg(any(test, not(target_os = "macos")))]
 fn _store_key_b64(entry: &Entry, key_b64: &str) -> Result<(), SecureStorageError> {
     
     // Sur Windows, il est parfois préférable de supprimer l'entrée existante avant d'en créer une nouvelle
@@ -132,21 +115,7 @@ fn _store_key_b64(entry: &Entry, key_b64: &str) -> Result<(), SecureStorageError
     Ok(())
 }
 
-/// Récupère la clé de chiffrement depuis l'enclave sécurisée
-/// Récupère la clé de chiffrement depuis l'enclave sécurisée (VERSION SÉCURISÉE)
-///
-/// ⚠️ UTILISER CETTE VERSION pour protéger la clé en mémoire
-///
-/// # Arguments
-/// * `user_id` - L'ID utilisateur
-///
-/// # Returns
-/// SecureKey avec zeroization automatique
-///
-/// # Sécurité
-/// - Clé protégée par ZeroizeOnDrop
-/// - Mémoire effacée automatiquement
-/// - Protection contre memory dumps
+#[cfg(any(test, not(target_os = "macos")))]
 use crate::secure_key::SecureKey;
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -159,6 +128,8 @@ pub(crate) fn remove_legacy_session_key(dir: &std::path::Path, user_id: i64) {
     }
 }
 
+/// Récupère une clé de session dans un tampon effacé après utilisation.
+#[cfg(any(test, not(target_os = "macos")))]
 pub fn retrieve_encryption_key_secure(user_id: i64) -> Result<SecureKey, SecureStorageError> {
     let username = format!("user_{}", user_id);
     let entry = Entry::new(service_name(crate::hidden_storage::TEST_BUILD), &username)?;
@@ -182,16 +153,21 @@ pub fn retrieve_encryption_key_secure(user_id: i64) -> Result<SecureKey, SecureS
     Ok(SecureKey::new(key))
 }
 
-/// Supprime la clé de chiffrement de l'enclave sécurisée
-///
-/// À utiliser lors de la déconnexion pour garantir que la clé ne reste pas stockée
+#[cfg(target_os = "macos")]
+pub(crate) fn remove_legacy_macos_session_key(user_id: i64) {
+    if let Err(error) = delete_encryption_key(user_id) {
+        eprintln!("Impossible de supprimer l’ancienne clé de session macOS du trousseau : {error}");
+    }
+}
+
+/// Supprime l’entrée de session du gestionnaire d’identifiants.
 pub fn delete_encryption_key(user_id: i64) -> Result<(), SecureStorageError> {
     let username = format!("user_{}", user_id);
     let entry = Entry::new(service_name(crate::hidden_storage::TEST_BUILD), &username)?;
     
     match entry.delete_password() {
         Ok(_) => {
-            debug_log!("🗑️ Clé de chiffrement supprimée de l'enclave sécurisée");
+            debug_log!("Clé de session supprimée du gestionnaire d’identifiants");
             Ok(())
         },
         Err(keyring::Error::NoEntry) => {
@@ -216,18 +192,12 @@ pub struct EnclaveStatus {
 pub fn get_enclave_status_info() -> EnclaveStatus {
     #[cfg(target_os = "macos")]
     {
-        // macOS utilise le Keychain via la crate keyring.
-        // Les attributs kSecAttr ne sont pas configurés explicitement — 
-        // la crate keyring utilise les défauts de SecItemAdd.
-        // TODO: Migrer vers security-framework pour configurer :
-        //   kSecAttrAccessible = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        //   kSecAttrSynchronizable = false
         EnclaveStatus {
             platform: "macOS".to_string(),
-            enclave_type: "Keychain (keyring crate)".to_string(),
+            enclave_type: "Mémoire de session".to_string(),
             hardware_backed: false,
-            sync_disabled: false, // Non garanti — défaut iCloud Keychain peut sync
-            notes: "Keychain via défauts keyring. Migration vers security-framework recommandée pour contrôle kSecAttr.".to_string(),
+            sync_disabled: true,
+            notes: "La clé de session est effacée au verrouillage. Touch ID conserve une entrée d’enrôlement distincte.".to_string(),
         }
     }
     #[cfg(target_os = "windows")]
@@ -307,9 +277,12 @@ mod tests {
         let retrieved = retrieve_encryption_key_secure(user_id).unwrap();
         assert_eq!(&*retrieved.to_vec(), &test_key[..]);
         
-        // Cleanup
-        let _ = delete_encryption_key(user_id);
-        
-        println!("✅ Test de stockage/récupération de clé réussi");
+        #[cfg(target_os = "macos")]
+        remove_legacy_macos_session_key(user_id);
+        #[cfg(not(target_os = "macos"))]
+        delete_encryption_key(user_id).unwrap();
+
+        let entry = Entry::new(service_name(crate::hidden_storage::TEST_BUILD), &format!("user_{user_id}")).unwrap();
+        assert!(matches!(entry.get_password(), Err(KeyringError::NoEntry)));
     }
 }

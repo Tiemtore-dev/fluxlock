@@ -349,6 +349,8 @@ Après une migration depuis une ancienne version macOS, une restauration ou une 
 
 Sur un Mac compatible qui utilise un paquet sans profil Apple, ouvrez **Paramètres → Biométrie → Activer Touch ID en mode compatibilité**, puis confirmez avec votre mot de passe maître et votre empreinte.
 
+Sur macOS, la clé qui sert aux opérations du coffre reste en mémoire pendant la session. Le verrouillage l’efface. Le trousseau conserve l’entrée d’enrôlement Touch ID pour le prochain déverrouillage.
+
 ### Synchronisation entre appareils
 
 Dans **Transferts → Appareils**, créez un code d’appairage sur le premier appareil, puis saisissez-le sur le second. Les appareils compatibles échangent leurs listes signées de pairs de confiance au moment du jumelage.

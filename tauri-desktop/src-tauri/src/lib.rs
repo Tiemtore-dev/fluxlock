@@ -80,7 +80,7 @@ pub fn generate_random_key_bytes() -> Vec<u8> {
     key
 }
 
-/// Garde la clé du coffre en mémoire pendant la session sur mobile.
+/// Ouvre le stockage de clé local à la session.
 pub(crate) async fn store_session_key(
     state: &AppState,
     user_id: i64,
@@ -94,12 +94,20 @@ pub(crate) async fn store_session_key(
         if let Ok(dir) = hidden_storage::get_hidden_database_dir() {
             secure_storage::remove_legacy_session_key(&dir, user_id);
         }
-        *state.mobile_session_key.lock().await =
-            Some((user_id, key.use_key(|bytes| Ok::<_, String>(secure_key::SecureKey::from_slice(bytes)))?));
+    }
+
+    #[cfg(target_os = "macos")]
+    secure_storage::remove_legacy_macos_session_key(user_id);
+
+    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+    {
+        *state.in_memory_session_key.lock().await = Some((user_id,
+            key.use_key(|bytes| Ok::<_, String>(secure_key::SecureKey::from_slice(bytes)))?,
+        ));
         Ok(())
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
     {
         key.use_key(|bytes| secure_storage::store_encryption_key(user_id, bytes))
             .map_err(|e| format!("Erreur stockage clé sécurisée: {e}"))?;
@@ -115,9 +123,9 @@ pub async fn get_or_fetch_vault_key(state: &AppState, user_id: i64) -> Result<se
         return Err("Session invalide".into());
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
     {
-        let key = state.mobile_session_key.lock().await;
+        let key = state.in_memory_session_key.lock().await;
         return match key.as_ref() {
             Some((owner, key)) if *owner == user_id => key.use_key(|bytes| {
                 Ok(secure_key::SecureKey::from_slice(bytes))
@@ -126,7 +134,7 @@ pub async fn get_or_fetch_vault_key(state: &AppState, user_id: i64) -> Result<se
         };
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
     {
         if state.cache_enabled {
             if let Some(key) = state.vault_key_cache.lock().await.get(user_id) {
@@ -170,8 +178,8 @@ pub struct AppState {
     pub vault_key_cache: Arc<Mutex<VaultKeyCache>>,
     /// Cache activé ou non (configurable via UTILISATION_CACHE)
     pub cache_enabled: bool,
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    pub mobile_session_key: Mutex<Option<(i64, secure_key::SecureKey)>>,
+    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+    pub in_memory_session_key: Mutex<Option<(i64, secure_key::SecureKey)>>,
 }
 
 // Structures pour les requêtes
@@ -401,8 +409,8 @@ pub fn run() {
             config.cache_mask_rotation_secs,
         ))),
         cache_enabled: config.cache_enabled,
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        mobile_session_key: Mutex::new(None),
+        #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+        in_memory_session_key: Mutex::new(None),
     };
 
     let builder = tauri::Builder::default()
