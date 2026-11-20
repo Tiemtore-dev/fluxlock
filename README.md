@@ -17,17 +17,8 @@
 FluXlock fonctionne sur **macOS, Windows, Linux et Android**. Vous déverrouillez votre coffre avec un mot de passe maître. Les données sont chiffrées sur l’appareil. Pour passer d’un appareil à l’autre, vous pouvez restaurer une sauvegarde ou lancer un transfert chiffré sur votre réseau local.
 
 <p align="center">
-  <img src="docs/images/dashboard-screenshot.png" width="900" alt="Vue d’ensemble de FluXlock en mode sombre sur ordinateur, avec le nombre de mots de passe, de fichiers et de clés, et les raccourcis vers les transferts, les sauvegardes et la sécurité">
+  <img src="docs/images/fluxlock-bureau-2.3.png" width="900" alt="Vue d’ensemble de FluXlock 2.3 sur ordinateur, avec le nombre de mots de passe, de fichiers et de clés, et les raccourcis vers les transferts, les sauvegardes et la sécurité">
 </p>
-
-<details>
-<summary>Voir la vue d’ensemble sur mobile</summary>
-
-<br>
-
-<img src="docs/images/dashboard-mobile.png" width="300" alt="Vue mobile de FluXlock en mode clair, avec les catégories du coffre et la barre de navigation en bas">
-
-</details>
 
 ## Installation
 
