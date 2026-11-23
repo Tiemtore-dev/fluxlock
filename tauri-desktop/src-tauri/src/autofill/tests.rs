@@ -178,6 +178,11 @@ async fn fixture() -> Fixture {
         document_id: "document-one".into(),
         nonce: token(),
     };
+    // Deliberately put the second account first. Listing is ordered by update
+    // time, not insertion; crossing a second on a busy runner exposed tests
+    // that selected entries[0] but asserted the first-created account's secret.
+    sqlx::query("UPDATE passwords SET updated_at = CASE WHEN id = 1 THEN '2020-01-01 00:00:00' ELSE '2021-01-01 00:00:00' END")
+        .execute(&db.pool).await.unwrap();
     let candidates = candidates(db, &key, user, &target.origin).await.unwrap();
     drop(guard);
     let peer = hex::encode(fluxlock_autofill_protocol::public_identity(&[1; 64]));
@@ -232,6 +237,16 @@ async fn call(
     let plain = fluxlock_autofill_protocol::decrypt(client, &reply.frame)?;
     serde_json::from_slice(&plain).map_err(|e| e.to_string())
 }
+fn account_handle<'a>(list: &'a serde_json::Value, username: &str) -> &'a str {
+    list["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["username"] == username)
+        .expect("expected exact-site test account")["handle"]
+        .as_str()
+        .unwrap()
+}
 #[tokio::test]
 async fn exact_site_list_has_no_password_and_selection_consumes_all_handles_before_delivery() {
     let f = fixture().await;
@@ -249,7 +264,9 @@ async fn exact_site_list_has_no_password_and_selection_consumes_all_handles_befo
     assert!(!serialized.contains("SECRET"));
     assert!(!serialized.contains("evil@example"));
     assert!(!serialized.contains("password"));
-    let handle = list["entries"][0]["handle"].as_str().unwrap();
+    let handle = account_handle(&list, "one@example.test");
+    let other_handle = account_handle(&list, "two@example.test");
+    assert_ne!(list["entries"][0]["handle"], handle);
     let reply=call(&f,serde_json::json!({"op":"select_and_fill","request_id":f.request,"handle":handle,"target":f.target}),&mut client,&mut server).await.unwrap();
     assert_eq!(reply["state"], "fill_once");
     assert_eq!(reply["username"], "one@example.test");
@@ -260,7 +277,7 @@ async fn exact_site_list_has_no_password_and_selection_consumes_all_handles_befo
     assert!(state.vault_session.lock().await.is_none());
     assert!(state.session_token.lock().await.is_none());
     assert!(!state.autofill.busy.load(Ordering::SeqCst));
-    assert!(call(&f,serde_json::json!({"op":"select_and_fill","request_id":f.request,"handle":list["entries"][1]["handle"],"target":f.target}),&mut client,&mut server).await.is_err());
+    assert!(call(&f,serde_json::json!({"op":"select_and_fill","request_id":f.request,"handle":other_handle,"target":f.target}),&mut client,&mut server).await.is_err());
 }
 #[tokio::test]
 async fn no_auth_no_list_and_different_document_cannot_consume() {
@@ -320,14 +337,28 @@ async fn changed_record_and_expired_handle_fail_closed() {
     .await
     .unwrap();
     let state = f.app.state::<AppState>();
+    let handle = account_handle(&list, "one@example.test");
+    let row_id = state
+        .autofill
+        .pending
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .candidates
+        .iter()
+        .find(|candidate| candidate.handle == handle)
+        .unwrap()
+        .id;
     {
         let guard = state.db.lock().await;
-        sqlx::query("UPDATE passwords SET password='changed' WHERE id=1")
+        sqlx::query("UPDATE passwords SET password='changed' WHERE id=?")
+            .bind(row_id)
             .execute(&guard.as_ref().unwrap().pool)
             .await
             .unwrap();
     }
-    assert!(call(&f,serde_json::json!({"op":"select_and_fill","request_id":f.request,"handle":list["entries"][0]["handle"],"target":f.target}),&mut client,&mut server).await.is_err());
+    assert!(call(&f,serde_json::json!({"op":"select_and_fill","request_id":f.request,"handle":handle,"target":f.target}),&mut client,&mut server).await.is_err());
     assert!(state.autofill.pending.lock().await.is_none());
     assert!(!state.autofill.busy.load(Ordering::SeqCst));
     assert!(owned(&None, "connection", "id", "vault").is_err());

@@ -33,6 +33,8 @@ La première exécution a réussi pour le coffre Linux, le noyau crypto et l’e
 
 Le diagnostic suivant a isolé un débordement de 322 px pour un viewport de 320 px dans `details#connection` et son `summary`. Le bloc d’aide et son résumé sont désormais bornés à la largeur disponible et peuvent se réduire. Le test à 200 % contrôle explicitement l’aide ouverte/fermée, avec la police système et une police monospace plus large.
 
+Après correction du manifeste, Windows a effectivement exécuté les tests : 154 ont réussi et un test de sélection a révélé une hypothèse incorrecte de la fixture. Le test sélectionnait le premier handle, puis attendait le mot de passe du premier compte créé ; la liste est triée par date de modification, donc ces comptes peuvent différer. La sélection et le test de fiche modifiée recherchent désormais le compte attendu par son username et son handle. La fixture impose des dates distinctes pour que le compte choisi ne soit pas en première position ; le contrôle des handles consommés et des mots de passe exclus est conservé.
+
 Les deux jobs macOS de l’application étaient en file d’attente sur `macos-15`, sans runner attribué ni étape exécutée. Ils utilisent désormais `macos-latest`, comme le job d’extension macOS qui avait réussi (image macOS 26 ARM64 dans cette exécution). Les cibles de compilation ARM64 et Intel sont conservées, y compris pour les relais de release.
 
 Ces corrections doivent être confirmées par la nouvelle exécution de CI ; un résultat local ne remplace pas ce contrôle distant.
