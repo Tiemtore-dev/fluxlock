@@ -1,134 +1,78 @@
-import { useState, useEffect } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
-import { Lock, Mail, User, AlertTriangle, UserPlus, Eye, EyeOff } from 'lucide-react'
-import { auth } from '../lib/vault-service'
+import { useState, type FormEvent } from 'react'
+import { useNavigate, Link, useSearchParams } from 'react-router-dom'
+import { Lock, Mail, User, Archive, Plus, Eye, EyeOff } from 'lucide-react'
+import { auth, vaults } from '../lib/vault-service'
 import { useAuthStore } from '../stores/authStore'
-import { Button, Input, Spinner } from '../design-system/atoms'
+import { Button, Input } from '../design-system/atoms'
 import { PasswordStrength } from '../design-system/molecules'
 
 export default function RegisterPage() {
   const navigate = useNavigate()
-  const setAuth = useAuthStore((state) => state.setAuth)
-  const dbReady = useAuthStore((state) => state.dbReady)
-
+  const [params] = useSearchParams()
+  const selectedVault = useAuthStore((state) => state.selectedVault)
+  const configure = params.get('configure') === '1' && !!selectedVault
+  const { setAuth, setSelectedVault, dbReady, locking } = useAuthStore()
+  const [name, setName] = useState(configure ? selectedVault?.name || '' : '')
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
-  const [showPassword, setShowPassword] = useState(false)
-  const [showConfirm, setShowConfirm] = useState(false)
-  const [hasUser, setHasUser] = useState(false)
-  const [checkingUser, setCheckingUser] = useState(true)
+  const [pending, setPending] = useState(false)
+  const [visible, setVisible] = useState(false)
 
-  useEffect(() => {
-    if (!dbReady) return
-    let active = true
-    auth.hasExistingUser().then((exists) => {
-      if (!active) return
-      setHasUser(exists)
-      setCheckingUser(false)
-    }).catch(() => {
-      if (active) setError('Le coffre est indisponible. Redémarrez FluXlock pour réessayer.')
-    })
-    return () => { active = false }
-  }, [dbReady])
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (pending || locking || !dbReady) return
     setError('')
     if (password !== confirmPassword) { setError('Les mots de passe ne correspondent pas'); return }
     if (Array.from(password).length < 12) { setError('Le mot de passe doit contenir au moins 12 caractères'); return }
-
-    setIsLoading(true)
+    setPending(true)
     try {
-      const res = await auth.register(username, email, password)
-      if (res.success && res.token) {
-        setAuth({ id: res.user_id?.toString() || '1', username: res.username || username, email })
-        navigate('/')
-      } else {
-        setError(res.message || "Erreur lors de l'inscription")
+      const result = configure && selectedVault
+        ? { vault: selectedVault, auth: await auth.register(username, email, password) }
+        : await vaults.create({ name, username, email, password })
+      const response = result.auth
+      if (!response.success || !response.token || response.user_id == null || !response.username) {
+        throw new Error(response.message || 'Impossible de créer le coffre')
       }
-    } catch (err: any) {
-      setError(typeof err === "string" ? err : err.message || "Erreur lors de l'inscription")
-    } finally {
-      setIsLoading(false)
-    }
+      setSelectedVault(result.vault)
+      setAuth({ id: String(response.user_id), username: response.username, email: response.email || '' }, response.token)
+      navigate('/', { replace: true })
+    } catch (reason) { setError(String(reason instanceof Error ? reason.message : reason)) }
+    finally { setPassword(''); setConfirmPassword(''); setVisible(false); setPending(false) }
   }
 
-  return (
-    <div className="auth-page">
-      <div className="auth-page-inner animate-fade-in" style={{ maxWidth: 400 }}>
-        <div className="auth-card auth-unlock">
-          <div className="auth-brand"><img src="/fluxlock-mark.png" alt="" width={52} height={52} />FluXlock</div>
-          <h1>Créer votre coffre</h1>
-          {checkingUser && error ? <p className="auth-error" role="alert">{error}</p> : checkingUser ? (
-            <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-10)' }}>
-              <Spinner size={32} />
-            </div>
-          ) : hasUser ? (
-            <div>
-              <div style={{
-                padding: 'var(--space-5)', borderRadius: 'var(--radius-lg)',
-                background: 'var(--warning-muted)', border: '1px solid var(--warning)',
-                display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-5)',
-              }}>
-                <AlertTriangle size={20} style={{ color: 'var(--warning)', flexShrink: 0, marginTop: 2 }} />
-                <div>
-                  <p style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>
-                    Appareil déjà enregistré
-                  </p>
-                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-2)' }}>
-                    Cet appareil possède déjà un compte. Chaque appareil ne peut avoir qu'un seul utilisateur.
-                  </p>
-                </div>
-              </div>
-              <Link to="/login" style={{ textDecoration: 'none' }}>
-                <Button fullWidth>Retour à la connexion</Button>
-              </Link>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-              <Input label="Nom d'utilisateur" icon={User} value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required autoFocus />
-              <Input label="Email" type="email" icon={Mail} value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
-              <div>
-                <Input label="Mot de passe" type={showPassword ? 'text' : 'password'} icon={Lock} iconRight={showPassword ? EyeOff : Eye} onIconRightClick={() => setShowPassword((v) => !v)} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" required />
-                <div style={{ marginTop: 'var(--space-2)' }}>
-                  <PasswordStrength password={password} />
-                </div>
-                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', marginTop: 'var(--space-1)' }}>
-                  Minimum 12 caractères
-                </p>
-              </div>
-              <Input label="Confirmer le mot de passe" type={showConfirm ? 'text' : 'password'} icon={Lock} iconRight={showConfirm ? EyeOff : Eye} onIconRightClick={() => setShowConfirm((v) => !v)} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} autoComplete="new-password" required />
-
-              {error && (
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
-                  padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
-                  background: 'var(--danger-muted)', border: '1px solid var(--danger)',
-                  fontSize: 'var(--text-sm)', color: 'var(--danger)', fontFamily: 'var(--font-body)',
-                }}>
-                  <AlertTriangle size={16} />
-                  {error}
-                </div>
-              )}
-
-              <Button type="submit" fullWidth size="lg" loading={isLoading} icon={UserPlus}>
-                S'inscrire
-              </Button>
-            </form>
-          )}
-
-          {!checkingUser && !hasUser && (
-            <p style={{ textAlign: 'center', marginTop: 'var(--space-5)', fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
-              Vous avez déjà un compte ?{' '}
-              <Link to="/login" style={{ color: 'var(--accent-text)', fontWeight: 500, textDecoration: 'none' }}>Se connecter</Link>
-            </p>
-          )}
-        </div>
+  return <main className="auth-page">
+    <div className="auth-page-inner">
+      <div className="auth-unlock auth-card">
+        <div className="auth-brand"><img src="/fluxlock-mark.png" alt="" width={52} height={52} />FluXlock</div>
+        <h1>Créer votre coffre</h1>
+        <p className="auth-notice">Chaque coffre possède son propre mot de passe maître. Un seul coffre peut être déverrouillé à la fois.</p>
+        <form onSubmit={submit} className="workspace-stack">
+          <Input label="Nom du coffre" icon={Archive} value={name} onChange={(event) => setName(event.target.value)}
+            maxLength={80} placeholder="Personnel, Travail…" autoComplete="off" required autoFocus disabled={pending || locking || configure} />
+          <p className="auth-notice">Ce nom est visible dans la liste des coffres verrouillés.</p>
+          <Input label="Nom d’utilisateur" icon={User} value={username} onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username" maxLength={256} required disabled={pending || locking} />
+          <Input label="Email" type="email" icon={Mail} value={email} onChange={(event) => setEmail(event.target.value)}
+            autoComplete="email" maxLength={320} required disabled={pending || locking} />
+          <div>
+            <Input label="Mot de passe maître" type={visible ? 'text' : 'password'} icon={Lock}
+              iconRight={visible ? EyeOff : Eye} onIconRightClick={() => setVisible(!visible)}
+              iconRightLabel={visible ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+              value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password"
+              required disabled={pending || locking} />
+            <PasswordStrength password={password} />
+            <p className="auth-notice">Minimum 12 caractères.</p>
+          </div>
+          <Input label="Confirmer le mot de passe" type="password" icon={Lock} value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required disabled={pending || locking} />
+          {error && <p className="auth-error" role="alert">{error}</p>}
+          <Button type="submit" fullWidth size="lg" loading={pending} disabled={!dbReady || locking || pending} icon={Plus}>Créer le coffre</Button>
+        </form>
+        {!pending && <Link className="auth-primary-link" to="/login">Retour aux coffres</Link>}
       </div>
     </div>
-  )
+  </main>
 }

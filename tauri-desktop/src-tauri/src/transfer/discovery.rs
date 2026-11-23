@@ -53,6 +53,7 @@ struct LanPeer {
 /// Service de découverte réseau.
 #[derive(Clone)]
 pub struct DiscoveryService {
+    tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     peers: Arc<Mutex<HashMap<String, MdnsPeer>>>,
     lan_peers: Arc<Mutex<HashMap<String, LanPeer>>>,
     offer_port: Arc<AtomicU16>,
@@ -72,6 +73,7 @@ pub struct DiscoveryService {
 impl DiscoveryService {
     pub fn new(instance_name: &str, visible: Arc<Mutex<bool>>) -> Self {
         Self {
+            tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
             peers: Arc::new(Mutex::new(HashMap::new())),
             lan_peers: Arc::new(Mutex::new(HashMap::new())),
             offer_port: Arc::new(AtomicU16::new(0)),
@@ -96,6 +98,25 @@ impl DiscoveryService {
     /// Returns whether discovery has already been started
     pub async fn is_started(&self) -> bool {
         *self.discovery_started.lock().await
+    }
+
+    /// Stop all listeners, advertisements and cached peer identities on vault lock.
+    pub(crate) async fn stop(&self) {
+        let mut started = self.discovery_started.lock().await;
+        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(|e| e.into_inner()));
+        for task in &tasks { task.abort(); }
+        for task in tasks { let _ = task.await; }
+        if let Some(daemon) = self.mdns_daemon.lock().await.take() {
+            if let Ok(status) = daemon.shutdown() {
+                let _ = tokio::time::timeout(Duration::from_secs(1), status.recv_async()).await;
+            }
+        }
+        self.offer_port.store(0, Ordering::Relaxed);
+        self.sync_port.store(0, Ordering::Relaxed);
+        self.peers.lock().await.clear();
+        self.lan_peers.lock().await.clear();
+        self.set_trust_info(None, Vec::new()).await;
+        *started = false;
     }
 
     /// Lance la découverte mDNS en arrière-plan (idempotent)
@@ -138,7 +159,7 @@ impl DiscoveryService {
         let peers = self.peers.clone();
         let own_instance = format!("{}.{service}", self.service_instance);
         let suffix = format!(".{service}");
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             while let Ok(event) = receiver.recv_async().await {
                 match event {
                     mdns_sd::ServiceEvent::ServiceResolved(info) => {
@@ -159,6 +180,7 @@ impl DiscoveryService {
                 }
             }
         });
+        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).push(task);
     }
 
     /// UDP broadcast beacon — reliable P2P discovery on the LAN.
@@ -244,7 +266,7 @@ impl DiscoveryService {
         let name_tx = own_name.clone();
         let visible_flag = self.visible.clone();
         let device_fp = self.device_fingerprint.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut send_error_count: u32 = 0;
             loop {
                 let transfer_port = offer_port.load(Ordering::Relaxed);
@@ -269,11 +291,12 @@ impl DiscoveryService {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         });
+        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).push(task);
 
         // ── Listen task: receive announcements from other devices ──
         let own_ips_rx = own_ips;
         let trusted_fps = self.trusted_fingerprints.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut buf = [0u8; 512];
             loop {
                 match socket.recv_from(&mut buf).await {
@@ -330,6 +353,7 @@ impl DiscoveryService {
                 }
             }
         });
+        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).push(task);
     }
 
     pub async fn advertise_offer(&self, port: u16) -> Result<(), String> {

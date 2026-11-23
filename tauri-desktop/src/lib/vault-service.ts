@@ -2,7 +2,7 @@
  * VaultService — typed abstraction over Tauri IPC calls.
  * All frontend components consume this service instead of invoking Tauri directly.
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './vault-context'
 
 /** VULN-020: Max length limits for user-supplied string fields */
 const FIELD_MAX_LENGTHS: Record<string, number> = {
@@ -143,7 +143,7 @@ export const auth = {
       credentials: { password },
     }),
 
-  logout: () => invoke('local_logout').catch(() => {}),
+  logout: () => invoke<void>('local_logout'),
 
   checkLoginDelay: () => invoke<number>('check_login_delay'),
 }
@@ -326,6 +326,27 @@ export const csvIO = {
 }
 
 /* ─── Secure Files ─── */
+
+export interface NoteAttachment { id: number; filename: string; file_size: number }
+export interface NoteSummary {
+  id: number; title: string; revision: number; has_attachment: boolean; created_at: string; updated_at: string
+}
+export interface NoteDetail {
+  id: number; title: string; body: string; revision: number; attachment: NoteAttachment | null
+}
+export interface NotePage { items: NoteSummary[]; total: number }
+export interface NotePayload {
+  id?: number; revision?: number; title: string; body: string;
+  attachment_file_id?: number; attachment_path?: string; attachment_name?: string; attachment_data?: string
+}
+export const notes = {
+  list: (search = '', offset = 0, limit = 50) => invoke<NotePage>('list_notes', { search, offset, limit }),
+  get: (id: number) => invoke<NoteDetail>('get_note', { id }),
+  save: (request: NotePayload) => invoke<number>('save_note', { request }),
+  delete: (id: number, revision: number) => invoke<void>('delete_note', { id, revision }),
+  exportAttachment: (id: number, revision: number, outputPath?: string) =>
+    invoke<string>('export_note_attachment', { id, revision, outputPath }),
+}
 
 export const files = {
   list: () => invoke<SecureFile[]>('get_secure_files').catch((e) => {
@@ -570,4 +591,22 @@ export const transfer = {
   joinSyncPairing: (wormholeCode: string) =>
     invoke<SyncPairingResult>('transfer_join_sync_pairing', { wormholeCode }),
 
+}
+
+
+export type { VaultDescriptor } from './vault-context'
+import type { VaultDescriptor } from './vault-context'
+
+export interface VaultOverview {
+  vaults: VaultDescriptor[]
+  selected_vault_id: string | null
+  unlocked_vault_id: string | null
+}
+
+export const vaults = {
+  list: () => invoke<VaultOverview>('list_vaults'),
+  select: (vaultId: string) => invoke<VaultDescriptor>('select_vault', { vaultId }),
+  create: (request: { name: string; username: string; email: string; password: string }) =>
+    invoke<{ vault: VaultDescriptor; auth: AuthResponse }>('create_vault', { request }),
+  rename: (name: string) => invoke<VaultDescriptor>('rename_vault', { name }),
 }

@@ -153,6 +153,7 @@ pub enum TransferItemType {
     SecureFile,
     SecureKey,
     VaultBackup,
+    SecureNote,
 }
 
 /// Encode un message en frame length-prefixed MessagePack

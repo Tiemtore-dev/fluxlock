@@ -1,0 +1,24 @@
+[package]
+name = "fluxlock-autofill-protocol"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+snow = { version = "=0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-sha2"] }
+sha2 = "0.10"
+zeroize = "1.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ml-kem = { version = "=0.3.0-rc.2", default-features = false, features = ["zeroize"] }
+ml-dsa = { version = "=0.1.0-rc.8", default-features = false, features = ["zeroize"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

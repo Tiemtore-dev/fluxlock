@@ -96,6 +96,10 @@ impl Database {
         
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
+            .after_connect(|connection, _| Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = ON").execute(connection).await?;
+                Ok(())
+            }))
             .connect(&db_url)
             .await?;
         
@@ -306,6 +310,7 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        crate::commands::notes::migrate(&self.pool).await?;
         Ok(())
     }
 

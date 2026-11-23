@@ -1,3 +1,4 @@
+import { vaultSettingKey } from '../lib/vault-context'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
@@ -28,7 +29,7 @@ export function useAutoLock() {
   }, [])
 
   const lockApp = useCallback(() => {
-    clearAuth()
+    void clearAuth().catch(() => {})
     navigate('/login')
   }, [clearAuth, navigate])
 
@@ -44,14 +45,14 @@ export function useAutoLock() {
 
     // VULN-019: Lire les paramètres depuis sessionStorage au lieu de localStorage
     // localStorage persiste après fermeture et est manipulable; sessionStorage est éphémère
-    const autoLock = sessionStorage.getItem('autoLock') === 'true' || !sessionStorage.getItem('autoLock')
+    const autoLock = sessionStorage.getItem(vaultSettingKey('autoLock')) === 'true' || !sessionStorage.getItem(vaultSettingKey('autoLock'))
     if (!autoLock) {
       tauriAPI.setAutoLockTimeout(0).catch(console.error)
       return
     }
 
     // Récupérer le délai en minutes (défaut: 15 minutes, max 60)
-    const rawTimeout = Number.parseInt(sessionStorage.getItem('lockTimeout') || '15', 10) || 15
+    const rawTimeout = Number.parseInt(sessionStorage.getItem(vaultSettingKey('lockTimeout')) || '15', 10) || 15
     const lockTimeout = Math.min(Math.max(rawTimeout, 1), 60) // VULN-019: clamp 1-60 min
     const timeoutMs = lockTimeout * 60 * 1000
 

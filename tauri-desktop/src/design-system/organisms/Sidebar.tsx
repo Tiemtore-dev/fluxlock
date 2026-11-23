@@ -2,7 +2,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom'
 import { useEffect, useRef } from 'react'
 import {
   Archive, ArrowLeftRight, MoreHorizontal, Files, KeyRound, LayoutDashboard,
-  LockKeyhole, Settings, ShieldCheck, Fingerprint, X,
+  LockKeyhole, Settings, ShieldCheck, Fingerprint, FileText, X,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 
@@ -10,6 +10,7 @@ const vaultLinks = [
   { label: 'Vue d’ensemble', to: '/', icon: LayoutDashboard },
   { label: 'Mots de passe', to: '/passwords', icon: KeyRound },
   { label: 'Fichiers', to: '/files', icon: Files },
+  { label: 'Notes', to: '/notes', icon: FileText },
   { label: 'Clés cryptographiques', to: '/keys', icon: Fingerprint },
 ]
 
@@ -22,6 +23,7 @@ const settingsLinks = [
 
 export function Sidebar() {
   const location = useLocation()
+  const selectedVault = useAuthStore((state) => state.selectedVault)
   const clearAuth = useAuthStore((state) => state.clearAuth)
   const drawer = useRef<HTMLDialogElement>(null)
   const more = useRef<HTMLButtonElement>(null)
@@ -32,7 +34,7 @@ export function Sidebar() {
   const groups = (
     <>
       <div className="vault-nav-group">
-        <p>Coffre</p>
+        <p className="vault-active-name" title={selectedVault?.name}>{selectedVault?.name || 'Coffre'}</p>
         {vaultLinks.map(({ icon: Icon, label, to }) => (
           <NavLink key={to} to={to} end className="vault-nav-item" onClick={closeDrawer}>
             <Icon size={19} aria-hidden="true" />{label}
@@ -55,14 +57,17 @@ export function Sidebar() {
       <aside className="sidebar-desktop vault-sidebar">
         <Link to="/" className="vault-brand"><img src="/fluxlock-mark.png" alt="" width={40} height={40} />FluXlock</Link>
         <nav aria-label="Navigation principale" className="vault-nav">{groups}</nav>
-        <button type="button" className="vault-lock-button" onClick={clearAuth}>
+        <button type="button" className="vault-lock-button" onClick={() => void clearAuth().catch(() => {})}>
+          <ArrowLeftRight size={17} aria-hidden="true" /> Changer de coffre
+        </button>
+        <button type="button" className="vault-lock-button" onClick={() => void clearAuth().catch(() => {})}>
           <LockKeyhole size={17} aria-hidden="true" /> Verrouiller le coffre
         </button>
       </aside>
 
       <header className="vault-mobile-header">
         <Link to="/" className="vault-brand"><img src="/fluxlock-mark.png" alt="" width={36} height={36} />FluXlock</Link>
-        <button type="button" className="vault-icon-button" onClick={clearAuth} aria-label="Verrouiller le coffre">
+        <button type="button" className="vault-icon-button" onClick={() => void clearAuth().catch(() => {})} aria-label="Verrouiller le coffre">
           <LockKeyhole size={20} aria-hidden="true" />
         </button>
       </header>
@@ -91,6 +96,9 @@ export function Sidebar() {
           </button>
         </header>
         <nav aria-label="Toutes les pages" className="vault-nav">{groups}</nav>
+        <button type="button" className="vault-lock-button" onClick={() => void clearAuth().catch(() => {})}>
+          <ArrowLeftRight size={17} aria-hidden="true" /> Changer de coffre
+        </button>
       </dialog>
     </>
   )

@@ -1,11 +1,11 @@
 import { useId, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Check, Download, Files, KeyRound, Send, Smartphone } from 'lucide-react'
+import { ArrowRight, Check, Download, Files, KeyRound, Send, Smartphone, FileText } from 'lucide-react'
 import { WorkspacePage } from '../design-system/layouts'
 import { Button, Input, Spinner } from '../design-system/atoms'
 import {
-  transfer, passwords, files, isolationMode, type TransferOffer, type TransferConnection,
+  transfer, passwords, files, notes, isolationMode, type TransferOffer, type TransferConnection,
 } from '../lib/vault-service'
 import { TransferDevices } from './TransferDevices'
 import { TemporaryCode } from './TemporaryCode'
@@ -22,6 +22,7 @@ function sizeLabel(size: number) {
 function invalidateVault(client: ReturnType<typeof useQueryClient>) {
   void client.invalidateQueries({ queryKey: ['passwords'] })
   void client.invalidateQueries({ queryKey: ['secureFiles'] })
+  void client.invalidateQueries({ queryKey: ['notes'] })
 }
 
 function Confirmation({
@@ -68,7 +69,7 @@ function TransferOutcome({ success, onReset, receive, error }: {
   )
 }
 
-type Kind = 'passwords' | 'files'
+type Kind = 'passwords' | 'files' | 'notes'
 const MAX_FILE_BYTES = 32 * 1024 * 1024
 
 function SendTransfer({ disabled }: { disabled: boolean }) {
@@ -81,10 +82,14 @@ function SendTransfer({ disabled }: { disabled: boolean }) {
   const [crossNetwork, setCrossNetwork] = useState(false)
   const passwordItems = useQuery({ queryKey: ['passwords'], queryFn: passwords.list, enabled: kind === 'passwords' })
   const fileItems = useQuery({ queryKey: ['secureFiles'], queryFn: files.list, enabled: kind === 'files' })
-  const query = kind === 'passwords' ? passwordItems : fileItems
+  const [noteOffset, setNoteOffset] = useState(0)
+  const noteItems = useQuery({ queryKey: ['notes', 'transfer', noteOffset], queryFn: () => notes.list('', noteOffset, 100), enabled: kind === 'notes' })
+  const query = kind === 'passwords' ? passwordItems : kind === 'files' ? fileItems : noteItems
   const items = kind === 'passwords'
     ? (passwordItems.data ?? []).map((item) => ({ id: item.id, name: item.title, detail: item.username, allowed: true }))
-    : (fileItems.data ?? []).map((item) => ({
+    : kind === 'notes' ? (noteItems.data?.items ?? []).map((item) => ({
+      id: item.id, name: item.title, detail: item.has_attachment ? 'Avec pièce jointe' : 'Texte', allowed: true,
+    })) : (fileItems.data ?? []).map((item) => ({
       id: item.id, name: item.filename, detail: sizeLabel(item.file_size), allowed: item.file_size <= MAX_FILE_BYTES,
     }))
   const availableSelection = selected.filter((id) => items.some((item) => item.id === id && item.allowed))
@@ -176,7 +181,15 @@ function SendTransfer({ disabled }: { disabled: boolean }) {
         <button type="button" aria-pressed={kind === 'files'} onClick={() => { setKind('files'); setSelected([]) }}>
           <Files size={17} aria-hidden="true" /> Fichiers
         </button>
+        <button type="button" aria-pressed={kind === 'notes'} onClick={() => { setKind('notes'); setSelected([]) }}>
+          <FileText size={17} aria-hidden="true" /> Notes
+        </button>
       </div>
+      {kind === 'notes' && <div className="workspace-actions">
+        <Button variant="secondary" disabled={noteOffset === 0} onClick={() => { setNoteOffset(Math.max(0, noteOffset - 100)); setSelected([]) }}>Notes précédentes</Button>
+        <span>{noteItems.data?.total ?? 0} notes</span>
+        <Button variant="secondary" disabled={noteOffset + 100 >= (noteItems.data?.total ?? 0)} onClick={() => { setNoteOffset(noteOffset + 100); setSelected([]) }}>Notes suivantes</Button>
+      </div>}
       {query.isPending ? <p role="status">Chargement du coffre…</p> : query.isError ? (
         <div className="workspace-actions"><p role="alert">Impossible de charger les éléments.</p><Button variant="secondary" onClick={() => void query.refetch()}>Réessayer</Button></div>
       ) : items.length === 0 ? <p className="workspace-empty">Aucun élément de ce type dans votre coffre.</p> : (

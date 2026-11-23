@@ -444,7 +444,9 @@ fn csv_operation<'a>(mode: &str, actions: Option<&'a [EntryAction]>) -> Result<C
 pub async fn import_passwords_csv(
     request: ImportCsvRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<ImportCsvResponse, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let csv_content = Zeroizing::new(request.csv_content);
     let master_password = Zeroizing::new(request.master_password);
     if csv_content.len() > MAX_CSV_SIZE {
@@ -455,7 +457,6 @@ pub async fn import_passwords_csv(
     }
 
     let operation = csv_operation(&request.mode, request.entry_actions.as_deref())?;
-    let _lifecycle = state.auth_lifecycle.lock().await;
     crate::validate_session(&state).await?;
     let (user_id, key) = authenticate_for_csv_op(&master_password, &state).await?;
     if matches!(operation, CsvOperation::Import(_)) && get_security_monitor().is_readonly().await {
@@ -801,7 +802,9 @@ async fn process_csv(
 pub async fn export_passwords_csv(
     mut request: ExportCsvRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<ExportCsvResponse, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // ── Re-authenticate ──
     let (user_id, encryption_key) =
         authenticate_for_csv_op(&request.master_password, &state).await?;

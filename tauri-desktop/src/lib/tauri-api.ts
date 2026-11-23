@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './vault-context'
 
 // Minimal legacy API — only methods still referenced by authStore.ts and useAutoLock.ts.
 // All other operations have moved to vault-service.ts.

@@ -12,7 +12,9 @@ pub async fn analyze_and_react(
     action: String,
     _timestamp: i64,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<serde_json::Value, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // EXP-003: Récupérer user_id depuis la session active (pas depuis IPC)
     let user_id = state
         .current_user_id
@@ -21,7 +23,7 @@ pub async fn analyze_and_react(
         .ok_or("Non authentifié")?;
 
     // Vérifier si bloqué
-    let (is_blocked, block_msg) = state.threat_reactor.check_blocked(user_id).await;
+    let (is_blocked, block_msg) = state.threat_reactor.lock().await.check_blocked(user_id).await;
     if is_blocked {
         return Ok(serde_json::json!({
             "blocked": true,
@@ -30,7 +32,7 @@ pub async fn analyze_and_react(
     }
 
     // Vérifier rate limit
-    let (is_limited, remaining) = state.threat_reactor.check_rate_limit(user_id).await;
+    let (is_limited, remaining) = state.threat_reactor.lock().await.check_rate_limit(user_id).await;
     if is_limited {
         return Ok(serde_json::json!({
             "rate_limited": true,
@@ -45,7 +47,7 @@ pub async fn analyze_and_react(
     let is_normal = anomaly_score < 40.0;
 
     // Réagir selon le niveau de menace
-    let response = state.threat_reactor.react_to_threat(
+    let response = state.threat_reactor.lock().await.react_to_threat(
         user_id,
         anomaly_score,
         risk_level,
@@ -74,7 +76,10 @@ pub async fn analyze_and_react(
 
 /// Nettoie les vieux logs
 #[tauri::command]
-pub async fn cleanup_logs(days: i64, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn cleanup_logs(days: i64, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let db_guard = state.db.lock().await;
     let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
 
@@ -86,7 +91,10 @@ pub async fn cleanup_logs(days: i64, state: State<'_, AppState>) -> Result<Strin
 
 /// Obtient les stats des logs
 #[tauri::command]
-pub async fn get_logs_stats(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn get_logs_stats(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<serde_json::Value, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let db_guard = state.db.lock().await;
     let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
 
@@ -103,7 +111,10 @@ pub async fn get_logs_stats(state: State<'_, AppState>) -> Result<serde_json::Va
 
 /// Vérifie l'intégrité de la chaîne de logs signés
 #[tauri::command]
-pub async fn verify_log_integrity(state: State<'_, AppState>) -> Result<signed_log::IntegrityReport, String> {
+pub async fn verify_log_integrity(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<signed_log::IntegrityReport, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let mgr_guard = state.signed_log_manager.lock().await;
     let mgr = mgr_guard.as_ref().ok_or("Logs signés non initialisés")?;
     mgr.verify_integrity()
@@ -111,7 +122,10 @@ pub async fn verify_log_integrity(state: State<'_, AppState>) -> Result<signed_l
 
 /// Active ou désactive les logs signés
 #[tauri::command]
-pub async fn toggle_signed_logging(state: State<'_, AppState>, enabled: bool) -> Result<String, String> {
+pub async fn toggle_signed_logging(state: State<'_, AppState>, enabled: bool,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     *state.logging_enabled.lock().await = enabled;
     let status = if enabled { "activés" } else { "désactivés" };
     Ok(format!("Logs signés {}", status))
@@ -119,7 +133,10 @@ pub async fn toggle_signed_logging(state: State<'_, AppState>, enabled: bool) ->
 
 /// Retourne l'état actuel des logs signés
 #[tauri::command]
-pub async fn get_signed_logging_status(state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn get_signed_logging_status(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     Ok(*state.logging_enabled.lock().await)
 }
 
@@ -133,7 +150,10 @@ pub async fn get_enclave_status() -> Result<secure_storage::EnclaveStatus, Strin
 
 /// Active ou désactive le mode isolation réseau
 #[tauri::command]
-pub async fn toggle_isolation_mode(state: State<'_, AppState>, enabled: bool) -> Result<String, String> {
+pub async fn toggle_isolation_mode(state: State<'_, AppState>, enabled: bool,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
     *state.isolation_mode.lock().await = enabled;
     if enabled {
@@ -158,6 +178,9 @@ pub async fn toggle_isolation_mode(state: State<'_, AppState>, enabled: bool) ->
 
 /// Retourne l'état du mode isolation réseau
 #[tauri::command]
-pub async fn get_isolation_mode(state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn get_isolation_mode(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     Ok(*state.isolation_mode.lock().await)
 }

@@ -8,7 +8,9 @@ use tauri::State;
 pub async fn create_password(
     request: CreatePasswordRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<i64, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -69,7 +71,10 @@ pub async fn create_password(
 }
 
 #[tauri::command]
-pub async fn get_passwords(state: State<'_, AppState>) -> Result<Vec<Password>, String> {
+pub async fn get_passwords(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<Vec<Password>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -182,7 +187,10 @@ pub async fn get_passwords(state: State<'_, AppState>) -> Result<Vec<Password>, 
 }
 
 #[tauri::command]
-pub async fn get_password(id: i64, state: State<'_, AppState>) -> Result<Option<Password>, String> {
+pub async fn get_password(id: i64, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<Option<Password>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -201,7 +209,10 @@ pub async fn get_password(id: i64, state: State<'_, AppState>) -> Result<Option<
 }
 
 #[tauri::command]
-pub async fn decrypt_password(encrypted: String, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn decrypt_password(encrypted: String, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -221,7 +232,9 @@ pub async fn decrypt_password(encrypted: String, state: State<'_, AppState>) -> 
 pub async fn update_password(
     request: UpdatePasswordRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Protection ransomware
     let monitor = get_security_monitor();
     if monitor.is_readonly().await {
@@ -289,7 +302,10 @@ pub async fn update_password(
 }
 
 #[tauri::command]
-pub async fn delete_password(id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn delete_password(id: i64, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Protection ransomware
     let monitor = get_security_monitor();
     if monitor.is_readonly().await {

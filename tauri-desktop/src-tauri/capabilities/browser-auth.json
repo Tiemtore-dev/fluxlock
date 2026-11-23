@@ -1,0 +1,8 @@
+{
+  "identifier": "browser-auth-window",
+  "description": "Dedicated native browser authentication view; Rust additionally fences all commands by window identity.",
+  "platforms": ["macOS", "windows", "linux"],
+  "local": true,
+  "windows": ["autofill-auth-*"],
+  "permissions": ["core:default"]
+}

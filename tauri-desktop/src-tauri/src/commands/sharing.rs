@@ -9,7 +9,9 @@ use base64::{Engine as _, engine::general_purpose};
 pub async fn share_file(
     request: ShareFileRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<ShareFileResponse, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -76,7 +78,10 @@ pub async fn share_file(
 }
 
 #[tauri::command]
-pub async fn get_user_shares(state: State<'_, AppState>) -> Result<Vec<FileShare>, String> {
+pub async fn get_user_shares(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<Vec<FileShare>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -95,7 +100,10 @@ pub async fn get_user_shares(state: State<'_, AppState>) -> Result<Vec<FileShare
 }
 
 #[tauri::command]
-pub async fn revoke_share(share_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn revoke_share(share_id: i64, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()

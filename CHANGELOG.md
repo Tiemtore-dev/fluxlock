@@ -7,6 +7,29 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.4.0] - 2026-11-23
+
+### Ajouté
+
+- Notes chiffrées avec pièce jointe, modification, suppression, sauvegarde et restauration.
+- Plusieurs coffres locaux avec sessions, clés, caches et sauvegardes isolés ; verrouillage lors du changement de coffre.
+- Extension Chromium 0.4.0 et relais natif 0.2.0 pour le remplissage sur l’origine HTTPS exacte. L’authentification reste dans FluXlock ; l’utilisateur choisit un compte, puis le coffre se verrouille avant la remise du seul couple choisi.
+- Canal hybride ML-KEM-768/X25519, authentification mutuelle ML-DSA-65 et chiffrement ChaCha20-Poly1305. Les anciens appairages navigateur sont invalidés ; mettre à jour application, relais et extension puis refaire l’appairage.
+- Popup compacte de 520 × 330 px à l’accueil, icône FluXlock, cartes arrondies, thèmes clair/sombre et navigation clavier.
+- Contrôles CI du coffre, de l’extension et du relais ; publication après validation de main pour une nouvelle version, avec les paquets du relais et de l’extension.
+
+### Corrigé
+
+- Mise à jour de block-buffer 0.12.0 vers 0.12.1 dans le graphe utilisé par le desktop et le protocole d’extension (GHSA-qwgh-2vcv-g2f7).
+- Rejet terminal des erreurs de protocole et des appels WASM hors limite ; refus d’établir le canal si l’aléa cryptographique échoue.
+
+### Compatibilité
+
+- L’extension est destinée à Chromium desktop et n’est pas publiée dans un store. Android reçoit l’application, les notes et les coffres ; l’intégration AutofillService Android reste à développer.
+- Le profil cryptographique applicatif post-quantique n’a pas encore fait l’objet d’une revue indépendante ; aucune certification FIPS n’est revendiquée.
+
+---
+
 ## [2.3.4] - 2026-11-20
 
 ### Corrigé

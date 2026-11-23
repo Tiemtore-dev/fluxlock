@@ -22,7 +22,9 @@ pub async fn create_secure_file(
     file_data: String,
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
+    context: crate::vault::VaultContext,
 ) -> Result<i64, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     debug_log!("📥 Demande de création de fichier: {}", filename);
     
     // Vérifier le mode lecture seule (protection ransomware)
@@ -177,7 +179,9 @@ pub async fn create_secure_file_from_path(
     file_path: String,
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
+    context: crate::vault::VaultContext,
 ) -> Result<i64, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     use std::fs::File;
     use std::io::BufWriter;
     
@@ -330,7 +334,10 @@ pub async fn create_secure_file_from_path(
 }
 
 #[tauri::command]
-pub async fn get_secure_files(state: State<'_, AppState>) -> Result<Vec<SecureFile>, String> {
+pub async fn get_secure_files(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<Vec<SecureFile>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -374,7 +381,7 @@ pub(crate) fn valid_export_name(name: &str) -> bool {
 pub(crate) async fn files_dir(state: &AppState) -> Result<PathBuf, String> {
     let dir = state.data_dir.lock().await.as_ref()
         .ok_or("Répertoire du coffre indisponible")?.join("files");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    crate::vault::private_directory(&dir)?;
     Ok(dir)
 }
 
@@ -395,8 +402,8 @@ fn owned_file_path(path: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
 
 pub(crate) async fn encrypted_file_path(state: &AppState, path: &str) -> Result<PathBuf, String> {
     let mut roots = vec![files_dir(state).await?];
-    if let Ok(legacy) = hidden_storage::get_hidden_files_dir() {
-        roots.push(legacy);
+    if state.selected_vault.lock().await.as_ref().is_some_and(|v| v.descriptor.id == crate::vault::LEGACY_VAULT_ID) {
+        if let Ok(legacy) = hidden_storage::get_hidden_files_dir() { roots.push(legacy); }
     }
     owned_file_path(path, &roots)
 }
@@ -419,7 +426,15 @@ pub(crate) fn decrypt_into(
     key: &crate::secure_key::SecureKey,
     output: &mut impl Write,
 ) -> Result<(), String> {
-    let mut reader = BufReader::new(std::fs::File::open(source).map_err(|e| e.to_string())?);
+    let reader = BufReader::new(std::fs::File::open(source).map_err(|e| e.to_string())?);
+    decrypt_reader(reader, key, output)
+}
+
+fn decrypt_reader(
+    mut reader: impl BufRead,
+    key: &crate::secure_key::SecureKey,
+    output: &mut impl Write,
+) -> Result<(), String> {
     if is_senc_format(reader.fill_buf().map_err(|e| e.to_string())?) {
         decrypt_file_stream_secure(key, &mut reader, output).map_err(|e| e.to_string())?;
     } else {
@@ -436,12 +451,32 @@ pub(crate) fn decrypt_into(
     Ok(())
 }
 
+/// Hash and decrypt the very same bounded ciphertext, preventing substitution
+/// between a note's manifest check and reopening its attachment for export.
+pub(crate) fn decrypt_verified_into(source: &Path, key: &crate::secure_key::SecureKey, output: &mut impl Write, expected: &str) -> Result<(), String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(source).map_err(|e| e.to_string())?.take(48 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > 48 * 1024 * 1024 || hex::encode(blake3_hash(&bytes)) != expected {
+        return Err("La pièce jointe a été altérée".into());
+    }
+    decrypt_reader(std::io::Cursor::new(bytes), key, output)
+}
+
 #[tauri::command]
 pub async fn decrypt_file_to_path(
     id: i64,
     output_path: Option<String>,
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
+    export_file_inner(id, output_path, &state, app_handle, None).await
+}
+
+pub(crate) async fn export_file_inner(
+    id: i64, output_path: Option<String>, state: &AppState, app_handle: tauri::AppHandle, expected_hash: Option<String>,
 ) -> Result<String, String> {
     let user_id = crate::validate_session(&state).await?;
     let db_guard = state.db.lock().await;
@@ -473,7 +508,10 @@ pub async fn decrypt_file_to_path(
     }));
     let path = destination.clone();
     tokio::task::spawn_blocking(move || {
-        publish_new_file(&path, |output| decrypt_into(&source, &key, output))
+        publish_new_file(&path, |output| match expected_hash {
+            Some(hash) => decrypt_verified_into(&source, &key, output, &hash),
+            None => decrypt_into(&source, &key, output),
+        })
     }).await.map_err(|e| e.to_string())??;
 
     let destination = destination.to_string_lossy().into_owned();
@@ -489,7 +527,10 @@ pub async fn decrypt_file_to_path(
 /// M01 — Nettoyage sécurisé manuel des fichiers déchiffrés temporaires
 /// Le frontend peut appeler cette commande pour purger tous les fichiers déchiffrés
 #[tauri::command]
-pub async fn cleanup_decrypted_files(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn cleanup_decrypted_files(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
     let count = state.decrypted_temp_files.lock().await.len();
     secure_cleanup_decrypted_files(&state.decrypted_temp_files).await;
@@ -498,7 +539,10 @@ pub async fn cleanup_decrypted_files(state: State<'_, AppState>) -> Result<Strin
 }
 
 #[tauri::command]
-pub async fn delete_secure_file(id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn delete_secure_file(id: i64, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -510,6 +554,11 @@ pub async fn delete_secure_file(id: i64, state: State<'_, AppState>) -> Result<b
 
     if get_security_monitor().is_readonly().await {
         return Err("Le coffre est en lecture seule".into());
+    }
+    let attached: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM note_attachments WHERE file_id = ? AND user_id = ?)")
+        .bind(id).bind(user_id).fetch_one(&db.pool).await.map_err(|e| e.to_string())?;
+    if attached {
+        return Err("Ce fichier est joint à une note. Détachez-le de la note avant de le supprimer.".into());
     }
     if let Some(file) = db.get_secure_files(user_id).await.map_err(|e| e.to_string())?
         .into_iter().find(|file| file.id == id)

@@ -1,3 +1,5 @@
+import { vaultSettingKey } from '../lib/vault-context'
+import BrowserSettings from './BrowserSettings'
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -6,7 +8,7 @@ import { WorkspacePage } from '../design-system/layouts'
 import { Button, Input } from '../design-system/atoms'
 import { Modal } from '../design-system/molecules'
 import { useToast } from '../design-system/organisms'
-import { biometric, isolationMode } from '../lib/vault-service'
+import { biometric, isolationMode, vaults } from '../lib/vault-service'
 import { tauriAPI } from '../lib/tauri-api'
 import { useAuthStore } from '../stores/authStore'
 import { hasAndroidKeystore, androidBiometricAvailable, androidKeystoreDelete, androidHasStoredKey } from '../lib/android-biometric'
@@ -15,11 +17,18 @@ import { biometricAccount, enrollBiometrics } from '../lib/biometric-enrollment'
 export default function SettingsPage() {
   const { toast } = useToast()
   const client = useQueryClient()
+  const selectedVault = useAuthStore((state) => state.selectedVault)
+  const setSelectedVault = useAuthStore((state) => state.setSelectedVault)
+  const [vaultName, setVaultName] = useState(selectedVault?.name || '')
+  const rename = useMutation({
+    mutationFn: () => vaults.rename(vaultName),
+    onSuccess: (vault) => { setSelectedVault(vault); toast('Nom du coffre enregistré', 'success') },
+  })
   const username = useAuthStore((state) => state.user?.username)
   const [dark, setDark] = useState(document.documentElement.classList.contains('dark'))
   const [color, setColor] = useState(localStorage.getItem('color-theme') || 'default')
-  const [autoLock, setAutoLock] = useState(sessionStorage.getItem('autoLock') !== 'false')
-  const [minutes, setMinutes] = useState(sessionStorage.getItem('lockTimeout') || '15')
+  const [autoLock, setAutoLock] = useState(sessionStorage.getItem(vaultSettingKey('autoLock')) !== 'false')
+  const [minutes, setMinutes] = useState(sessionStorage.getItem(vaultSettingKey('lockTimeout')) || '15')
   const [enrollMode, setEnrollMode] = useState<'native' | 'compatibility'>()
   const [password, setPassword] = useState('')
   const bio = useQuery({ queryKey: ['biometric-settings'], queryFn: biometric.checkStatus, staleTime: 0 })
@@ -73,8 +82,8 @@ export default function SettingsPage() {
         throw new Error('Saisissez un délai entre 1 et 60 minutes.')
       }
       await tauriAPI.setAutoLockTimeout(autoLock ? duration : 0)
-      sessionStorage.setItem('autoLock', String(autoLock))
-      if (autoLock) sessionStorage.setItem('lockTimeout', minutes)
+      sessionStorage.setItem(vaultSettingKey('autoLock'), String(autoLock))
+      if (autoLock) sessionStorage.setItem(vaultSettingKey('lockTimeout'), minutes)
       window.dispatchEvent(new Event('fluxlock:auto-lock-settings'))
     },
     onSuccess: () => toast('Verrouillage automatique enregistré', 'success'),
@@ -105,6 +114,15 @@ export default function SettingsPage() {
   return (
     <WorkspacePage title="Paramètres">
       <div className="workspace-columns">
+        {!android && <BrowserSettings />}
+        <form className="workspace-panel workspace-stack" onSubmit={(event) => { event.preventDefault(); rename.mutate() }}>
+          <h2>Ce coffre</h2>
+          <Input label="Nom du coffre" value={vaultName} maxLength={80} required
+            onChange={(event) => setVaultName(event.target.value)} disabled={rename.isPending} />
+          <p>Ce nom est visible avant le déverrouillage.</p>
+          {rename.isError && <p className="workspace-error" role="alert">{String(rename.error)}</p>}
+          <div><Button type="submit" variant="secondary" icon={Save} loading={rename.isPending}>Enregistrer le nom</Button></div>
+        </form>
         <section className="workspace-panel workspace-stack" aria-labelledby="appearance-title">
           <h2 id="appearance-title">Apparence</h2>
           <div className="workspace-segments" aria-label="Luminosité">

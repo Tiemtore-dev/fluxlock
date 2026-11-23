@@ -13,3 +13,14 @@ permissions:
 jobs:
   build-and-test:
     uses: ./.github/workflows/preview.yml
+
+  browser-and-relay:
+    uses: ./.github/workflows/autofill.yml
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'Tiemtore-dev/fluxlock'
+    needs: [build-and-test, browser-and-relay]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    secrets: inherit

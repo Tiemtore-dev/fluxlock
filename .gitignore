@@ -1,5 +1,10 @@
 # Rust
 rust-crypto-core/target/
+autofill-protocol/target/
+native-host/target/
+browser-extension/dist/
+browser-extension/fluxlock-extension.zip
+browser-extension/fluxlock-extension-*.zip
 **/*.rs.bk
 *.pdb
 

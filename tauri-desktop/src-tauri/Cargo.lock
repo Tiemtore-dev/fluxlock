@@ -503,9 +503,9 @@ dependencies = [
 
 [[package]]
 name = "block-buffer"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdd35008169921d80bc60d3d0ab416eecb028c4cd653352907921d95084790be"
+checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
 ]
@@ -1242,7 +1242,7 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4850db49bf08e663084f7fb5c87d202ef91a3907271aff24a94eb97ff039153c"
 dependencies = [
- "block-buffer 0.12.0",
+ "block-buffer 0.12.1",
  "crypto-common 0.2.1",
 ]
 
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "fluxlock"
-version = "2.3.4"
+version = "2.4.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1661,6 +1661,7 @@ dependencies = [
  "csv",
  "dirs 5.0.1",
  "dotenv",
+ "fluxlock-autofill-protocol",
  "hex",
  "hostname",
  "if-addrs",
@@ -1677,6 +1678,7 @@ dependencies = [
  "secure-vault-crypto-core",
  "serde",
  "serde_json",
+ "sha2",
  "socket2 0.5.10",
  "spake2",
  "sqlx",
@@ -1692,8 +1694,22 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls 0.25.0",
+ "url",
  "uuid",
  "windows 0.58.0",
+ "zeroize",
+]
+
+[[package]]
+name = "fluxlock-autofill-protocol"
+version = "0.2.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "ml-dsa",
+ "ml-kem",
+ "sha2",
+ "snow",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -3192,6 +3208,7 @@ dependencies = [
  "module-lattice",
  "rand_core 0.10.0",
  "sha3 0.11.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -5187,6 +5204,19 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "snow"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "599b506ccc4aff8cf7844bc42cf783009a434c1e26c964432560fb6d6ad02d82"
+dependencies = [
+ "chacha20poly1305",
+ "curve25519-dalek",
+ "rustc_version",
+ "sha2",
+ "subtle",
+]
 
 [[package]]
 name = "socket2"

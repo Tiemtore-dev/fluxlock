@@ -9,7 +9,9 @@ use base64::{Engine as _, engine::general_purpose};
 pub async fn create_secure_key(
     request: CreateKeyRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<i64, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -85,7 +87,9 @@ pub async fn create_secure_key(
 pub async fn import_secure_key(
     request: ImportKeyRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<i64, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -126,7 +130,10 @@ pub async fn import_secure_key(
 }
 
 #[tauri::command]
-pub async fn get_secure_keys(state: State<'_, AppState>) -> Result<Vec<SecureKey>, String> {
+pub async fn get_secure_keys(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<Vec<SecureKey>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -160,7 +167,10 @@ pub async fn get_secure_keys(state: State<'_, AppState>) -> Result<Vec<SecureKey
 }
 
 #[tauri::command]
-pub async fn decrypt_key(id: i64, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn decrypt_key(id: i64, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -190,7 +200,10 @@ pub async fn decrypt_key(id: i64, state: State<'_, AppState>) -> Result<String, 
 }
 
 #[tauri::command]
-pub async fn delete_secure_key(id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn delete_secure_key(id: i64, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()

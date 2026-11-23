@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '../lib/vault-context'
 import { Unlock, RefreshCw } from 'lucide-react'
 import { WorkspacePage } from '../design-system/layouts'
 import { Button, Input, Spinner, Badge } from '../design-system/atoms'
