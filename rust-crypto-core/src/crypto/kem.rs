@@ -29,21 +29,35 @@ pub struct KemPublicKey {
 ///
 /// N'implémente ni `Debug` ni `Clone`.
 pub struct KemPrivateKey {
-    key: ml_kem::DecapsulationKey<MlKem768>,
+    key: Box<std::mem::MaybeUninit<ml_kem::DecapsulationKey<MlKem768>>>,
+}
+
+impl KemPrivateKey {
+    fn new(key: ml_kem::DecapsulationKey<MlKem768>) -> Self {
+        Self {
+            key: Box::new(std::mem::MaybeUninit::new(key)),
+        }
+    }
+
+    fn key(&self) -> &ml_kem::DecapsulationKey<MlKem768> {
+        // SAFETY: initialisé dans `new` et détruit uniquement dans `Drop::drop`.
+        unsafe { self.key.assume_init_ref() }
+    }
 }
 
 /// Sécurité : la DecapsulationKey contient ~2400 bytes secrets.
-/// On force le zéroïsage en écrasant la mémoire brute au drop,
-/// en couche de défense supplémentaire.
+/// On exécute d'abord son destructeur formel via `drop_in_place`, puis on
+/// écrase toute l'allocation `MaybeUninit` par écritures volatiles avant libération.
 impl Drop for KemPrivateKey {
     fn drop(&mut self) {
-        use zeroize::Zeroize;
-        // Interpréter la clé comme un slice mutable de bytes et zéroïser
-        // via les écritures volatiles de zeroize (non-optimisables).
-        let ptr = &mut self.key as *mut _ as *mut u8;
-        let size = std::mem::size_of::<ml_kem::DecapsulationKey<MlKem768>>();
-        let bytes = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
-        bytes.zeroize();
+        unsafe {
+            std::ptr::drop_in_place(self.key.as_mut_ptr());
+            let ptr = self.key.as_mut_ptr().cast::<u8>();
+            for i in 0..std::mem::size_of::<ml_kem::DecapsulationKey<MlKem768>>() {
+                ptr.add(i).write_volatile(0);
+            }
+            std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -84,7 +98,7 @@ pub fn generate_recipient_keypair() -> Result<(KemPublicKey, KemPrivateKey), Cry
 
     Ok((
         KemPublicKey { key: ek },
-        KemPrivateKey { key: dk },
+        KemPrivateKey::new(dk),
     ))
 }
 
@@ -132,7 +146,7 @@ pub fn decapsulate(
     ciphertext: &KemCiphertext,
 ) -> Result<SharedSecret, CryptoError> {
     let shared_key = privkey
-        .key
+        .key()
         .decapsulate_slice(&ciphertext.data)
         .map_err(|_| CryptoError::KeyExchangeError("ML-KEM-768 decapsulation failed".into()))?;
 
@@ -168,7 +182,7 @@ impl KemPublicKey {
 /// Sérialise la clé privée pour stockage sécurisé.
 impl KemPrivateKey {
     pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
-        let seed = KeyExport::to_bytes(&self.key);
+        let seed = KeyExport::to_bytes(self.key());
         let slice: &[u8] = seed.as_ref();
         Zeroizing::new(slice.to_vec())
     }
@@ -176,7 +190,7 @@ impl KemPrivateKey {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         let dk = <ml_kem::DecapsulationKey<MlKem768> as KeyInit>::new_from_slice(bytes)
             .map_err(|_| CryptoError::KeyExchangeError("Invalid ML-KEM-768 private key".into()))?;
-        Ok(Self { key: dk })
+        Ok(Self::new(dk))
     }
 }
 

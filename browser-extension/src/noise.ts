@@ -3,7 +3,13 @@ export const fromHex = (s: string) => {
   if (!/^[0-9a-f]{64}$/u.test(s)) throw new Error('Clé de profil invalide')
   return Uint8Array.from(s.match(/../gu)!, (v) => Number.parseInt(v, 16))
 }
-export const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes))
+export const b64 = (bytes: Uint8Array) => {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 8192))
+  }
+  return btoa(binary)
+}
 export const unb64 = (s: string) => {
   if (s.length > 60000) throw new Error('Trame trop grande')
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0))
@@ -31,7 +37,10 @@ export class Noise {
     new Uint8Array(this.api.memory.buffer, inputPtr, input.length).set(input)
     if (this.api.execute(op, input.length) !== 1) throw new Error('Canal chiffré refusé')
     const outputPtr = this.api.output_ptr(), length = this.api.output_len()
-    return new Uint8Array(this.api.memory.buffer, outputPtr, length).slice()
+    const view = new Uint8Array(this.api.memory.buffer, outputPtr, length)
+    const copy = view.slice()
+    view.fill(0)
+    return copy
   }
   clear() { this.api.clear() }
 }

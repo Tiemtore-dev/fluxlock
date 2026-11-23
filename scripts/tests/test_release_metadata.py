@@ -43,7 +43,7 @@ class ReleaseGuards(unittest.TestCase):
 
     def test_inconsistent_or_unsafe_versions_are_rejected(self):
         original = Path.read_text
-        for replacement in ('2.4.1', '2.4.0\nINJECTED=1'):
+        for replacement in ('0.0.0', '2.4.0\nINJECTED=1'):
             def text(path, *args, **kwargs):
                 value = original(path, *args, **kwargs)
                 if str(path).endswith('tauri.conf.json'):

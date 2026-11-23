@@ -3,9 +3,13 @@
 export function formAction(expectedOrigin: string, credentials?: { username: string; password?: string }) {
   if (location.origin !== expectedOrigin || window.top !== window.self) throw new Error('Document ou origine différente')
   const visible = (input: HTMLInputElement) => {
-    const box = input.getBoundingClientRect(), style = getComputedStyle(input)
-    return !input.disabled && !input.readOnly && box.width > 2 && box.height > 2 && box.bottom > 0 && box.top < innerHeight &&
-      style.visibility === 'visible' && style.display !== 'none' && Number(style.opacity) > 0
+    const box = input.getBoundingClientRect()
+    if (input.disabled || input.readOnly || box.width < 16 || box.height < 10 || box.bottom <= 0 || box.right <= 0 || box.top >= innerHeight || box.left >= innerWidth) return false
+    for (let el: HTMLElement | null = input; el; el = el.parentElement) {
+      const style = getComputedStyle(el)
+      if (style.visibility !== 'visible' || style.display === 'none' || style.pointerEvents === 'none' || Number(style.opacity) < 0.2) return false
+    }
+    return true
   }
   const all = Array.from(document.querySelectorAll<HTMLInputElement>('input')).filter(visible)
   if (all.some((input) => input.autocomplete === 'new-password')) throw new Error('Un formulaire de création de mot de passe ne sera pas rempli')
@@ -20,8 +24,18 @@ export function formAction(expectedOrigin: string, credentials?: { username: str
   if (matches.length > 1 || (!password && matches.length !== 1)) throw new Error('Champ email ou identifiant ambigu')
   const username = matches[0]
   const effectiveForm = form || username?.form
-  if (effectiveForm && (new URL(effectiveForm.action || location.href, location.href).origin !== expectedOrigin || effectiveForm.method.toLowerCase() !== 'post')) {
-    throw new Error('Destination de formulaire refusée')
+  if (effectiveForm) {
+    if (new URL(effectiveForm.action || location.href, location.href).origin !== expectedOrigin || effectiveForm.method.toLowerCase() !== 'post') {
+      throw new Error('Destination de formulaire refusée')
+    }
+    for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button, input[type="submit"], input[type="image"]')) {
+      if (control.form !== effectiveForm) continue
+      const overrideAction = control.getAttribute('formaction')
+      const overrideMethod = control.getAttribute('formmethod')
+      if ((overrideAction && new URL(overrideAction, location.href).origin !== expectedOrigin) || (overrideMethod && overrideMethod.toLowerCase() !== 'post')) {
+        throw new Error('Destination de formulaire refusée')
+      }
+    }
   }
   const mode = password ? 'password' : 'username'
   if (!credentials) return { mode }

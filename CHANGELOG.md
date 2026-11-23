@@ -7,6 +7,19 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.4.1] - 2026-11-23
+
+### Sécurité & Cryptographie Post-Quantique
+
+- **Handshake P2P hybride (`SPAKE2 + ML-KEM-768`)** : liaison cryptographique du transcript complet (`SPAKE2 A/B || ML-KEM-768 ek || ML-KEM-768 ct`) dans la dérivation `HKDF-SHA3-256` de la clé de session et du `safety_number`.
+- **Séparation des clés `Vault v2`** : dérivation de deux sous-clés indépendantes (`fluxlock/vault-v2/aead-key` et `fluxlock/vault-v2/header-mac-key`) via `HKDF-SHA3-256` à partir de la clé maître Argon2id.
+- **Durcissement KDF Argon2id (`Vault v2`)** : plafonnement anti-DoS / anti-OOM des paramètres du header non authentifié (`m_cost <= 512 MiB`, `t_cost <= 32`, `p_cost <= 32`).
+- **Effacement mémoire PQC (`ML-KEM-768` & `ML-DSA-65`)** : activation de la feature `zeroize` sur `ml-kem`, destruction déterministe via `MaybeUninit` + `drop_in_place` + écritures volatiles (`write_volatile`) et barrière `compiler_fence(SeqCst)`, et retour `Zeroizing<Vec<u8>>` sur les exports de graines et clés PKCS#8 DER.
+- **Extension navigateur (`form.ts`, `noise.ts`)** : vérification des attributs HTML5 `formaction` et `formmethod` sur tous les boutons de soumission associés au formulaire, validation de visibilité DOM sur toute la chaîne d'ancêtres (opacité, `pointer-events`, bornes horizontales et verticales), effacement immédiat de la tranche de sortie dans la mémoire linéaire WASM après copie, et encodage Base64 par blocs de 8 Ko.
+- **CI / Release** : compilation et empaquetage des relais natifs macOS (`aarch64-apple-darwin` et `x86_64-apple-darwin`) directement au sein des jobs macOS de `build` afin d'éviter la saturation de la file d'attente des runners `macos-latest` lors de la publication vers `fluxlock-releases`.
+
+---
+
 ## [2.4.0] - 2026-11-23
 
 ### Ajouté
