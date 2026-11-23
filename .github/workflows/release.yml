@@ -211,6 +211,22 @@ jobs:
             *) echo "::error::Mode de signature macOS inconnu"; exit 1 ;;
           esac
 
+      - name: Build native relay (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: cargo build --locked --release --target ${{ matrix.target }} --manifest-path native-host/Cargo.toml
+
+      - name: Package native relay (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: python3 scripts/package-browser-release.py --target "${{ matrix.target }}" --output browser-release
+
+      - name: Upload macOS browser relay artifact
+        if: matrix.platform == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-release-${{ matrix.target }}
+          path: browser-release/*.zip
+          if-no-files-found: error
+
   # ──────────────────────────────────────────────────────────
   # ÉTAPE 1b — APK Android (signé, utilisé par la mise à jour in-app)
   # ──────────────────────────────────────────────────────────
@@ -321,10 +337,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-latest
-            target: aarch64-apple-darwin
-          - runner: macos-latest
-            target: x86_64-apple-darwin
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
           - runner: ubuntu-22.04

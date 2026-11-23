@@ -138,6 +138,8 @@ impl HandshakeInitiator {
 
         Ok(InitiatorPhase1 {
             spake_secret: spake_secret.to_vec(),
+            spake_msg_a: self.spake_msg.clone(),
+            spake_msg_b: peer_spake_msg.to_vec(),
             ek_bytes,
             dk_bytes: dk_bytes.to_vec(),
         })
@@ -148,6 +150,8 @@ impl HandshakeInitiator {
 /// Contient la clé publique KEM (à envoyer) et les secrets nécessaires à la phase 2.
 pub struct InitiatorPhase1 {
     spake_secret: Vec<u8>,
+    spake_msg_a: Vec<u8>,
+    spake_msg_b: Vec<u8>,
     /// Clé publique ML-KEM-768 à envoyer au pair
     pub ek_bytes: Vec<u8>,
     dk_bytes: Vec<u8>,
@@ -156,6 +160,8 @@ pub struct InitiatorPhase1 {
 impl Drop for InitiatorPhase1 {
     fn drop(&mut self) {
         self.spake_secret.zeroize();
+        self.spake_msg_a.zeroize();
+        self.spake_msg_b.zeroize();
         self.dk_bytes.zeroize();
     }
 }
@@ -170,8 +176,14 @@ impl InitiatorPhase1 {
         let kem_shared = kem::decapsulate(&dk, &ct)
             .map_err(|e| format!("ML-KEM decapsulate: {}", e))?;
 
-        // Dérivation hybride : HKDF(spake2_key || kem_shared_secret)
-        let session_key = derive_hybrid_key(&self.spake_secret, kem_shared.as_bytes());
+        // Dérivation hybride liée au transcript complet (SPAKE2 A/B + ML-KEM ek/ct)
+        let transcript = compute_handshake_transcript(
+            &self.spake_msg_a,
+            &self.spake_msg_b,
+            &self.ek_bytes,
+            kem_ciphertext,
+        );
+        let session_key = derive_hybrid_key(&self.spake_secret, kem_shared.as_bytes(), &transcript);
 
         // Zéroïser
         self.spake_secret.zeroize();
@@ -242,8 +254,14 @@ impl HandshakeResponder {
             (shared, ct)
         };
 
-        // Dérivation hybride
-        let session_key = derive_hybrid_key(&spake_secret, kem_shared.as_bytes());
+        // Dérivation hybride liée au transcript complet (peer_spake_msg = A, self.spake_msg = B)
+        let transcript = compute_handshake_transcript(
+            peer_spake_msg,
+            &self.spake_msg,
+            ek_bytes,
+            ct_bytes.as_bytes(),
+        );
+        let session_key = derive_hybrid_key(&spake_secret, kem_shared.as_bytes(), &transcript);
 
         // Zéroïser
         spake_secret.zeroize();
@@ -277,12 +295,34 @@ impl Drop for HandshakeResult {
     }
 }
 
-/// Dérive une clé hybride HKDF-SHA256(spake_key || kem_key) avec séparation de domaine.
+/// Calcule un hash BLAKE3 préfixé par longueur sur l'intégralité du transcript du handshake
+/// (SPAKE2 message A || SPAKE2 message B || ML-KEM-768 ek || ML-KEM-768 ct).
+/// Toute substitution ou altération de la clé publique KEM ou du ciphertext sur le fil
+/// produit un transcript différent et invalide immédiatement la clé de session.
+fn compute_handshake_transcript(
+    spake_msg_a: &[u8],
+    spake_msg_b: &[u8],
+    ek_bytes: &[u8],
+    ct_bytes: &[u8],
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(
+        32 + 16 + spake_msg_a.len() + spake_msg_b.len() + ek_bytes.len() + ct_bytes.len(),
+    );
+    buf.extend_from_slice(b"fluxlock-transfer-v1/transcript:");
+    for part in [spake_msg_a, spake_msg_b, ek_bytes, ct_bytes] {
+        buf.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        buf.extend_from_slice(part);
+    }
+    secure_vault_crypto::blake3_hash(&buf)
+}
+
+/// Dérive une clé hybride HKDF-SHA3-256(spake_key || kem_key) avec séparation de domaine
+/// et liaison cryptographique au transcript du handshake.
 ///
 /// Conforme à NIST SP 800-56C Rev 2 — Extract-then-Expand :
 /// - **Extract** : HKDF-Extract(salt, spake_key || kem_key) → PRK
-/// - **Expand**  : HKDF-Expand(PRK, info="fluxlock-transfer-v1 session-key") → OKM 32 bytes
-fn derive_hybrid_key(spake_key: &[u8], kem_key: &[u8]) -> [u8; 32] {
+/// - **Expand**  : HKDF-Expand(PRK, info="session-key:" || transcript_hash) → OKM 32 bytes
+fn derive_hybrid_key(spake_key: &[u8], kem_key: &[u8], transcript_hash: &[u8]) -> [u8; 32] {
     // Concaténer les IKM dans un buffer zéroïsé automatiquement
     let mut ikm = zeroize::Zeroizing::new(
         Vec::with_capacity(spake_key.len() + kem_key.len())
@@ -291,9 +331,11 @@ fn derive_hybrid_key(spake_key: &[u8], kem_key: &[u8]) -> [u8; 32] {
     ikm.extend_from_slice(kem_key);
 
     let salt = b"fluxlock-transfer-v1";
-    let info = b"session-key";
+    let mut info = Vec::with_capacity(12 + transcript_hash.len());
+    info.extend_from_slice(b"session-key:");
+    info.extend_from_slice(transcript_hash);
 
-    let derived = secure_vault_crypto::derive_key_hkdf(&ikm, Some(salt), info, 32)
+    let derived = secure_vault_crypto::derive_key_hkdf(&ikm, Some(salt), &info, 32)
         .expect("HKDF derivation should not fail with valid inputs");
 
     let mut okm = [0u8; 32];
@@ -349,5 +391,24 @@ mod tests {
         // Different inputs → different safety numbers
         let sn3 = compute_safety_number(&key, b"c", b"d");
         assert_ne!(sn1, sn3);
+    }
+
+    #[test]
+    fn test_hybrid_handshake_binds_full_transcript() {
+        let code = "42-alpha-bravo-charlie-delta";
+        let alice = HandshakeInitiator::new(code).unwrap();
+        let bob = HandshakeResponder::new(code).unwrap();
+
+        let msg_a = alice.spake_message().to_vec();
+        let msg_b = bob.spake_message().to_vec();
+
+        let alice_phase1 = alice.complete_spake2(&msg_b).unwrap();
+        let ek_bytes = alice_phase1.ek_bytes.clone();
+
+        let (bob_res, ct_bytes) = bob.complete_handshake(&msg_a, &ek_bytes).unwrap();
+        let alice_res = alice_phase1.finalize_with_kem(&ct_bytes).unwrap();
+
+        assert_eq!(alice_res.session_key, bob_res.session_key);
+        assert_eq!(alice_res.safety_number, bob_res.safety_number);
     }
 }

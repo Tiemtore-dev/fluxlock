@@ -244,12 +244,38 @@ impl SealedVault {
 /// (protégé par le tag Poly1305). L'appelant doit incrémenter `sequence` avant
 /// chaque appel et persister le dernier `sequence` connu pour vérifier au déchiffrement
 /// qu'aucune version antérieure n'a été restaurée.
+/// Dérive deux sous-clés indépendantes (chiffrement AEAD et intégrité HMAC du header)
+/// via HKDF-SHA3-256 à partir de la clé maître Argon2id (principe de séparation des clés).
+fn derive_vault_subkeys(
+    master_key: &kdf::MasterKey,
+    salt: &[u8; SALT_SIZE],
+) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>), CryptoError> {
+    let enc_secret = crate::key_derivation::hkdf::derive_key_hkdf(
+        master_key.as_bytes(),
+        Some(salt),
+        b"fluxlock/vault-v2/aead-key",
+        32,
+    )?;
+    let mac_secret = crate::key_derivation::hkdf::derive_key_hkdf(
+        master_key.as_bytes(),
+        Some(salt),
+        b"fluxlock/vault-v2/header-mac-key",
+        32,
+    )?;
+    let mut enc_key = Zeroizing::new([0u8; 32]);
+    enc_key.copy_from_slice(enc_secret.expose_secret());
+    let mut mac_key = Zeroizing::new([0u8; 32]);
+    mac_key.copy_from_slice(mac_secret.expose_secret());
+    Ok((enc_key, mac_key))
+}
+
 pub fn encrypt_vault(password: &[u8], vault_data: &VaultData) -> Result<SealedVault, CryptoError> {
     // 1. Générer un sel unique
     let salt = kdf::generate_salt()?;
 
-    // 2. Dériver la clé maître
+    // 2. Dériver la clé maître puis les sous-clés séparées (AEAD + HMAC)
     let master_key = kdf::derive_master_key(password, &salt)?;
+    let (enc_key, mac_key) = derive_vault_subkeys(&master_key, &salt)?;
 
     // 3. Sérialiser les données en MessagePack
     let plaintext = Zeroizing::new(
@@ -257,8 +283,8 @@ pub fn encrypt_vault(password: &[u8], vault_data: &VaultData) -> Result<SealedVa
             .map_err(|e| CryptoError::SerializationError(format!("MessagePack serialize: {}", e)))?,
     );
 
-    // 4. Chiffrer avec ChaCha20-Poly1305
-    let encrypted_payload = cipher::encrypt(master_key.as_bytes(), &plaintext)?;
+    // 4. Chiffrer avec ChaCha20-Poly1305 (sous-clé dédiée enc_key)
+    let encrypted_payload = cipher::encrypt(&enc_key, &plaintext)?;
 
     // 5. Construire le header
     let header = VaultHeader {
@@ -268,9 +294,9 @@ pub fn encrypt_vault(password: &[u8], vault_data: &VaultData) -> Result<SealedVa
         salt,
     };
 
-    // 6. Calculer le MAC du header
+    // 6. Calculer le MAC du header (sous-clé dédiée mac_key)
     let header_bytes = header.to_bytes();
-    let header_mac = integrity::compute_header_mac(master_key.as_bytes(), &header_bytes)?;
+    let header_mac = integrity::compute_header_mac(&mac_key, &header_bytes)?;
 
     Ok(SealedVault {
         header,
@@ -286,24 +312,25 @@ pub fn encrypt_vault(password: &[u8], vault_data: &VaultData) -> Result<SealedVa
 /// * `sealed` - Vault scellé lu depuis le disque.
 ///
 /// # Sécurité
-/// 1. Dérive la clé depuis le password + salt du header.
-/// 2. Vérifie le MAC du header (tamper detection).
-/// 3. Déchiffre le payload (vérifie le tag AEAD).
+/// 1. Dérive la clé maître et les sous-clés (AEAD + HMAC) depuis le password + salt du header.
+/// 2. Vérifie le MAC du header (tamper detection) avec `mac_key`.
+/// 3. Déchiffre le payload (vérifie le tag AEAD) avec `enc_key`.
 /// 4. Désérialise le MessagePack.
 pub fn decrypt_vault(password: &[u8], sealed: &SealedVault) -> Result<VaultData, CryptoError> {
-    // 1. Dériver la clé maître
+    // 1. Dériver la clé maître et les sous-clés séparées
     let master_key = kdf::derive_master_key_with_params(
         password,
         &sealed.header.salt,
         &sealed.header.kdf_params,
     )?;
+    let (enc_key, mac_key) = derive_vault_subkeys(&master_key, &sealed.header.salt)?;
 
     // 2. Vérifier le MAC du header (AVANT déchiffrement)
     let header_bytes = sealed.header.to_bytes();
-    integrity::verify_header_mac(master_key.as_bytes(), &header_bytes, &sealed.header_mac)?;
+    integrity::verify_header_mac(&mac_key, &header_bytes, &sealed.header_mac)?;
 
     // 3. Déchiffrer le payload
-    let plaintext = cipher::decrypt(master_key.as_bytes(), &sealed.encrypted_payload)?;
+    let plaintext = cipher::decrypt(&enc_key, &sealed.encrypted_payload)?;
 
     // 4. Désérialiser
     let vault_data: VaultData = rmp_serde::from_slice(&plaintext)

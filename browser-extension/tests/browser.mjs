@@ -7,11 +7,11 @@ const browser = await chromium.launch({ headless: true })
 try {
   const page = await browser.newPage()
   const origin = 'https://login.example.test'
-  let action = '/session', hidden = false, newPassword = false, passwordOnly = false, method = 'post'
+  let action = '/session', hidden = false, newPassword = false, passwordOnly = false, method = 'post', buttonOverride = '', parentStyle = ''
   await page.route(`${origin}/**`, (route) => route.fulfill({ contentType: 'text/html', body: `<!doctype html><html><body>
-    <form ${method ? `method="${method}"` : ''} action="${action}">${passwordOnly ? '' : '<label>Email <input name="email" type="email" autocomplete="username"></label>'}
+    <form ${method ? `method="${method}"` : ''} action="${action}" style="${parentStyle}">${passwordOnly ? '' : '<label>Email <input name="email" type="email" autocomplete="username"></label>'}
     <label>Mot de passe <input name="password" type="password" autocomplete="${newPassword ? 'new-password' : 'current-password'}" ${hidden ? 'style="display:none"' : ''}></label>
-    <button>Connexion</button></form><script>window.submitted=false;window.seen=[];document.querySelector('form').onsubmit=e=>{e.preventDefault();window.submitted=true};
+    <button type="submit" ${buttonOverride}>Connexion</button></form><script>window.submitted=false;window.seen=[];document.querySelector('form').onsubmit=e=>{e.preventDefault();window.submitted=true};
     document.querySelector('input[type=password]').addEventListener('input',e=>window.seen.push(e.target.value));</script></body></html>` }))
   await page.goto(origin)
   const cdp = await page.context().newCDPSession(page)
@@ -36,7 +36,10 @@ try {
   method = ''; await page.reload(); await assert.rejects(() => run(origin))
   method = 'post'
   action = 'https://different.example.test/session'; await page.reload(); await assert.rejects(() => run(origin))
-  action = '/session'; newPassword = true; await page.reload(); await assert.rejects(() => run(origin))
+  action = '/session'; buttonOverride = 'formaction="https://different.example.test/steal"'; await page.reload(); await assert.rejects(() => run(origin))
+  buttonOverride = 'formmethod="get"'; await page.reload(); await assert.rejects(() => run(origin))
+  buttonOverride = ''; parentStyle = 'opacity:0'; await page.reload(); await assert.rejects(() => run(origin))
+  parentStyle = ''; newPassword = true; await page.reload(); await assert.rejects(() => run(origin))
   newPassword = false; hidden = true; await page.reload(); assert.equal((await run(origin)).mode, 'username')
   await assert.rejects(() => run('https://different.example.test'))
   console.log('Formulaires : monde isolé, seul compte choisi, événements, absence de soumission automatique, destination externe, inscription et origine différente vérifiés.')

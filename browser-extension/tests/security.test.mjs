@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { canonicalOrigin, sameOrigin } from '../dist/origin.js'
+import { b64, unb64 } from '../dist/noise.js'
 
 async function abi(random = (bytes) => { crypto.getRandomValues(bytes); return 1 }) {
   const wasm = await readFile(new URL('../dist/noise.wasm', import.meta.url))
@@ -41,6 +42,14 @@ test('WASM destroys pending state on oversized input and fails closed without en
     assert.equal(failedRandom.api.output_len(), 0)
     assert.equal(failedRandom.api.execute(5, 0), 0)
   } finally { failedRandom.api.clear() }
+})
+
+test('b64 handles large 40KB frames without call stack overflow', () => {
+  const large = new Uint8Array(40000)
+  for (let i = 0; i < large.length; i++) large[i] = i & 0xff
+  const encoded = b64(large)
+  const decoded = unb64(encoded)
+  assert.deepEqual(decoded, large)
 })
 
 test('exact origin matching: IDNA, ports, subdomains and ambiguous inputs', () => {

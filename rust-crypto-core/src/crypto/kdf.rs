@@ -21,10 +21,13 @@ pub const SALT_SIZE: usize = 32;
 /// Taille de la clé dérivée en bytes (256 bits)
 pub const KEY_SIZE: usize = 32;
 
-/// Paramètres minimaux Argon2id recommandés
+/// Paramètres minimaux et maximaux Argon2id recommandés (protection anti-DoS/OOM)
 const DEFAULT_M_COST: u32 = 65536; // 64 MiB
 const DEFAULT_T_COST: u32 = 3;     // 3 itérations
 const DEFAULT_P_COST: u32 = 4;     // 4 threads
+const MAX_M_COST: u32 = 524_288;   // 512 MiB max
+const MAX_T_COST: u32 = 32;        // 32 itérations max
+const MAX_P_COST: u32 = 32;        // 32 threads max
 
 /// Clé maître dérivée — zéroïsée automatiquement on Drop.
 ///
@@ -78,17 +81,23 @@ pub fn derive_master_key_with_params(
     salt: &[u8; SALT_SIZE],
     params: &KdfParams,
 ) -> Result<MasterKey, CryptoError> {
-    // Vérification des paramètres minimaux
-    if params.m_cost < DEFAULT_M_COST {
+    // Vérification des paramètres minimaux et maximaux (anti-OOM / CPU DoS sur header non authentifié)
+    if params.m_cost < DEFAULT_M_COST || params.m_cost > MAX_M_COST {
         return Err(CryptoError::KeyDerivationError(format!(
-            "m_cost ({}) inférieur au minimum requis ({})",
-            params.m_cost, DEFAULT_M_COST
+            "m_cost ({}) hors des bornes autorisées ({}..={})",
+            params.m_cost, DEFAULT_M_COST, MAX_M_COST
         )));
     }
-    if params.t_cost < DEFAULT_T_COST {
+    if params.t_cost < DEFAULT_T_COST || params.t_cost > MAX_T_COST {
         return Err(CryptoError::KeyDerivationError(format!(
-            "t_cost ({}) inférieur au minimum requis ({})",
-            params.t_cost, DEFAULT_T_COST
+            "t_cost ({}) hors des bornes autorisées ({}..={})",
+            params.t_cost, DEFAULT_T_COST, MAX_T_COST
+        )));
+    }
+    if params.p_cost == 0 || params.p_cost > MAX_P_COST {
+        return Err(CryptoError::KeyDerivationError(format!(
+            "p_cost ({}) hors des bornes autorisées (1..={})",
+            params.p_cost, MAX_P_COST
         )));
     }
 
@@ -169,5 +178,19 @@ mod tests {
             p_cost: 4,
         };
         assert!(derive_master_key_with_params(password, &salt, &weak).is_err());
+
+        let excessive_mem = KdfParams {
+            m_cost: u32::MAX,
+            t_cost: 3,
+            p_cost: 4,
+        };
+        assert!(derive_master_key_with_params(password, &salt, &excessive_mem).is_err());
+
+        let excessive_time = KdfParams {
+            m_cost: DEFAULT_M_COST,
+            t_cost: 1000,
+            p_cost: 4,
+        };
+        assert!(derive_master_key_with_params(password, &salt, &excessive_time).is_err());
     }
 }
