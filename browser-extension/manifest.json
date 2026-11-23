@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "FluXlock",
+  "version": "0.4.0",
+  "description": "Remplissage autorisé par votre coffre local FluXlock.",
+  "minimum_chrome_version": "106",
+  "permissions": ["nativeMessaging", "activeTab", "scripting"],
+  "background": {"service_worker": "worker.js", "type": "module"},
+  "icons": {"32": "icons/32.png", "128": "icons/128.png"},
+  "action": {"default_popup": "popup.html", "default_title": "FluXlock — Remplissage sécurisé", "default_icon": {"32": "icons/32.png", "128": "icons/128.png"}},
+  "content_security_policy": {"extension_pages": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; connect-src 'self'; img-src 'self'; style-src 'self'; frame-ancestors 'none'"}
+}

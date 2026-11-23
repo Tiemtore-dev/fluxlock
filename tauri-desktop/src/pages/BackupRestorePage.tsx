@@ -1,5 +1,7 @@
+import { removeAndroidBiometricEnrollment } from '../lib/biometric-enrollment'
+import { useAuthStore } from '../stores/authStore'
 import { useState, useEffect, useRef, type FormEvent } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, captureVaultContext } from '../lib/vault-context'
 import { open } from '@tauri-apps/plugin-dialog'
 import { FolderOpen, RefreshCw, HardDriveDownload } from 'lucide-react'
 import { WorkspacePage } from '../design-system/layouts'
@@ -15,6 +17,8 @@ interface BackupMetadata {
   device_name: string
   file_count: number
   password_count: number
+  vault_id?: string
+  vault_name?: string
 }
 interface BackupInfo { path: string; metadata: BackupMetadata }
 interface CreateBackupResponse { success: boolean; backup_path?: string; message: string }
@@ -100,7 +104,8 @@ export default function BackupRestorePage() {
       if (response.success) {
         closeRestore()
         toast(response.message, 'success')
-        setTimeout(() => window.location.reload(), 1500)
+        removeAndroidBiometricEnrollment(useAuthStore.getState().user?.username)
+        await useAuthStore.getState().clearAuth()
         return
       }
       setRestoreError(response.message)
@@ -117,9 +122,11 @@ export default function BackupRestorePage() {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
+    const ensureCurrent = captureVaultContext()
     if (file.size > 64 * 1024 * 1024) { toast('Sauvegarde trop volumineuse', 'error'); return }
     try {
       const content = await file.text()
+      ensureCurrent()
       const path: string = await invoke('import_backup_content', { content })
       const meta: BackupMetadata = await invoke('get_backup_metadata', { request: { backup_path: path } })
       setBackups(prev => [{ path, metadata: meta }, ...prev.filter(b => b.path !== path)])
@@ -128,9 +135,11 @@ export default function BackupRestorePage() {
   }
 
   const selectCustom = async () => {
+    const ensureCurrent = captureVaultContext()
     if (isAndroid) { fileInputRef.current?.click(); return }
     try {
       const sel = await open({ multiple: false, filters: [{ name: 'SecureVault Backup', extensions: ['svbackup'] }] })
+      ensureCurrent()
       if (sel && typeof sel === 'string') {
         try {
           const meta: BackupMetadata = await invoke('get_backup_metadata', { request: { backup_path: sel } })
@@ -141,7 +150,7 @@ export default function BackupRestorePage() {
   }
 
   return (
-    <WorkspacePage title="Sauvegardes" description="Créez une copie chiffrée du coffre ou reprenez vos données à partir d’une archive.">
+    <WorkspacePage title="Sauvegardes" description={`Créez une copie chiffrée du coffre « ${useAuthStore.getState().selectedVault?.name || 'Coffre'} ». Une restauration remplace uniquement son contenu.`}>
       <div className="workspace-columns">
         <form className="workspace-panel workspace-stack" onSubmit={createBackup}>
           <div>

@@ -32,18 +32,19 @@ struct BiometricRuntime {
     last_password_login: Option<Instant>,
 }
 
-static RUNTIME: Mutex<BiometricRuntime> = Mutex::new(BiometricRuntime {
-    failed_attempts: 0,
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
-    last_password_login: None,
-});
+static RUNTIME: once_cell::sync::Lazy<Mutex<std::collections::HashMap<std::path::PathBuf, BiometricRuntime>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
-fn with_runtime<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut BiometricRuntime) -> R,
+fn with_runtime<F, R>(dir: &Path, f: F) -> R
+where F: FnOnce(&mut BiometricRuntime) -> R,
 {
-    let mut runtime = RUNTIME.lock().unwrap();
-    f(&mut runtime)
+    let mut runtimes = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    let runtime = runtimes.entry(dir.to_owned()).or_insert_with(|| BiometricRuntime {
+        failed_attempts: 0,
+        #[cfg(not(any(target_os = "macos", target_os = "android")))]
+        last_password_login: None,
+    });
+    f(runtime)
 }
 
 // ═══════════════════════════════════════════════════════
@@ -71,6 +72,9 @@ pub struct BiometricStatus {
 struct BiometricEnrollment {
     user_id: i64,
     username: String,
+    /// Unique native credential per enrollment; old vaults retain their legacy account.
+    #[serde(default)]
+    credential_id: Option<uuid::Uuid>,
     /// Version of the native Keychain enrollment on macOS.
     #[serde(default)]
     keychain_format: u8,
@@ -113,12 +117,18 @@ fn test_build_uses_separate_keychain_accounts() {
     assert_eq!(keychain_account(1, false), "user_1");
 }
 
+#[cfg(not(target_os = "android"))]
+fn credential_account(user_id: i64, credential_id: Option<uuid::Uuid>) -> String {
+    let legacy = keychain_account(user_id, crate::hidden_storage::TEST_BUILD);
+    match credential_id { Some(id) => format!("{legacy}/vault/{id}"), None => legacy }
+}
+
 /// Stores the enrolled key in the platform credential store.
 #[cfg(not(target_os = "android"))]
-fn store_key_in_keychain(user_id: i64, key_b64: &str) -> Result<(), String> {
+fn store_key_in_keychain(user_id: i64, credential_id: Option<uuid::Uuid>, key_b64: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let account = std::ffi::CString::new(keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
+        let account = std::ffi::CString::new(credential_account(user_id, credential_id))
             .map_err(|_| "Invalid account string".to_string())?;
         let status = unsafe {
             biometric_keychain_store(
@@ -135,7 +145,7 @@ fn store_key_in_keychain(user_id: i64, key_b64: &str) -> Result<(), String> {
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &credential_account(user_id, credential_id))
             .map_err(|e| format!("Keychain entry error: {}", e))?;
         entry.set_password(key_b64)
             .map_err(|e| format!("Keychain store error: {}", e))?;
@@ -147,10 +157,10 @@ fn store_key_in_keychain(user_id: i64, key_b64: &str) -> Result<(), String> {
 /// Récupère la clé de chiffrement depuis le Keychain OS avec vérification biométrique
 /// Sur macOS : SecItemCopyMatching déclenche automatiquement Touch ID
 #[cfg(not(target_os = "android"))]
-fn get_key_from_keychain(user_id: i64) -> Result<String, String> {
+fn get_key_from_keychain(user_id: i64, credential_id: Option<uuid::Uuid>) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let account = std::ffi::CString::new(keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
+        let account = std::ffi::CString::new(credential_account(user_id, credential_id))
             .map_err(|_| "Invalid account string".to_string())?;
         let reason = std::ffi::CString::new("Déverrouillez FluXlock avec Touch ID")
             .map_err(|_| "Invalid reason string".to_string())?;
@@ -176,7 +186,7 @@ fn get_key_from_keychain(user_id: i64) -> Result<String, String> {
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &credential_account(user_id, credential_id))
             .map_err(|e| format!("Keychain entry error: {}", e))?;
         entry.get_password()
             .map_err(|e| format!("Keychain retrieve error: {}", e))
@@ -186,23 +196,25 @@ fn get_key_from_keychain(user_id: i64) -> Result<String, String> {
 
 /// Supprime la clé de chiffrement du Keychain OS
 #[cfg(not(target_os = "android"))]
-fn delete_key_from_keychain(user_id: i64) -> Result<(), String> {
+fn delete_key_from_keychain(user_id: i64, credential_id: Option<uuid::Uuid>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let account = std::ffi::CString::new(keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
+        let account = std::ffi::CString::new(credential_account(user_id, credential_id))
             .map_err(|_| "Invalid account string".to_string())?;
         let status = unsafe { biometric_keychain_delete(account.as_ptr()) };
-        if status != 0 {
+        if status != 0 && status != -25300 { // errSecItemNotFound is already deleted.
             return Err(format!("Secure Enclave keychain delete failed (OSStatus {})", status));
         }
         Ok(())
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_account(user_id, crate::hidden_storage::TEST_BUILD))
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &credential_account(user_id, credential_id))
             .map_err(|e| format!("Keychain entry error: {}", e))?;
-        let _ = entry.delete_password();
-        Ok(())
+        match entry.delete_password() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("Keychain delete error: {error}")),
+        }
     }
 
 }
@@ -497,40 +509,43 @@ fn macos_enrollment_format(compatibility: bool, native: bool, enclave: bool) -> 
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn delete_enrollment_key(enrollment: &BiometricEnrollment) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(id) = enrollment.compatibility_id {
+        return macos_compatibility::delete(enrollment.user_id, id);
+    }
+    delete_key_from_keychain(enrollment.user_id, enrollment.credential_id)
+}
+
 #[cfg(target_os = "macos")]
 fn save_compatibility_enrollment(
     dir: &Path, enrollment: &BiometricEnrollment, id: uuid::Uuid, key: &[u8],
 ) -> Result<(), String> {
+    let previous = get_enrollment(dir);
     macos_compatibility::store(enrollment.user_id, id, key)?;
     let saved = (|| {
-        // Remove any weaker pre-2.3 key before reporting the new enrollment active.
-        macos_compatibility::delete_legacy(enrollment.user_id)?;
-        retire_compatibility_enrollment(dir, enrollment.user_id)?;
+        if dir.file_name().and_then(|name| name.to_str()).is_none_or(|name| uuid::Uuid::parse_str(name).is_err()) {
+            macos_compatibility::delete_legacy(enrollment.user_id)?;
+        }
         store_enrollment(dir, enrollment)
     })();
     if saved.is_err() {
         let _ = macos_compatibility::delete(enrollment.user_id, id);
+    } else if let Some(previous) = previous {
+        // Retire only this directory's previous credential, after publication.
+        if let Err(error) = delete_enrollment_key(&previous) {
+            debug_log!("Ancien credential biométrique conservé dans le trousseau : {error}");
+        }
     }
     saved
 }
 
-#[cfg(target_os = "macos")]
-fn retire_compatibility_enrollment(dir: &Path, user_id: i64) -> Result<(), String> {
-    if let Some(existing) = get_enrollment(dir).filter(|enrollment| enrollment.user_id == user_id
-        && enrollment.keychain_format == COMPATIBILITY_KEYCHAIN_FORMAT)
-    {
-        if let Some(id) = existing.compatibility_id {
-            macos_compatibility::delete(user_id, id)?;
-        }
-    }
-    Ok(())
-}
-
-fn password_requirement(enrollment: &BiometricEnrollment) -> Option<&'static str> {
+fn password_requirement(dir: &Path, enrollment: &BiometricEnrollment) -> Option<&'static str> {
     if let Some(restriction) = enrollment.restriction {
         return Some(restriction.message());
     }
-    with_runtime(|runtime| {
+    with_runtime(dir, |runtime| {
         if runtime.failed_attempts >= MAX_FAILED_ATTEMPTS {
             return Some(PasswordRestriction::TooManyAttempts.message());
         }
@@ -549,7 +564,7 @@ pub fn notify_password_login_success(dir: &Path) -> Result<(), String> {
             store_enrollment(dir, &enrollment)?;
         }
     }
-    with_runtime(|runtime| {
+    with_runtime(dir, |runtime| {
         runtime.failed_attempts = 0;
         #[cfg(not(any(target_os = "macos", target_os = "android")))]
         { runtime.last_password_login = Some(Instant::now()); }
@@ -569,7 +584,7 @@ pub fn check_biometric_status(dir: &Path) -> BiometricStatus {
     let enrollment = raw_enrollment.as_ref().filter(|enrollment| is_current_enrollment(enrollment));
     let enrolled = enrollment.is_some();
     let legacy = raw_enrollment.is_some() && !enrolled;
-    let reason = enrollment.and_then(password_requirement).or(legacy.then_some(
+    let reason = enrollment.and_then(|entry| password_requirement(dir, entry)).or(legacy.then_some(
         "Ouvrez le coffre au mot de passe maître, puis réactivez Touch ID pour cette version.",
     ));
 
@@ -607,7 +622,7 @@ pub fn check_biometric_status(dir: &Path) -> BiometricStatus {
         unavailable_reason,
         compatibility_available,
         compatibility_enrolled,
-        failed_attempts: with_runtime(|runtime| runtime.failed_attempts),
+        failed_attempts: with_runtime(dir, |runtime| runtime.failed_attempts),
     }
 }
 
@@ -629,9 +644,12 @@ pub fn enable_biometric(
         NATIVE_KEYCHAIN_FORMAT
     };
 
+    #[cfg(not(target_os = "android"))]
+    let previous = get_enrollment(dir);
     let enrollment = BiometricEnrollment {
         user_id,
         username: username.to_string(),
+        credential_id: Some(uuid::Uuid::new_v4()),
         keychain_format,
         #[cfg(target_os = "macos")]
         compatibility_id: (keychain_format == COMPATIBILITY_KEYCHAIN_FORMAT).then(uuid::Uuid::new_v4),
@@ -640,7 +658,7 @@ pub fn enable_biometric(
     #[cfg(target_os = "macos")]
     if let Some(id) = enrollment.compatibility_id {
         save_compatibility_enrollment(dir, &enrollment, id, encryption_key)?;
-        with_runtime(|runtime| runtime.failed_attempts = 0);
+        with_runtime(dir, |runtime| runtime.failed_attempts = 0);
         return Ok(None);
     }
 
@@ -648,12 +666,20 @@ pub fn enable_biometric(
     #[cfg(not(target_os = "android"))]
     {
         platform_authenticate("Activez la biométrie pour FluXlock")?;
-        store_key_in_keychain(user_id, &key_b64)?;
+        store_key_in_keychain(user_id, enrollment.credential_id, &key_b64)?;
     }
-    #[cfg(target_os = "macos")]
-    retire_compatibility_enrollment(dir, user_id)?;
-    store_enrollment(dir, &enrollment)?;
-    with_runtime(|runtime| runtime.failed_attempts = 0);
+    if let Err(error) = store_enrollment(dir, &enrollment) {
+        #[cfg(not(target_os = "android"))]
+        let _ = delete_enrollment_key(&enrollment);
+        return Err(error);
+    }
+    #[cfg(not(target_os = "android"))]
+    if let Some(previous) = previous {
+        if let Err(error) = delete_enrollment_key(&previous) {
+            debug_log!("Ancien credential biométrique conservé dans le trousseau : {error}");
+        }
+    }
+    with_runtime(dir, |runtime| runtime.failed_attempts = 0);
 
     #[cfg(target_os = "android")]
     return Ok(Some(key_b64.to_string()));
@@ -664,9 +690,7 @@ pub fn enable_biometric(
 pub fn disable_biometric(dir: &Path) -> Result<(), String> {
     #[cfg(not(target_os = "android"))]
     if let Some(enrollment) = get_enrollment(dir) {
-        #[cfg(target_os = "macos")]
-        retire_compatibility_enrollment(dir, enrollment.user_id)?;
-        let _ = delete_key_from_keychain(enrollment.user_id);
+        delete_enrollment_key(&enrollment)?;
     }
     match std::fs::remove_file(enrollment_path(dir)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
@@ -680,7 +704,7 @@ fn authorized_enrollment(dir: &Path, target_username: &str) -> Result<BiometricE
     if !enrollment.username.eq_ignore_ascii_case(target_username) {
         return Err("Biométrie non configurée pour ce compte.".into());
     }
-    if let Some(reason) = password_requirement(&enrollment) {
+    if let Some(reason) = password_requirement(dir, &enrollment) {
         return Err(reason.into());
     }
     Ok(enrollment)
@@ -698,7 +722,7 @@ pub fn biometric_login(
     {
         if let Some(id) = enrollment.compatibility_id {
             let key = macos_compatibility::retrieve(enrollment.user_id, id)?;
-            with_runtime(|runtime| runtime.failed_attempts = 0);
+            with_runtime(dir, |runtime| runtime.failed_attempts = 0);
             return Ok((enrollment.user_id, enrollment.username, key.to_vec()));
         }
         if !unsafe { biometric_keychain_has_identity() } {
@@ -709,7 +733,7 @@ pub fn biometric_login(
     // The macOS keychain prompts once when it releases the protected item.
     #[cfg(not(target_os = "macos"))]
     if let Err(error) = platform_authenticate("Déverrouillez FluXlock") {
-        let attempts = with_runtime(|runtime| {
+        let attempts = with_runtime(dir, |runtime| {
             runtime.failed_attempts += 1;
             runtime.failed_attempts
         });
@@ -722,10 +746,10 @@ pub fn biometric_login(
         return Err(error);
     }
 
-    let key_b64 = Zeroizing::new(get_key_from_keychain(enrollment.user_id)?);
+    let key_b64 = Zeroizing::new(get_key_from_keychain(enrollment.user_id, enrollment.credential_id)?);
     let key = general_purpose::STANDARD.decode(key_b64.as_bytes())
         .map_err(|_| "Clé biométrique invalide.".to_string())?;
-    with_runtime(|runtime| runtime.failed_attempts = 0);
+    with_runtime(dir, |runtime| runtime.failed_attempts = 0);
     Ok((enrollment.user_id, enrollment.username, key))
 }
 
@@ -745,11 +769,30 @@ mod tests {
         BiometricEnrollment {
             user_id: 1,
             username: "fixture".into(),
+            credential_id: None,
             keychain_format: NATIVE_KEYCHAIN_FORMAT,
             #[cfg(target_os = "macos")]
             compatibility_id: None,
             restriction: None,
         }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn native_credentials_are_unique_even_when_local_user_ids_match() {
+        let a = credential_account(1, Some(uuid::Uuid::new_v4()));
+        let b = credential_account(1, Some(uuid::Uuid::new_v4()));
+        assert_ne!(a, b);
+        assert_ne!(a, credential_account(1, None));
+    }
+
+    #[test]
+    fn biometric_retry_state_is_scoped_to_the_vault() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        with_runtime(a.path(), |runtime| runtime.failed_attempts = MAX_FAILED_ATTEMPTS);
+        assert_eq!(with_runtime(b.path(), |runtime| runtime.failed_attempts), 0);
+        assert_eq!(password_requirement(a.path(), &enrollment()), Some(PasswordRestriction::TooManyAttempts.message()));
     }
 
     #[test]
@@ -766,7 +809,7 @@ mod tests {
     #[test]
     #[cfg(any(target_os = "macos", target_os = "android"))]
     fn enrolled_native_authenticator_is_ready_at_cold_start() {
-        assert_eq!(password_requirement(&enrollment()), None);
+        assert_eq!(password_requirement(Path::new("test-cold-start"), &enrollment()), None);
     }
 
     #[test]

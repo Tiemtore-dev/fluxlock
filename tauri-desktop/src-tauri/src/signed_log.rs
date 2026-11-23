@@ -65,9 +65,26 @@ fn test_build_uses_separate_log_keyring() {
     assert_eq!(log_kek_service(false), "com.fluxlock.signed-log");
 }
 
+fn log_kek_account(data_dir: &Path) -> String {
+    match data_dir.file_name().and_then(|name| name.to_str()).filter(|name| uuid::Uuid::parse_str(name).is_ok()) {
+        Some(id) if data_dir.parent().and_then(|p| p.file_name()).is_some_and(|name| name == "vaults") => format!("{LOG_KEK_ACCOUNT}/vault/{id}"),
+        _ => LOG_KEK_ACCOUNT.into(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn vaults_use_separate_log_keyring_accounts_and_preserve_legacy() {
+    let a = std::path::PathBuf::from("root/vaults").join(uuid::Uuid::new_v4().to_string());
+    let b = std::path::PathBuf::from("root/vaults").join(uuid::Uuid::new_v4().to_string());
+    assert_ne!(log_kek_account(&a), log_kek_account(&b));
+    assert_eq!(log_kek_account(Path::new("legacy-root")), LOG_KEK_ACCOUNT);
+}
+
 /// VULN-005: Récupère ou génère la KEK (Key Encryption Key) pour protéger la clé de signature.
 /// La KEK est stockée dans le Keychain OS, pas sur le disque.
-fn get_or_create_log_kek() -> Result<[u8; 32], String> {
+#[cfg(not(test))]
+fn get_or_create_log_kek(data_dir: &Path) -> Result<[u8; 32], String> {
     use base64::{Engine as _, engine::general_purpose};
     
     // Mobile fallback: pas de keyring disponible, utiliser une clé fixe dérivée
@@ -80,7 +97,8 @@ fn get_or_create_log_kek() -> Result<[u8; 32], String> {
         return Ok(key);
     }
     
-    let entry = keyring::Entry::new(log_kek_service(crate::hidden_storage::TEST_BUILD), LOG_KEK_ACCOUNT)
+    let account = log_kek_account(data_dir);
+    let entry = keyring::Entry::new(log_kek_service(crate::hidden_storage::TEST_BUILD), &account)
         .map_err(|e| format!("Keyring entry error: {}", e))?;
     
     // Essayer de lire la KEK existante
@@ -161,7 +179,11 @@ impl SignedLogManager {
         let vk_path = log_dir.join("log_verifying_key.bin");
 
         // VULN-005: Obtenir la KEK depuis le Keychain OS
-        let kek = get_or_create_log_kek()?;
+        #[cfg(not(test))]
+        let kek = get_or_create_log_kek(data_dir)?;
+        // Integration fixtures must never create/read production keychain entries.
+        #[cfg(test)]
+        let kek: [u8; 32] = secure_vault_crypto::sha3_256_hash(data_dir.to_string_lossy().as_bytes()).try_into().expect("SHA3-256 produces 32 bytes");
 
         // Charger ou générer la clé de signature dédiée (chiffrée au repos)
         let (signing_key, verifying_key_der) = if key_path.exists() && vk_path.exists() {

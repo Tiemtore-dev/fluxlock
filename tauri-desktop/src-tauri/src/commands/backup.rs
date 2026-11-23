@@ -2,20 +2,14 @@ use crate::AppState;
 use crate::crypto::verify_password;
 use crate::{hidden_storage, backup_manager};
 use crate::database::Database;
-use crate::security_monitor::get_security_monitor;
-use crate::filesystem_monitor::get_filesystem_monitor;
 use serde::{Deserialize, Serialize};
 use tauri::State;
-use sqlx::SqlitePool;
 
 // ========== COMMANDES BACKUP & RESTORE ==========
 
 /// Resolves the data directory (Android: app_data_dir stored at init; desktop: hidden storage).
 async fn resolve_data_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
-    if let Some(dir) = state.data_dir.lock().await.as_ref() {
-        return Ok(dir.clone());
-    }
-    hidden_storage::get_hidden_database_dir()
+    state.data_dir.lock().await.clone().ok_or_else(|| "Aucun coffre sélectionné".into())
 }
 
 /// Directory where backups are created. On Android this is a private staging area; the
@@ -44,7 +38,9 @@ pub struct CreateBackupResponse {
 pub async fn create_backup(
     request: CreateBackupRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<CreateBackupResponse, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -69,12 +65,14 @@ pub async fn create_backup(
     let backup_dir = resolve_backup_dir(&state).await?;
 
     // Créer le backup
-    let backup_path = backup_manager::create_backup(
+    let vault = state.selected_vault.lock().await.as_ref().map(|v| v.descriptor.clone());
+    let backup_path = backup_manager::create_backup_for_vault(
         db,
         &files_dir,
         &request.master_password,
         &user.username,
         &backup_dir,
+        vault.as_ref(),
     )
     .await?;
 
@@ -91,7 +89,10 @@ pub struct SearchBackupsResponse {
 }
 
 #[tauri::command]
-pub async fn search_backups(state: State<'_, AppState>) -> Result<SearchBackupsResponse, String> {
+pub async fn search_backups(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<SearchBackupsResponse, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let extra_dirs = vec![resolve_backup_dir(&state).await?];
     let backups = backup_manager::find_all_backups(&extra_dirs);
     Ok(SearchBackupsResponse { backups })
@@ -102,7 +103,9 @@ pub async fn search_backups(state: State<'_, AppState>) -> Result<SearchBackupsR
 pub async fn import_backup_content(
     content: String,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let backup_dir = resolve_backup_dir(&state).await?;
     let path = backup_manager::import_backup_content(&content, &backup_dir)?;
     Ok(path.to_string_lossy().to_string())
@@ -110,7 +113,11 @@ pub async fn import_backup_content(
 
 /// Writes exported text (e.g. CSV) to the user's Downloads folder (desktop) and returns the path.
 #[tauri::command]
-pub async fn export_text_to_downloads(filename: String, content: String) -> Result<String, String> {
+pub async fn export_text_to_downloads(filename: String, content: String,
+    state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let safe_name: String = filename
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-' | '.'))
@@ -170,30 +177,48 @@ pub struct RestoreBackupResponse {
 pub async fn restore_backup(
     request: RestoreBackupRequest,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<RestoreBackupResponse, String> {
-    let _lifecycle = state.auth_lifecycle.lock().await;
+    let _lifecycle = state.auth_lifecycle.write().await;
+    crate::vault::check_context(&state, &context, true).await?;
     let id = crate::validate_session(&state).await?;
     let mut db_guard = state.db.lock().await;
     let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
     let owner = db.get_user_by_id(id).await.map_err(|e| e.to_string())?.ok_or("Compte introuvable")?;
     verify_password(&request.current_password, &owner.password_hash)
         .map_err(|_| "Mot de passe actuel incorrect")?;
+    state.autofill.reset_vault(&context.vault_id).await?;
 
     let path = std::path::Path::new(&request.backup_path);
     let data_dir = resolve_data_dir(&state).await?;
     let db_path = data_dir.join("sv.db");
     let files_dir = data_dir.join("files");
+    super::session::clear_transfer_state(&state).await;
     db.pool.close().await;
     let result = backup_manager::restore_backup(path, &request.master_password, &db_path, &files_dir).await;
 
-    let replacement = Database::new(&db_path).await.map_err(|e| e.to_string())?;
+    let replacement = match Database::new(&db_path).await {
+        Ok(db) => db,
+        Err(error) => {
+            drop(db_guard);
+            super::session::lock_session(&state).await;
+            return Err(error.to_string());
+        }
+    };
     *db_guard = Some(replacement);
     drop(db_guard);
-    let metadata = result?;
-    *state.current_user_id.lock().await = None;
-    *state.session_token.lock().await = None;
-    super::session::clear_session_key(&state, id).await;
-    super::session::clear_transfer_state(&state).await;
+    let metadata = match result {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            // A rejected archive leaves the original vault and its session usable.
+            let key = crate::get_or_fetch_vault_key(&state, id).await?;
+            if let Some(manager) = state.transfer_manager.lock().await.as_ref() {
+                let _ = manager.trust_store.lock().await.unlock(&key);
+            }
+            return Err(error);
+        }
+    };
+    super::session::lock_session(&state).await;
     let _ = crate::biometric::disable_biometric(&data_dir);
 
     Ok(RestoreBackupResponse {
@@ -211,7 +236,10 @@ pub struct GetBackupMetadataRequest {
 #[tauri::command]
 pub async fn get_backup_metadata(
     request: GetBackupMetadataRequest,
+    state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<backup_manager::BackupMetadata, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let backup_path = std::path::PathBuf::from(&request.backup_path);
     backup_manager::read_backup_metadata(&backup_path)
 }
@@ -223,8 +251,10 @@ pub async fn get_backup_metadata(
 pub async fn reset_vault_completely(
     password: String,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<String, String> {
-    let _lifecycle = state.auth_lifecycle.lock().await;
+    let _lifecycle = state.auth_lifecycle.write().await;
+    crate::vault::check_context(&state, &context, true).await?;
     debug_log!("⚠️ Réinitialisation complète du coffre-fort demandée");
     
     // CFG-003: Vérifier l'identité avant la destruction
@@ -246,159 +276,35 @@ pub async fn reset_vault_completely(
             .map_err(|_| "Mot de passe incorrect. Réinitialisation refusée.")?;
     }
 
-    *state.current_user_id.lock().await = None;
-    *state.session_token.lock().await = None;
-    super::session::clear_session_key(&state, user_id).await;
-    super::session::clear_transfer_state(&state).await;
-    crate::biometric::disable_biometric(&resolve_data_dir(&state).await?)?;
-    let mut database = state.db.lock().await;
-    if let Some(db) = database.take() {
-        db.pool.close().await;
-    }
-    drop(database);
+    let dir = resolve_data_dir(&state).await?;
+    crate::biometric::disable_biometric(&dir)?;
+    state.autofill.reset_vault(&context.vault_id).await?;
+    super::session::lock_session(&state).await;
+    *state.transfer_manager.lock().await = None;
+    *state.signed_log_manager.lock().await = None;
+    if let Some(db) = state.db.lock().await.take() { db.pool.close().await; }
+    reset_storage(&dir)?;
+    let db = Database::new(&dir.join("sv.db")).await.map_err(|e| e.to_string())?;
+    db.initialize().await.map_err(|e| e.to_string())?;
+    *state.db.lock().await = Some(db);
+    let selected = state.selected_vault.lock().await.clone().ok_or("Aucun coffre sélectionné")?;
+    crate::vault::mount(&state, selected).await?;
+    Ok("Le contenu de ce coffre a été effacé".into())
+}
 
-    // Obtenir le répertoire de données (stocké par init_local_db)
-    // Fallback: hidden_storage pour rétrocompatibilité desktop
-    let app_data_dir = {
-        let stored = state.data_dir.lock().await;
-        if let Some(dir) = stored.as_ref() {
-            dir.clone()
-        } else {
-            hidden_storage::get_hidden_database_dir()
-                .map_err(|e| format!("Impossible de trouver le répertoire de données: {}", e))?
+/// Never delete a vault's parent directory: the legacy vault shares the catalog root.
+pub(crate) fn reset_storage(dir: &std::path::Path) -> Result<(), String> {
+    for name in ["sv.db", "sv.db-wal", "sv.db-shm", "sv.db-journal", "files", "signed_logs", "trust_store.enc", ".biometric_enrollment.json", "threat_blocked.json"] {
+        let path = dir.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if meta.is_dir() && !meta.file_type().is_symlink() {
+                    std::fs::remove_dir_all(&path)
+                } else { std::fs::remove_file(&path) }.map_err(|e| e.to_string())?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
         }
-    };
-    
-    // Supprimer tout le répertoire de l'application
-    if app_data_dir.exists() {
-        debug_log!("🗑️ Suppression de: {:?}", app_data_dir);
-        std::fs::remove_dir_all(&app_data_dir)
-            .map_err(|e| format!("Erreur lors de la suppression de la base de données: {}", e))?;
     }
-    
-    // Réinitialiser les moniteurs de sécurité
-    let security_monitor = get_security_monitor();
-    security_monitor.reset_all().await;
-    
-    let fs_monitor = get_filesystem_monitor();
-    {
-        let guard = fs_monitor.lock().map_err(|e| format!("Lock error: {}", e))?;
-        guard.reset_stats();
-    } // guard est dropped ici, avant le .await
-    
-    // Réinitialiser la base de données après suppression
-    debug_log!("🔄 Réinitialisation de la base de données...");
-    let db_path = app_data_dir.join("sv.db");
-    
-    // Créer le répertoire s'il n'existe pas
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Erreur création répertoire: {}", e))?;
-    }
-    
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let pool = SqlitePool::connect(&db_url)
-        .await
-        .map_err(|e| format!("Erreur connexion DB: {}", e))?;
-
-    // Créer les tables
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            crypto_salt TEXT NOT NULL,
-            totp_secret TEXT,
-            totp_enabled BOOLEAN DEFAULT 0,
-            totp_verified_at DATETIME,
-            backup_codes TEXT,
-            account_locked BOOLEAN DEFAULT 0,
-            locked_until DATETIME,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )"
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Erreur création table users: {}", e))?;
-
-    // Créer les autres tables nécessaires
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS passwords (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            username TEXT,
-            password TEXT NOT NULL,
-            url TEXT,
-            notes TEXT,
-            category TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )"
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Erreur création table passwords: {}", e))?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS secure_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            filename TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            file_size INTEGER NOT NULL,
-            mime_type TEXT,
-            integrity_hash TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )"
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Erreur création table secure_files: {}", e))?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS secure_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            key_name TEXT NOT NULL,
-            key_type TEXT NOT NULL,
-            key_data TEXT NOT NULL,
-            algorithm TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )"
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Erreur création table secure_keys: {}", e))?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            action TEXT NOT NULL,
-            resource_type TEXT NOT NULL,
-            resource_id INTEGER,
-            ip_address TEXT,
-            user_agent TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )"
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Erreur création table audit_logs: {}", e))?;
-
-    // Créer l'instance Database à partir du SqlitePool (pas de db_path car déjà connecté)
-    let database = Database {
-        pool,
-    };
-    
-    *state.db.lock().await = Some(database);
-    
-    debug_log!("✅ Coffre-fort complètement réinitialisé et base de données prête");
-    Ok("Coffre-fort complètement réinitialisé".to_string())
+    Ok(())
 }

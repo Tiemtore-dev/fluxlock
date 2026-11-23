@@ -1,7 +1,8 @@
+import { removeAndroidBiometricEnrollment } from '../lib/biometric-enrollment'
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Trash2 } from 'lucide-react'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '../lib/vault-context'
 import { WorkspacePage } from '../design-system/layouts'
 import { Button, Input } from '../design-system/atoms'
 import { useAuthStore } from '../stores/authStore'
@@ -25,8 +26,9 @@ export default function ResetVaultPage() {
     setError('')
     try {
       await invoke('reset_vault_completely', { password })
+      removeAndroidBiometricEnrollment(useAuthStore.getState().user?.username)
       await clearAuth()
-      navigate('/register', { replace: true })
+      navigate('/register?configure=1', { replace: true })
     } catch (reason) {
       setError(String(reason))
       setPassword('')
@@ -59,7 +61,7 @@ export default function ResetVaultPage() {
         </form>
       ) : (
         <section className="workspace-panel workspace-stack max-w-xl">
-          <h2>Supprimer les données de cet appareil</h2>
+          <h2>Supprimer les données de ce coffre</h2>
           <p className="workspace-danger">Le compte, les identifiants, les fichiers chiffrés, les clés et l’historique local seront supprimés.</p>
           <p>Créez une sauvegarde avant de continuer si vous souhaitez conserver une copie.</p>
           <div className="workspace-actions">

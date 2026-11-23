@@ -1,13 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { ArrowLeftRight, Archive, ChevronRight, Files, KeyRound, ShieldCheck, Fingerprint } from 'lucide-react'
-import { passwords, files, keys, security } from '../lib/vault-service'
+import { ArrowLeftRight, Archive, ChevronRight, Files, KeyRound, ShieldCheck, Fingerprint, FileText } from 'lucide-react'
+import { passwords, files, keys, security, notes } from '../lib/vault-service'
 import { WorkspacePage } from '../design-system/layouts'
 
 export default function DashboardPage() {
   const entries = useQuery({ queryKey: ['passwords'], queryFn: passwords.list })
   const documents = useQuery({ queryKey: ['secureFiles'], queryFn: files.list })
   const cryptographicKeys = useQuery({ queryKey: ['secureKeys'], queryFn: keys.list })
+  const secureNotes = useQuery({ queryKey: ['notes', 'count'], queryFn: () => notes.list('', 0, 1) })
   const events = useQuery({ queryKey: ['securityEvents'], queryFn: security.getEvents })
   const alerts = events.data?.filter((event) => event.severity === 'critical' || event.severity === 'warning').length
 
@@ -29,6 +30,9 @@ export default function DashboardPage() {
               <small>{documents.isError ? 'Indisponible' : documents.data ? documents.data.length : '…'}</small>
               <ChevronRight size={16} aria-hidden="true" />
             </Link></li>
+            <li><Link to="/notes"><FileText size={19} aria-hidden="true" /><span>Notes</span>
+              <small>{secureNotes.isError ? 'Indisponible' : secureNotes.data ? secureNotes.data.total : '…'}</small>
+              <ChevronRight size={16} aria-hidden="true" /></Link></li>
             <li><Link to="/keys">
               <Fingerprint size={19} aria-hidden="true" />
               <span>Clés cryptographiques</span>

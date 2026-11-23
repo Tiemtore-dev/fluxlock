@@ -1,31 +1,59 @@
 name: Release FluXlock
 
 # ─────────────────────────────────────────────────────────────
-# Stratégie 2 repos :
-#   - Repo PRIVÉ (fluxlock)          → code source, CI/CD
-#   - Repo PUBLIC (fluxlock-releases) → installeurs + latest.json
-#
-# Fonctionnement :
-#   1. tauri-action compile + crée une release DRAFT dans fluxlock (privé)
-#   1b. build-android compile + signe l'APK (artefact)
-#   2. "copy-to-public" copie tous les assets (+ l'APK) vers fluxlock-releases (public)
-#   3. La release dans fluxlock reste en draft (invisible)
+# Deux dépôts : fluxlock pour les sources/CI et fluxlock-releases pour les
+# téléchargements et latest.json. Après validation de main, prepare crée le tag
+# d'une nouvelle version sans jamais déplacer un tag existant. Le push du tag
+# par GITHUB_TOKEN ne déclenche pas une deuxième exécution : cette invocation
+# poursuit elle-même les builds et la publication. Les tags poussés explicitement
+# restent compatibles avec le circuit de release et ses relances.
+# Desktop, APK signé, extension et quatre relais doivent tous être disponibles
+# avant de publier dans fluxlock-releases et d'actualiser les mises à jour.
 # ─────────────────────────────────────────────────────────────
 
 on:
   push:
     tags:
       - "v*"
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
 
 env:
   PUBLIC_REPO: Tiemtore-dev/fluxlock-releases
 
 jobs:
+  prepare:
+    name: Validate version and pin release commit
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test release guards
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Prepare immutable version tag
+        id: release
+        run: python3 scripts/release-metadata.py --github
+
   # ──────────────────────────────────────────────────────────
   # ÉTAPE 1 — Compilation multi-plateforme
   # ──────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.platform }})
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
     permissions:
       contents: write
     strategy:
@@ -48,6 +76,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
 
       - name: Install dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
@@ -65,7 +95,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -162,8 +192,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         with:
           projectPath: "./tauri-desktop"
-          tagName: ${{ github.ref_name }}
-          releaseName: "FluXlock ${{ github.ref_name }}"
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: "FluXlock ${{ needs.prepare.outputs.tag }}"
           releaseBody: "Release interne — assets copiés vers fluxlock-releases."
           releaseDraft: false
           prerelease: false
@@ -186,24 +216,30 @@ jobs:
   # ──────────────────────────────────────────────────────────
   build-android:
     name: Build Android APK
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
 
       - name: Vérifier que le tag correspond à la version de l'app
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           CONF_VERSION=$(jq -r .version tauri-desktop/src-tauri/tauri.conf.json)
-          if [ "v${CONF_VERSION}" != "${{ github.ref_name }}" ]; then
-            echo "::error::Le tag ${{ github.ref_name }} ne correspond pas à tauri.conf.json (${CONF_VERSION}) — la mise à jour Android compare ces versions."
+          if [ "v${CONF_VERSION}" != "$TAG" ]; then
+            echo "::error::Le tag $TAG ne correspond pas à tauri.conf.json (${CONF_VERSION})."
             exit 1
           fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -258,8 +294,10 @@ jobs:
         run: npx tauri android build --apk --target aarch64 armv7
 
       - name: Verify signature + rename APK
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           APK=$(find tauri-desktop/src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)
           [ -n "$APK" ] || { echo "::error::Aucun APK produit"; exit 1; }
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK"
@@ -275,22 +313,72 @@ jobs:
           path: android-release/*.apk
           if-no-files-found: error
 
+  build-browser:
+    name: Browser packages (${{ matrix.target }})
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }},wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build native relay
+        run: cargo build --locked --release --target ${{ matrix.target }} --manifest-path native-host/Cargo.toml
+      - name: Build extension once
+        if: runner.os == 'Linux'
+        run: |
+          npm ci --prefix tauri-desktop
+          npm run build --prefix browser-extension
+      - name: Package relay and extension
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          args=()
+          if [[ "$RUNNER_OS" == Linux ]]; then args+=(--extension); fi
+          python3 scripts/package-browser-release.py --target "$TARGET" --output browser-release "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-release-${{ matrix.target }}
+          path: browser-release/*.zip
+          if-no-files-found: error
+
   # ──────────────────────────────────────────────────────────
   # ÉTAPE 2 — Copie des assets vers le repo public
   # ──────────────────────────────────────────────────────────
   publish-to-public:
     name: Publish to fluxlock-releases (public)
-    needs: [build, build-android]
+    needs: [prepare, build, build-android, build-browser]
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout source repo (pour CHANGELOG)
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
 
-      - name: Download all assets from private draft release
+      - name: Download desktop release assets
         uses: robinraju/release-downloader@v1.8
         with:
-          tag: ${{ github.ref_name }}
+          tag: ${{ needs.prepare.outputs.tag }}
           fileName: "*"
           out-file-path: "release-assets"
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -301,14 +389,38 @@ jobs:
           name: android-apk
           path: release-assets
 
+      - name: Download extension and native relays
+        uses: actions/download-artifact@v4
+        with:
+          pattern: browser-release-*
+          merge-multiple: true
+          path: release-assets
+
       - name: List downloaded assets
         run: |
           echo "=== Assets téléchargés ==="
           ls -lh release-assets/
 
+      - name: Validate browser packages
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, re, zipfile
+          root = pathlib.Path('.')
+          extension = json.loads((root / 'browser-extension/manifest.json').read_text())['version']
+          relay = re.search(r'^version = "([^"]+)"$', (root / 'native-host/Cargo.toml').read_text(), re.M).group(1)
+          for name in [f'FluXlock-extension_{extension}.zip'] + [
+              f'FluXlock-browser-host_{relay}_{target}.zip' for target in (
+                  'aarch64-apple-darwin', 'x86_64-apple-darwin',
+                  'x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu')]:
+              path = root / 'release-assets' / name
+              assert path.is_file() and path.stat().st_size > 0, name
+              with zipfile.ZipFile(path) as archive:
+                  assert archive.testzip() is None, name
+          PY
+
       - name: Validate packages and build the update manifest
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.prepare.outputs.tag }}
           PUBLIC_REPO: ${{ env.PUBLIC_REPO }}
         run: |
           VERSION="${TAG#v}"
@@ -359,10 +471,25 @@ jobs:
 
           jq -e . release-assets/latest.json >/dev/null
 
+      - name: Generate checksums for all release assets
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib
+          folder = pathlib.Path('release-assets')
+          with (folder / 'SHA256SUMS').open('w') as out:
+              for path in sorted(folder.iterdir()):
+                  if path.is_file() and path.name != 'SHA256SUMS':
+                      digest = hashlib.sha256()
+                      with path.open('rb') as src:
+                          for chunk in iter(lambda: src.read(1024 * 1024), b''):
+                              digest.update(chunk)
+                      out.write(f'{digest.hexdigest()}  {path.name}\n')
+          PY
+
       - name: Create release in public repo + upload assets
         env:
           GH_TOKEN: ${{ secrets.RELEASES_PAT }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.prepare.outputs.tag }}
           PUBLIC_REPO: ${{ env.PUBLIC_REPO }}
         run: |
           # Extraire les notes du CHANGELOG pour cette version
@@ -385,6 +512,10 @@ jobs:
           | macOS Intel | \`FluXlock_*_x64.dmg\` |
           | Windows 10/11 (64-bit) | \`FluXlock_*_x64-setup.exe\` |
           | Linux (AppImage) | \`FluXlock_*_amd64.AppImage\` |
-          | Android (mise à jour in-app ou installation manuelle) | \`FluXlock_*_android.apk\` |" \
+          | Android (mise à jour in-app ou installation manuelle) | \`FluXlock_*_android.apk\` |
+          | Extension Chromium (à décompresser) | \`FluXlock-extension_*.zip\` |
+          | Relais natif de l’extension (selon OS/architecture) | \`FluXlock-browser-host_*.zip\` |
+
+          Le fichier SHA256SUMS permet de vérifier les téléchargements. Pour l’extension, mettre à jour les trois composants et refaire l’appairage. L’installation du relais reste explicite ; le zip inclut les instructions." \
             --latest \
             release-assets/*

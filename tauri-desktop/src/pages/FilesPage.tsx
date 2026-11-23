@@ -5,7 +5,7 @@ import { open, save } from '@tauri-apps/plugin-dialog'
 import { readFile, stat } from '@tauri-apps/plugin-fs'
 import { hasAndroidStorage, saveFileToPublic } from '../lib/public-storage'
 import { listen } from '@tauri-apps/api/event'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, captureVaultContext } from '../lib/vault-context'
 import {
   Upload, Download, Trash2, FileText, Image, Film, Music, Archive,
   File as FileIcon, AlertCircle,
@@ -129,8 +129,10 @@ const FilesPage = () => {
   const closeUpload = () => { setShowUpload(false); setSelectedName(null); setSelectedPath(null); setUploadErr('') }
 
   const handleSelect = async () => {
+    const ensureCurrent = captureVaultContext()
     try {
       const sel = await open({ multiple: false })
+      ensureCurrent()
       if (!sel || Array.isArray(sel)) return
       setSelectedPath(sel)
       setSelectedName(sel.split('/').pop() || sel.split('\\').pop() || 'fichier')
@@ -143,16 +145,19 @@ const FilesPage = () => {
 
   const handleUpload = async () => {
     if (!selectedPath) return
+    const ensureCurrent = captureVaultContext()
     setUploading(true); setShowProgress(true); setProgress(0); setProgressMsg('Préparation…'); setUploadErr('')
     try {
       // On Android, file dialog returns content:// URIs that Rust can't open directly.
       // Read via Tauri's fs plugin (handles content:// URIs) and send base64 to backend.
       if (selectedPath.startsWith('content://') || selectedPath.startsWith('file://')) {
         const fileInfo = await stat(selectedPath)
+        ensureCurrent()
         if (fileInfo.size > 32 * 1024 * 1024) {
           throw new Error('Sur Android, cet import accepte les fichiers de 32 Mio maximum.')
         }
         const bytes = await readFile(selectedPath)
+        ensureCurrent()
         const uint8 = new Uint8Array(bytes)
         // Chunked base64 encoding to avoid call stack overflow on large files
         let binary = ''
@@ -174,6 +179,7 @@ const FilesPage = () => {
   }
 
   const handleDownload = async (f: SecureFile) => {
+    const ensureCurrent = captureVaultContext()
     setShowProgress(true); setProgress(0); setProgressMsg('Préparation…')
     try {
       if (hasAndroidStorage()) {
@@ -182,6 +188,7 @@ const FilesPage = () => {
         toast(`Fichier exporté dans ${destination}`, 'success')
       } else {
         const destination = await save({ defaultPath: f.filename })
+        ensureCurrent()
         if (!destination) return
         await filesSvc.decryptToPath(f.id, destination)
         toast(`« ${f.filename} » exporté`, 'success')

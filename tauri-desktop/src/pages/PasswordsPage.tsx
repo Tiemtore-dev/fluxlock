@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Plus, Edit2, Trash2, RefreshCw, ShieldAlert, Download, Upload, Fingerprint, Eye, EyeOff, FileText, CheckCircle2, ArrowRightLeft } from 'lucide-react'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, captureVaultContext } from '../lib/vault-context'
 import { hasAndroidKeystore } from '../lib/android-biometric'
 import { hasAndroidStorage, saveTextToPublic } from '../lib/public-storage'
 import { passwords, csvIO, biometric, type Password, type EntryAction, type ImportCsvResponse } from '../lib/vault-service'
@@ -169,9 +169,11 @@ export default function PasswordsPage() {
 
   const handleCsvPreview = async (useBiometrics = false) => {
     if (!csvFile || csvLoading || (!useBiometrics && csvAuthPw === '')) return
+    const ensureCurrent = captureVaultContext()
     setCsvLoading(true); setCsvError('')
     try {
       const content = new TextDecoder('utf-8', { fatal: true }).decode(await csvFile.arrayBuffer())
+      ensureCurrent()
       const credential = useBiometrics ? null : csvAuthPw
       const result = await csvIO.preview(credential, content, csvFormat)
       reviewedCsv.current = { content, biometric: useBiometrics }

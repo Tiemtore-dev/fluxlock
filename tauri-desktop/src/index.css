@@ -4,6 +4,15 @@
 @tailwind components;
 @tailwind utilities;
 
+.notes-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 0; }
+.notes-open { background: transparent; color: inherit; border: 0; text-align: left; cursor: pointer; flex: 1; min-width: 0; }
+.notes-open strong { display: flex; align-items: center; gap: .5rem; overflow-wrap: anywhere; }
+.notes-textarea, .notes-select { width: 100%; box-sizing: border-box; padding: .75rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-input); color: var(--text-primary); font: inherit; }
+.notes-textarea { resize: vertical; min-height: 12rem; }
+.notes-body { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 55vh; overflow-y: auto; }
+.notes-attachment { padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md); min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .notes-row { align-items: stretch; flex-direction: column; } }
+
 :root {
   color-scheme: light;
   font-synthesis: none;
@@ -690,3 +699,9 @@ h1, h2 { overflow-wrap: anywhere; }
 @media (max-width: 350px) {
   .transfer-modes button svg { display: none; }
 }
+
+/* Vault identity stays readable without widening the navigation on mobile. */
+.vault-active-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vault-picker { width: 100%; min-width: 0; }
+.vault-picker select { width: 100%; min-width: 0; }
+.vault-lock-button + .vault-lock-button { margin-top: var(--space-2); }

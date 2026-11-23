@@ -34,6 +34,11 @@ pub struct BackupMetadata {
     pub device_name: String,
     pub file_count: usize,
     pub password_count: usize,
+    // Omitted on historical archives to preserve their authenticated serialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -112,13 +117,22 @@ fn authenticated_backup_key(data: &BackupData, password: &str, salt: &[u8]) -> R
     Err("Mot de passe de la sauvegarde incorrect ou métadonnées altérées".into())
 }
 
-/// Crée un backup complet du coffre-fort
+#[cfg(test)]
 pub async fn create_backup(
+    database: &crate::database::Database, files_dir: &Path, master_password: &str,
+    username: &str, backup_dir: &Path,
+) -> Result<PathBuf, String> {
+    create_backup_for_vault(database, files_dir, master_password, username, backup_dir, None).await
+}
+
+/// Crée un backup complet du coffre-fort
+pub async fn create_backup_for_vault(
     database: &crate::database::Database,
     files_dir: &Path,
     master_password: &str,
     username: &str,
     backup_dir: &Path,
+    vault: Option<&crate::vault::VaultDescriptor>,
 ) -> Result<PathBuf, String> {
     debug_log!("📦 Création du backup...");
     
@@ -194,6 +208,8 @@ pub async fn create_backup(
     
     // Créer les métadonnées
     let metadata = BackupMetadata {
+        vault_id: vault.map(|v| v.id.clone()),
+        vault_name: vault.map(|v| v.name.clone()),
         version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: Utc::now().to_rfc3339(),
         username: username.to_string(),
@@ -379,6 +395,17 @@ Ce backup a été créé avec une ancienne version et son intégrité ne peut pa
     if integrity != "ok" || db.get_vault_owner().await.map_err(|e| e.to_string())?.is_none() {
         return Err("Base de données de sauvegarde invalide".into());
     }
+    db.initialize().await.map_err(|e| e.to_string())?;
+    let owner = db.get_vault_owner().await.map_err(|e| e.to_string())?.ok_or("Compte absent")?;
+    let has_notes: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM secure_notes)").fetch_one(&db.pool).await.map_err(|e| e.to_string())?;
+    if has_notes {
+        let salt = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &owner.crypto_salt).map_err(|_| "Sel du coffre invalide")?;
+        let config = crate::crypto::verified_argon2_config(master_password, &owner.password_hash).map_err(|_| "Mot de passe du contenu invalide")?;
+        let key = crate::crypto::derive_key_with_config(master_password, &salt, &config).map_err(|e| e.to_string())?;
+        crate::commands::notes::validate_restored(&db, &key, &staged_files).await?;
+    }
+    let broken_relations = sqlx::query("PRAGMA foreign_key_check").fetch_all(&db.pool).await.map_err(|e| e.to_string())?;
+    if !broken_relations.is_empty() { return Err("Relations invalides dans la sauvegarde".into()); }
     let paths: Vec<(i64, String)> = sqlx::query_as("SELECT id, file_path FROM secure_files")
         .fetch_all(&db.pool).await.map_err(|e| e.to_string())?;
     for (id, path) in paths {

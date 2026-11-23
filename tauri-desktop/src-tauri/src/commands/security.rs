@@ -6,7 +6,10 @@ use crate::filesystem_monitor::{get_filesystem_monitor, MonitoringStats};
 use tauri::State;
 
 #[tauri::command]
-pub async fn get_security_events(state: State<'_, AppState>) -> Result<Vec<SecurityEvent>, String> {
+pub async fn get_security_events(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<Vec<SecurityEvent>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = state
         .current_user_id
         .lock()
@@ -41,7 +44,10 @@ pub async fn get_security_events(state: State<'_, AppState>) -> Result<Vec<Secur
 
 // CFG-002: Commande de test — retourne une erreur en mode release
 #[tauri::command]
-pub async fn create_test_logs(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn create_test_logs(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Bloquer l'exécution en production
     #[cfg(not(debug_assertions))]
     return Err("Commande de test non disponible en production".to_string());
@@ -73,14 +79,21 @@ pub async fn create_test_logs(state: State<'_, AppState>) -> Result<String, Stri
 
 /// Vérifie l'état de sécurité global
 #[tauri::command]
-pub async fn get_security_status() -> Result<SecurityState, String> {
+pub async fn get_security_status(
+    state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<SecurityState, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let monitor = get_security_monitor();
     Ok(monitor.get_security_state().await)
 }
 
 /// Désactive le mode lecture seule (avec vérification mot de passe)
 #[tauri::command]
-pub async fn disable_readonly_mode(password: String, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn disable_readonly_mode(password: String, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     debug_log!("🔓 Demande de désactivation du mode lecture seule");
     
     // Récupérer la base de données depuis le state
@@ -124,7 +137,11 @@ pub async fn disable_readonly_mode(password: String, state: State<'_, AppState>)
 
 /// Retourne le délai restant avant la prochaine tentative de déverrouillage.
 #[tauri::command]
-pub async fn check_login_delay(state: State<'_, AppState>) -> Result<u64, String> {
+pub async fn check_login_delay(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<u64, String> {
+    let _lifecycle = state.auth_lifecycle.read().await;
+    crate::vault::check_context(&state, &context, false).await?;
     let db_guard = state.db.lock().await;
     let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
     match db.get_vault_owner().await.map_err(|e| e.to_string())? {
@@ -135,7 +152,10 @@ pub async fn check_login_delay(state: State<'_, AppState>) -> Result<u64, String
 
 /// Réinitialise tous les compteurs de sécurité
 #[tauri::command]
-pub async fn reset_security_counters(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn reset_security_counters(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // VULN-001 + VULN-002: Validation complète de session
     validate_session(&state).await?;
     let monitor = get_security_monitor();
@@ -146,7 +166,10 @@ pub async fn reset_security_counters(state: State<'_, AppState>) -> Result<Strin
 // ========== COMMANDES FILESYSTEM MONITOR ==========
 
 #[tauri::command]
-pub async fn get_filesystem_stats(state: State<'_, AppState>) -> Result<MonitoringStats, String> {
+pub async fn get_filesystem_stats(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<MonitoringStats, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // VULN-001 + VULN-002: Validation complète de session
     validate_session(&state).await?;
     let monitor = get_filesystem_monitor();
@@ -155,7 +178,10 @@ pub async fn get_filesystem_stats(state: State<'_, AppState>) -> Result<Monitori
 }
 
 #[tauri::command]
-pub async fn disable_filesystem_readonly(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn disable_filesystem_readonly(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // VULN-001 + VULN-002: Validation complète de session
     validate_session(&state).await?;
     let monitor = get_filesystem_monitor();
@@ -165,7 +191,10 @@ pub async fn disable_filesystem_readonly(state: State<'_, AppState>) -> Result<S
 }
 
 #[tauri::command]
-pub async fn reset_filesystem_stats(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn reset_filesystem_stats(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // VULN-001 + VULN-002: Validation complète de session
     validate_session(&state).await?;
     let monitor = get_filesystem_monitor();
@@ -175,7 +204,10 @@ pub async fn reset_filesystem_stats(state: State<'_, AppState>) -> Result<String
 }
 
 #[tauri::command]
-pub async fn enable_filesystem_monitoring(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn enable_filesystem_monitoring(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // VULN-001 + VULN-002: Validation complète de session
     validate_session(&state).await?;
     let monitor = get_filesystem_monitor();
@@ -185,7 +217,10 @@ pub async fn enable_filesystem_monitoring(state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn disable_filesystem_monitoring(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn disable_filesystem_monitoring(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // VULN-001 + VULN-002: Validation complète de session
     validate_session(&state).await?;
     let monitor = get_filesystem_monitor();

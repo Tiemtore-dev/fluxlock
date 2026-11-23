@@ -15,7 +15,11 @@ pub(super) async fn biometric_dir(state: &AppState) -> Result<PathBuf, String> {
 
 /// Check biometric hardware availability and enrollment status
 #[tauri::command]
-pub async fn check_biometric(state: State<'_, AppState>) -> Result<biometric::BiometricStatus, String> {
+pub async fn check_biometric(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<biometric::BiometricStatus, String> {
+    let _lifecycle = state.auth_lifecycle.read().await;
+    crate::vault::check_context(&state, &context, false).await?;
     Ok(biometric::check_biometric_status(&biometric_dir(&state).await?))
 }
 
@@ -26,9 +30,10 @@ pub async fn check_biometric(state: State<'_, AppState>) -> Result<biometric::Bi
 #[tauri::command]
 pub async fn enable_biometric(
     password: String, compatibility: Option<bool>, state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let password = zeroize::Zeroizing::new(password);
-    let _lifecycle = state.auth_lifecycle.lock().await;
     let user_id = state.current_user_id.lock().await
         .ok_or("Non authentifié")?;
 
@@ -68,8 +73,10 @@ pub async fn enable_biometric(
 
 /// Disable biometric authentication
 #[tauri::command]
-pub async fn disable_biometric(state: State<'_, AppState>) -> Result<String, String> {
-    let _lifecycle = state.auth_lifecycle.lock().await;
+pub async fn disable_biometric(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = crate::validate_session(&state).await?;
     biometric::disable_biometric(&biometric_dir(&state).await?)?;
 
@@ -85,7 +92,12 @@ pub async fn disable_biometric(state: State<'_, AppState>) -> Result<String, Str
 
 /// Déverrouille l’unique compte via l’authentification native de l’appareil.
 #[tauri::command]
-pub async fn biometric_login(state: State<'_, AppState>) -> Result<LoginResponse, String> {
+pub async fn biometric_login(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<LoginResponse, String> {
+    let _lifecycle = state.auth_lifecycle.write().await;
+    crate::vault::check_context(&state, &context, false).await?;
+    crate::vault::require_locked(&state).await?;
     #[cfg(target_os = "android")]
     {
         let _ = state;
@@ -93,8 +105,7 @@ pub async fn biometric_login(state: State<'_, AppState>) -> Result<LoginResponse
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _lifecycle = state.auth_lifecycle.lock().await;
-        let db_guard = state.db.lock().await;
+            let db_guard = state.db.lock().await;
         let db = db_guard.as_ref().ok_or("Base de données non initialisée")?;
         let user = available_owner(db).await?;
         let (id, _, key) = biometric::biometric_login(
@@ -109,8 +120,11 @@ pub async fn biometric_login(state: State<'_, AppState>) -> Result<LoginResponse
 pub async fn biometric_login_with_key(
     key_b64: String,
     state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<LoginResponse, String> {
-    let _lifecycle = state.auth_lifecycle.lock().await;
+    let _lifecycle = state.auth_lifecycle.write().await;
+    crate::vault::check_context(&state, &context, false).await?;
+    crate::vault::require_locked(&state).await?;
     #[cfg(not(target_os = "android"))]
     {
         let _key = zeroize::Zeroizing::new(key_b64);
@@ -143,7 +157,7 @@ async fn available_owner(db: &crate::database::Database) -> Result<User, String>
     Ok(user)
 }
 
-fn validate_enrolled_key(user: &User, enrolled_id: i64, key: &SecureKey) -> Result<String, String> {
+pub(crate) fn validate_enrolled_key(user: &User, enrolled_id: i64, key: &SecureKey) -> Result<String, String> {
     if enrolled_id != user.id || key.len() != 32 {
         return Err("Clé biométrique invalide. Utilisez votre mot de passe.".into());
     }
@@ -186,8 +200,10 @@ async fn finish_biometric_login(
 
 /// Emergency lock — instantly disable biometric until next password login
 #[tauri::command]
-pub async fn biometric_emergency_lock(state: State<'_, AppState>) -> Result<String, String> {
-    let _lifecycle = state.auth_lifecycle.lock().await;
+pub async fn biometric_emergency_lock(state: State<'_, AppState>,
+    context: crate::vault::VaultContext,
+) -> Result<String, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let user_id = crate::validate_session(&state).await?;
     biometric::emergency_lock(&biometric_dir(&state).await?)?;
 

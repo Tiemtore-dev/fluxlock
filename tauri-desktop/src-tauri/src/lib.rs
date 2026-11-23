@@ -24,14 +24,22 @@ mod biometric;
 mod signed_log;
 pub mod commands;
 pub mod vault_key_cache;
+pub mod vault;
 
 use database::Database;
 use threat_reactor::ThreatReactor;
 use config::Config;
 use vault_key_cache::VaultKeyCache;
+#[cfg(desktop)]
+pub mod autofill;
+#[cfg(mobile)]
+#[path = "autofill/mobile.rs"]
+pub mod autofill;
+#[cfg(desktop)]
+use autofill::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 #[cfg(debug_assertions)]
 use tauri::Manager;
 use base64::{Engine as _, engine::general_purpose};
@@ -68,6 +76,12 @@ pub async fn validate_session(state: &AppState) -> Result<i64, String> {
         *state.current_user_id.lock().await = None;
         return Err("Session expirée — reconnexion requise".to_string());
     }
+    // Deny sensitive reads at the deadline even between native supervisor ticks.
+    // The supervisor takes the exclusive lifecycle lock to complete cleanup.
+    let timeout = *state.auto_lock_minutes.lock().await;
+    if timeout > 0 && last_activity.elapsed() >= std::time::Duration::from_secs(timeout.saturating_mul(60)) {
+        return Err("Session expirée — verrouillage automatique requis".into());
+    }
     
     Ok(user_id)
 }
@@ -96,71 +110,49 @@ pub(crate) async fn store_session_key(
         }
     }
 
-    #[cfg(target_os = "macos")]
-    secure_storage::remove_legacy_macos_session_key(user_id);
-
-    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
-    {
-        *state.in_memory_session_key.lock().await = Some((user_id,
-            key.use_key(|bytes| Ok::<_, String>(secure_key::SecureKey::from_slice(bytes)))?,
-        ));
-        Ok(())
+    #[cfg(all(target_os = "macos", not(test)))]
+    if state.selected_vault.lock().await.as_ref().is_some_and(|v| v.descriptor.id == vault::LEGACY_VAULT_ID) {
+        secure_storage::remove_legacy_macos_session_key(user_id);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
-    {
-        key.use_key(|bytes| secure_storage::store_encryption_key(user_id, bytes))
-            .map_err(|e| format!("Erreur stockage clé sécurisée: {e}"))?;
-        if state.cache_enabled {
-            state.vault_key_cache.lock().await.store(user_id, &key.to_vec());
-        }
-        Ok(())
-    }
+    let vault_id = state.selected_vault.lock().await.as_ref()
+        .ok_or("Aucun coffre sélectionné")?.descriptor.id.clone();
+    *state.vault_session.lock().await = Some(vault::VaultSession {
+        vault_id, user_id,
+        key: key.use_key(|bytes| Ok::<_, String>(secure_key::SecureKey::from_slice(bytes)))?,
+    });
+    Ok(())
 }
 
 pub async fn get_or_fetch_vault_key(state: &AppState, user_id: i64) -> Result<secure_key::SecureKey, String> {
     if validate_session(state).await? != user_id {
         return Err("Session invalide".into());
     }
-
-    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
-    {
-        let key = state.in_memory_session_key.lock().await;
-        return match key.as_ref() {
-            Some((owner, key)) if *owner == user_id => key.use_key(|bytes| {
+    let selected = state.selected_vault.lock().await;
+    let session = state.vault_session.lock().await;
+    match (selected.as_ref(), session.as_ref()) {
+        (Some(vault), Some(session)) if session.user_id == user_id
+            && session.vault_id == vault.descriptor.id => session.key.use_key(|bytes| {
                 Ok(secure_key::SecureKey::from_slice(bytes))
             }),
-            _ => Err("Clé de session indisponible".into()),
-        };
-    }
-
-    #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
-    {
-        if state.cache_enabled {
-            if let Some(key) = state.vault_key_cache.lock().await.get(user_id) {
-                return Ok(key);
-            }
-        }
-
-        let key = secure_storage::retrieve_encryption_key_secure(user_id)
-            .map_err(|e| format!("Erreur récupération clé: {e}"))?;
-        if state.cache_enabled {
-            state.vault_key_cache.lock().await.store(user_id, &key.to_vec());
-        }
-        Ok(key)
+        _ => Err("Clé de session indisponible".into()),
     }
 }
 
 // État global de l'application
 pub struct AppState {
-    pub auth_lifecycle: Mutex<()>,
+    pub autofill: Arc<autofill::Service>,
+    pub auth_lifecycle: RwLock<()>,
+    pub vault_catalog: Mutex<Option<vault::VaultCatalog>>,
+    pub selected_vault: Mutex<Option<vault::Vault>>,
+    pub vault_session: Mutex<Option<vault::VaultSession>>,
     pub db: Arc<Mutex<Option<Database>>>,
     pub current_user_id: Arc<Mutex<Option<i64>>>,
     pub session_token: Arc<Mutex<Option<String>>>,
     pub session: Arc<Mutex<Option<String>>>, // Alias for session_token used by transfer module
     pub last_activity: Arc<Mutex<std::time::Instant>>,
     pub auto_lock_minutes: Arc<Mutex<u64>>,
-    pub threat_reactor: Arc<ThreatReactor>,
+    pub threat_reactor: Mutex<Arc<ThreatReactor>>,
     pub transfer_manager: Arc<Mutex<Option<transfer::commands::TransferManager>>>,
     /// Fichiers déchiffrés temporaires à nettoyer (M01 — audit sécurité)
     /// Clé: chemin absolu, Valeur: timestamp de création
@@ -178,8 +170,6 @@ pub struct AppState {
     pub vault_key_cache: Arc<Mutex<VaultKeyCache>>,
     /// Cache activé ou non (configurable via UTILISATION_CACHE)
     pub cache_enabled: bool,
-    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
-    pub in_memory_session_key: Mutex<Option<(i64, secure_key::SecureKey)>>,
 }
 
 // Structures pour les requêtes
@@ -379,25 +369,18 @@ pub fn run() {
     // Créer services
     let session_token = Arc::new(Mutex::new(None));
     let app_state = AppState {
-        auth_lifecycle: Mutex::new(()),
+        autofill: Arc::new(autofill::Service::default()),
+        auth_lifecycle: RwLock::new(()),
+        vault_catalog: Mutex::new(None),
+        selected_vault: Mutex::new(None),
+        vault_session: Mutex::new(None),
         db: Arc::new(Mutex::new(None)),
         current_user_id: Arc::new(Mutex::new(None)),
         session_token: session_token.clone(),
         session: session_token, // shared Arc with session_token
         last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
         auto_lock_minutes: Arc::new(Mutex::new(15)), // 15 minutes par défaut
-        threat_reactor: Arc::new({
-            // VULN-011: Persist blocked users across restarts
-            #[cfg(not(target_os = "android"))]
-            {
-                match hidden_storage::get_hidden_database_dir() {
-                    Ok(dir) => ThreatReactor::with_persistence(dir),
-                    Err(_) => ThreatReactor::new(),
-                }
-            }
-            #[cfg(target_os = "android")]
-            ThreatReactor::new()
-        }),
+        threat_reactor: Mutex::new(Arc::new(ThreatReactor::new())),
         transfer_manager: Arc::new(Mutex::new(None)), // Initialisé après init_local_db
         decrypted_temp_files: Arc::new(Mutex::new(Vec::new())),
         data_dir: Arc::new(Mutex::new(None)),
@@ -409,8 +392,6 @@ pub fn run() {
             config.cache_mask_rotation_secs,
         ))),
         cache_enabled: config.cache_enabled,
-        #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
-        in_memory_session_key: Mutex::new(None),
     };
 
     let builder = tauri::Builder::default()
@@ -431,9 +412,21 @@ pub fn run() {
             // overflows it. Use stacker to dynamically grow the stack.
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
                 Box::new(tauri::generate_handler![
+                #[cfg(desktop)] autofill_settings,
+                #[cfg(desktop)] autofill_enable,
+                #[cfg(desktop)] autofill_start_pairing,
+                #[cfg(desktop)] autofill_revoke,
+                #[cfg(desktop)] autofill_prompt,
+                #[cfg(desktop)] autofill_confirm_pair,
+                #[cfg(desktop)] autofill_cancel_native,
+                #[cfg(desktop)] autofill_authenticate,
                 get_app_version,
                 check_backend_status,
                 init_local_db,
+                vault::list_vaults,
+                vault::select_vault,
+                vault::create_vault,
+                vault::rename_vault,
                 has_existing_user,
                 local_login,
                 local_logout,
@@ -448,6 +441,11 @@ pub fn run() {
             decrypt_password,
             update_password,
             delete_password,
+            list_notes,
+            get_note,
+            save_note,
+            delete_note,
+            export_note_attachment,
             create_secure_file,
             create_secure_file_from_path,
             get_secure_files,
@@ -528,12 +526,18 @@ pub fn run() {
             transfer::commands::transfer_join_sync_pairing,
             ]);
             move |invoke| {
+                if !autofill::command_allowed(invoke.message.webview_ref().label(), invoke.message.command()) {
+                    invoke.resolver.reject("Commande non autorisée pour cette fenêtre");
+                    return true;
+                }
                 stacker::maybe_grow(2 * 1024 * 1024, 4 * 1024 * 1024, || {
                     handler(invoke)
                 })
             }
         })
         .setup(|_app| {
+            #[cfg(desktop)]
+            tauri::async_runtime::spawn(autofill::boot(_app.handle().clone()));
             debug_log!("🔐 SecureVault démarré");
             #[cfg(debug_assertions)]
             debug_log!("📁 Répertoire de données: {:?}", 

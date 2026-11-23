@@ -35,6 +35,7 @@ try {
           window.__calls.push([command, args])
           switch (command) {
             case 'init_local_db': return 'ready'
+            case 'list_vaults': return { vaults: [{ id: 'legacy', name: 'Personnel', schema_version: 1, created_at: date }], selected_vault_id: 'legacy', unlocked_vault_id: null }
             case 'has_existing_user': return account
             case 'check_login_delay': return 0
             case 'check_biometric': return {
@@ -355,6 +356,7 @@ try {
         transformCallback: () => 1,
         invoke: async (command, args) => {
           switch (command) {
+            case 'list_vaults': return { vaults: [{ id: 'legacy', name: 'Personnel', schema_version: 1, created_at: 'fixture' }], selected_vault_id: 'legacy', unlocked_vault_id: null }
             case 'has_existing_user': return true
             case 'check_login_delay': return 0
             case 'check_biometric': return {
@@ -419,22 +421,24 @@ try {
     window.__TAURI_INTERNALS__ = {
       transformCallback: () => 1,
       invoke: async (command, args) => {
+        if (command === 'list_vaults') return { vaults: [], selected_vault_id: null, unlocked_vault_id: null }
         if (command === 'has_existing_user') return false
-        if (command === 'local_register') {
-          window.__registration = args.credentials
-          return { success: true, token: 'fixture', user_id: 2, username: args.credentials.username }
+        if (command === 'create_vault') {
+          window.__registration = args.request
+          return { vault: { id: 'fixture-vault', name: args.request.name, schema_version: 1, created_at: 'fixture' }, auth: { success: true, token: 'fixture', user_id: 2, username: args.request.username } }
         }
         return command === 'check_auto_lock' ? { locked: false } : []
       },
     }
   })
   await page.goto(`${baseUrl}/login`)
-  await page.getByRole('link', { name: 'Créer mon compte' }).click()
-  await page.getByLabel("Nom d'utilisateur").fill('compte-test')
+  await page.getByRole('link', { name: 'Créer mon coffre' }).click()
+  await page.getByLabel('Nom du coffre', { exact: true }).fill('Personnel')
+  await page.getByLabel('Nom d’utilisateur').fill('compte-test')
   await page.getByLabel('Email').fill('exemple@example.org')
-  await page.getByLabel('Mot de passe', { exact: true }).fill('mot de passe test')
+  await page.getByLabel('Mot de passe maître', { exact: true }).fill('mot de passe test')
   await page.getByLabel('Confirmer le mot de passe', { exact: true }).fill('mot de passe test')
-  await page.getByRole('button', { name: "S'inscrire" }).click()
+  await page.getByRole('button', { name: 'Créer le coffre' }).click()
   await page.getByRole('heading', { name: 'Votre coffre' }).waitFor()
   assert.equal(await page.evaluate(() => window.__registration.username), 'compte-test')
   console.log('Parcours simulés de connexion, inscription, biométrie macOS et Android, restauration, transfert et navigation vérifiés de 320 à 1280 px, en modes clair et sombre.')

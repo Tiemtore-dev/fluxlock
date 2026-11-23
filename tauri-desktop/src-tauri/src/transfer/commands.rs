@@ -94,6 +94,7 @@ pub struct TransferManager {
     pub transfer_roles: Arc<Mutex<HashMap<String, TransferRole>>>,
     /// Pending items to transfer keyed by transfer_id → (item_type, item_ids)
     pub pending_items: Arc<Mutex<HashMap<String, (String, Vec<i64>)>>>,
+    pub incoming_items: Arc<Mutex<HashMap<String, Vec<TransferItemType>>>>,
     /// Whether this device is visible on the network (mDNS discoverable)
     pub visible: Arc<Mutex<bool>>,
     pub peer_name: String,
@@ -115,6 +116,7 @@ impl TransferManager {
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
             transfer_roles: Arc::new(Mutex::new(HashMap::new())),
             pending_items: Arc::new(Mutex::new(HashMap::new())),
+            incoming_items: Arc::new(Mutex::new(HashMap::new())),
             visible,
             peer_name: peer_name.to_string(),
         })
@@ -182,6 +184,7 @@ struct PeerHello {
     name: String,
     pairing_protocol: PairingProtocol,
     acknowledge_offer: bool,
+    secure_notes: bool,
 }
 
 fn capabilities(kind: OfferKind) -> Vec<String> {
@@ -189,7 +192,7 @@ fn capabilities(kind: OfferKind) -> Vec<String> {
     if kind == OfferKind::Pairing {
         capabilities.extend(["sync-pair-v2".into(), "sync-pair".into()]);
     } else {
-        capabilities.push(OFFER_ACK_CAPABILITY.into());
+        capabilities.extend([OFFER_ACK_CAPABILITY.into(), "secure-notes-v1".into()]);
     }
     capabilities
 }
@@ -217,6 +220,7 @@ fn read_hello(message: TransferMessage, kind: OfferKind) -> Result<PeerHello, St
         name: peer_name,
         pairing_protocol,
         acknowledge_offer: capabilities.iter().any(|capability| capability == OFFER_ACK_CAPABILITY),
+        secure_notes: capabilities.iter().any(|capability| capability == "secure-notes-v1"),
     })
 }
 
@@ -453,7 +457,7 @@ fn validate_transfer_chunk(
 ) -> Result<(), String> {
     if finished || item != expected_item || chunk != expected_chunk
         || size == 0 || size > CHUNK_DATA_SIZE || (last && !last_chunk)
-        || accumulated.saturating_add(size) > MAX_TRANSFER_ITEM_BYTES + MAX_TRANSFER_METADATA_BYTES
+        || accumulated.saturating_add(size) > crate::commands::notes::MAX_NOTE_WIRE_BYTES
     {
         return Err("Séquence de blocs ou taille de transfert invalide".into());
     }
@@ -520,7 +524,7 @@ mod transfer_limits_tests {
         assert!(validate_transfer_chunk(1, 2, 12, 0, 2, 10, false, false, true).is_err());
         assert!(validate_transfer_chunk(1, 2, 12, 1, 2, 10, false, true, false).is_err());
         assert!(validate_transfer_chunk(1, 2, 12, 1, 2, 10, true, false, true).is_err());
-        assert!(validate_transfer_chunk(1, 2, MAX_TRANSFER_ITEM_BYTES + MAX_TRANSFER_METADATA_BYTES,
+        assert!(validate_transfer_chunk(1, 2, crate::commands::notes::MAX_NOTE_WIRE_BYTES,
             1, 2, 10, false, false, true).is_err());
     }
 }
@@ -583,7 +587,9 @@ pub struct TransferItemInfo {
 pub async fn transfer_create_offer(
     request: CreateOfferRequest,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<CreateOfferResponse, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Vérifier le mode isolation réseau
     if *state.isolation_mode.lock().await {
         return Err("Mode isolation activé — transferts réseau désactivés".to_string());
@@ -625,7 +631,20 @@ pub async fn transfer_create_offer(
                 })
                 .collect::<Vec<_>>()
         }
-        _ => vec![],
+        "notes" => {
+            if request.item_ids.is_empty() || request.item_ids.len() > 128 { return Err("Sélectionnez de 1 à 128 notes".into()); }
+            let key = crate::get_or_fetch_vault_key(&state, user_id).await?;
+            let mut result = Vec::new();
+            let mut seen = HashSet::new();
+            for id in &request.item_ids {
+                if !seen.insert(*id) { return Err("Une note apparaît plusieurs fois".into()); }
+                let note = crate::commands::notes::read_detail(&state, db, &key, user_id, *id).await?;
+                result.push(TransferItem { item_type: TransferItemType::SecureNote, name: "Note chiffrée".into(),
+                    size: note.body.len() as u64 + note.attachment.as_ref().map_or(0, |f| f.file_size as u64), integrity_hash: String::new() });
+            }
+            result
+        }
+        _ => return Err("Type de transfert non pris en charge".into()),
     };
     let total_size: u64 = transfer_items.iter().map(|i| i.size).sum();
 
@@ -779,6 +798,9 @@ pub async fn transfer_create_offer(
                     }
                     let (peer, mut secure_session, safety_number) =
                         initiate_offer(stream, &wc, &peer_name_clone, OfferKind::Transfer).await?;
+                    if offer_items.iter().any(|item| item.item_type == TransferItemType::SecureNote) && !peer.secure_notes {
+                        return Err("Le destinataire doit être mis à jour pour recevoir des notes".into());
+                    }
                     send_transfer_offer(
                         stream, &mut secure_session, offer_items.clone(), offer_total_size, peer.acknowledge_offer,
                     ).await?;
@@ -852,7 +874,9 @@ pub async fn transfer_create_offer(
 pub async fn transfer_connect(
     request: ConnectRequest,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<ConnectResponse, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Vérifier le mode isolation réseau
     if *state.isolation_mode.lock().await {
         return Err("Mode isolation activé — transferts réseau désactivés".to_string());
@@ -878,6 +902,8 @@ pub async fn transfer_connect(
     } = offer else {
         return Err("Offre de transfert invalide".into());
     };
+    if items.is_empty() || items.len() > 128 { return Err("Offre vide ou trop volumineuse".into()); }
+    let incoming_types = items.iter().map(|i| i.item_type.clone()).collect();
     let items = items.into_iter().map(|i| TransferItemInfo {
         name: i.name, item_type: format!("{:?}", i.item_type), size: i.size,
     }).collect();
@@ -893,6 +919,7 @@ pub async fn transfer_connect(
     tm.active_connections.lock().await.insert(transfer_id.clone(), connection);
     tm.active_sessions.lock().await.insert(transfer_id.clone(), secure_session);
     tm.transfer_roles.lock().await.insert(transfer_id.clone(), TransferRole::Receiver);
+    tm.incoming_items.lock().await.insert(transfer_id.clone(), incoming_types);
 
     // Record transfer state
     tm.active_transfers.lock().await.insert(transfer_id.clone(), TransferInfo {
@@ -934,7 +961,9 @@ pub async fn transfer_confirm_and_execute(
     transfer_id: String,
     confirmed: bool,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
     if *state.isolation_mode.lock().await {
         return Err("Transfert bloqué en mode isolation".into());
@@ -950,6 +979,7 @@ pub async fn transfer_confirm_and_execute(
         tm.active_sessions.lock().await.remove(&transfer_id);
         tm.transfer_roles.lock().await.remove(&transfer_id);
         tm.pending_items.lock().await.remove(&transfer_id);
+        tm.incoming_items.lock().await.remove(&transfer_id);
         return Ok(false);
     }
 
@@ -984,6 +1014,15 @@ pub async fn transfer_confirm_and_execute(
 
     match role {
         TransferRole::Receiver => {
+            if crate::security_monitor::get_security_monitor().is_readonly().await {
+                return Err("Le coffre est en lecture seule".into());
+            }
+            let expected_items = {
+                let manager = state.transfer_manager.lock().await;
+                let manager = manager.as_ref().ok_or("Module de transfert absent")?;
+                let items = manager.incoming_items.lock().await.remove(&transfer_id).ok_or("Offre de transfert absente")?;
+                items
+            };
             // === RECEIVER: send confirmation, receive data, store in vault ===
 
             // Send safety number confirmation via SecureSession
@@ -1032,8 +1071,24 @@ pub async fn transfer_confirm_and_execute(
                             let mut complete_data = zeroize::Zeroizing::new(std::mem::take(&mut *chunk_accumulator));
                             next_chunk = 0;
 
-                            // Auto-detect: fichier (préfixe binaire 4 octets LE) vs mot de passe (JSON pur)
+                            let expected = expected_items.get(item_index as usize).ok_or("Élément absent de l’offre")?;
+                            let note_payload = complete_data.starts_with(crate::commands::notes::NOTE_WIRE_MAGIC);
+                            if note_payload != (*expected == TransferItemType::SecureNote) || (is_last && item_index as usize + 1 != expected_items.len()) {
+                                return Err("Le contenu ne correspond pas à l’offre de transfert".into());
+                            }
+                            if note_payload {
+                                let guard = state.db.lock().await;
+                                let db = guard.as_ref().ok_or("Base indisponible")?;
+                                crate::commands::notes::receive_note(&state, db, &vault_key, user_id, &complete_data).await?;
+                                received_count += 1;
+                            } else {
+                            // Auto-detect legacy file/password payloads.
                             let is_file_payload = complete_data.len() >= 4 && complete_data[0] != b'{';
+                            if (is_file_payload && *expected != TransferItemType::SecureFile)
+                                || (!is_file_payload && *expected != TransferItemType::Password)
+                            {
+                                return Err("Le type reçu ne correspond pas à l’offre".into());
+                            }
 
                             if is_file_payload {
                                 // ═══ FILE PAYLOAD: [4-byte meta_len LE][metadata JSON][plaintext bytes] ═══
@@ -1181,6 +1236,7 @@ pub async fn transfer_confirm_and_execute(
                             eprintln!("[TRANSFER] Receiver: failed to parse DataChunk payload");
                         }
 
+                            }
                         if received_count != item_index + 1 {
                             return Err("L’élément reçu n’a pas été enregistré".into());
                         }
@@ -1203,7 +1259,7 @@ pub async fn transfer_confirm_and_execute(
                         }
                     }
                     Ok(TransferMessage::TransferComplete) => {
-                        if !final_item_received || !chunk_accumulator.is_empty() {
+                        if !final_item_received || !chunk_accumulator.is_empty() || received_count as usize != expected_items.len() {
                             return Err("Fin du transfert prématurée".into());
                         }
                         let tm_guard2 = state.transfer_manager.lock().await;
@@ -1347,6 +1403,23 @@ pub async fn transfer_confirm_and_execute(
                     }
                 }
                 drop(db_guard);
+            } else if item_type == "notes" {
+                let guard = state.db.lock().await;
+                let db = guard.as_ref().ok_or("Base indisponible")?;
+                for (index, id) in item_ids.iter().enumerate() {
+                    let data = crate::commands::notes::pack_note(&state, db, &vault_key, user_id, *id).await?;
+                    let count = data.len().div_ceil(CHUNK_DATA_SIZE);
+                    for (chunk_index, bytes) in data.chunks(CHUNK_DATA_SIZE).enumerate() {
+                        let chunk = TransferMessage::DataChunk { item_index: index as u32, chunk_index: chunk_index as u32,
+                            data: bytes.to_vec(), is_last: index + 1 == item_ids.len() && chunk_index + 1 == count,
+                            integrity_hash: hex::encode(secure_vault_crypto::blake3_hash(bytes)), is_last_chunk: chunk_index + 1 == count };
+                        secure_session.send_message(&mut stream, &chunk).await?;
+                    }
+                    match secure_session.recv_message(&mut stream).await? {
+                        TransferMessage::Ack { item_index, integrity_ok: true } if item_index == index as u32 => sent_count += 1,
+                        _ => return Err("La note n’a pas été enregistrée par le destinataire".into()),
+                    }
+                }
             } else if item_type == "files" {
                 // === FILE TRANSFER: déchiffre le fichier local, envoie en chunks plaintext ===
                 let db_guard = state.db.lock().await;
@@ -1459,6 +1532,7 @@ pub async fn transfer_confirm_and_execute(
     if let Some(tm4) = tm_guard4.as_ref() {
         tm4.transfer_roles.lock().await.remove(&transfer_id);
         tm4.pending_items.lock().await.remove(&transfer_id);
+        tm4.incoming_items.lock().await.remove(&transfer_id);
     }
 
     Ok(true)
@@ -1468,7 +1542,9 @@ pub async fn transfer_confirm_and_execute(
 #[tauri::command]
 pub async fn transfer_scan_local_network(
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<Vec<DiscoveredPeer>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Vérifier le mode isolation réseau
     if *state.isolation_mode.lock().await {
         return Err("Mode isolation activé — scan réseau désactivé".to_string());
@@ -1498,7 +1574,9 @@ pub async fn transfer_scan_local_network(
 #[tauri::command]
 pub async fn transfer_get_trusted_peers(
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<Vec<super::trust_store::TrustedPeer>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
@@ -1513,7 +1591,9 @@ pub async fn transfer_get_trusted_peers(
 pub async fn transfer_revoke_trust(
     fingerprint: String,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
@@ -1529,7 +1609,9 @@ pub async fn transfer_add_trusted_peer(
     name: String,
     fingerprint: String,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
@@ -1545,7 +1627,9 @@ pub async fn transfer_add_trusted_peer(
 pub async fn transfer_get_status(
     transfer_id: String,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<Option<TransferInfo>, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
     let tm_guard = state.transfer_manager.lock().await;
     if let Some(ref tm) = *tm_guard {
@@ -1561,7 +1645,9 @@ pub async fn transfer_get_status(
 pub async fn transfer_cancel(
     transfer_id: String,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
     let tm_guard = state.transfer_manager.lock().await;
     if let Some(ref tm) = *tm_guard {
@@ -1578,6 +1664,7 @@ pub async fn transfer_cancel(
         tm.active_sessions.lock().await.remove(&transfer_id);
         tm.transfer_roles.lock().await.remove(&transfer_id);
         tm.pending_items.lock().await.remove(&transfer_id);
+        tm.incoming_items.lock().await.remove(&transfer_id);
         Ok(removed)
     } else {
         Ok(false)
@@ -1589,7 +1676,9 @@ pub async fn transfer_cancel(
 pub async fn transfer_set_visibility(
     visible: bool,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Vérifier le mode isolation réseau
     if *state.isolation_mode.lock().await {
         return Err("Mode isolation activé — visibilité réseau désactivée".to_string());
@@ -1617,7 +1706,9 @@ pub async fn transfer_set_visibility(
 #[tauri::command]
 pub async fn transfer_get_visibility(
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     let tm_guard = state.transfer_manager.lock().await;
     let tm = tm_guard.as_ref().ok_or("Module de transfert non initialisé")?;
     let visible = *tm.visible.lock().await;
@@ -1644,7 +1735,9 @@ pub struct SyncSettings {
 #[tauri::command]
 pub async fn transfer_get_sync_settings(
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<SyncSettings, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
@@ -1677,7 +1770,9 @@ pub async fn transfer_get_sync_settings(
 pub async fn transfer_set_sync_enabled(
     enabled: bool,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
@@ -1695,7 +1790,9 @@ pub async fn transfer_add_sync_device(
     name: String,
     verifying_key: String,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
@@ -1712,7 +1809,9 @@ pub async fn transfer_add_sync_device(
 pub async fn transfer_remove_sync_device(
     verifying_key: String,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<bool, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     crate::validate_session(&state).await?;
 
     let tm_guard = state.transfer_manager.lock().await;
@@ -1752,7 +1851,9 @@ pub struct SyncPairingResult {
 pub async fn transfer_start_sync_pairing(
     cross_network: bool,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<SyncPairingOffer, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Vérifier le mode isolation réseau
     if *state.isolation_mode.lock().await {
         return Err("Mode isolation activé — appairage sync désactivé".to_string());
@@ -1944,7 +2045,9 @@ pub async fn transfer_start_sync_pairing(
 pub async fn transfer_join_sync_pairing(
     wormhole_code: String,
     state: tauri::State<'_, crate::AppState>,
+    context: crate::vault::VaultContext,
 ) -> Result<SyncPairingResult, String> {
+    let _lifecycle = crate::vault::access(&state, &context).await?;
     // Vérifier le mode isolation réseau
     if *state.isolation_mode.lock().await {
         return Err("Mode isolation activé — appairage sync désactivé".to_string());

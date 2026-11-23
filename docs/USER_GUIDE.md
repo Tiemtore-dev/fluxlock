@@ -11,14 +11,15 @@
 3. [Premier démarrage](#premier-démarrage)
 4. [Tableau de bord](#tableau-de-bord)
 5. [Gestion des mots de passe](#gestion-des-mots-de-passe)
-6. [Coffre-fort de fichiers](#coffre-fort-de-fichiers)
-7. [Clés cryptographiques](#clés-cryptographiques)
-8. [Transfert entre appareils](#transfert-entre-appareils)
-9. [Sécurité système](#sécurité-système)
-10. [Sauvegarde et restauration](#sauvegarde-et-restauration)
-11. [Paramètres](#paramètres)
-12. [Réinitialisation du coffre](#réinitialisation-du-coffre)
-13. [Questions fréquentes](#questions-fréquentes)
+6. [Notes chiffrées](#notes-chiffrées)
+7. [Coffre-fort de fichiers](#coffre-fort-de-fichiers)
+8. [Clés cryptographiques](#clés-cryptographiques)
+9. [Transfert entre appareils](#transfert-entre-appareils)
+10. [Sécurité système](#sécurité-système)
+11. [Sauvegarde et restauration](#sauvegarde-et-restauration)
+12. [Paramètres](#paramètres)
+13. [Réinitialisation du coffre](#réinitialisation-du-coffre)
+14. [Questions fréquentes](#questions-fréquentes)
 
 ---
 
@@ -28,6 +29,7 @@ FluXlock est une application de bureau et mobile qui vous permet de :
 
 - **Stocker vos mots de passe** de manière chiffrée
 - **Protéger vos fichiers** sensibles dans un coffre-fort numérique
+- **Écrire des notes chiffrées** avec une pièce jointe facultative
 - **Gérer vos clés cryptographiques** (classiques et post-quantiques)
 - **Transférer des données** entre vos appareils de façon sécurisée, sans passer par Internet
 - **Détecter automatiquement** les tentatives de ransomware sur votre système
@@ -160,6 +162,18 @@ Cliquez sur le bouton de **régénération** pour obtenir un nouveau mot de pass
 > **Mode lecture seule** : si le système de détection de ransomware a détecté une menace, les modifications sont temporairement bloquées. Vous pourrez uniquement consulter vos mots de passe.
 
 ---
+
+## Notes chiffrées
+
+Ouvrez **Notes** depuis la navigation du coffre ; sur mobile, cette page se trouve dans **Plus**. Cliquez sur **Nouvelle note**, saisissez un titre et votre texte, puis cliquez sur **Enregistrer la note**. Le titre et le texte sont chiffrés avant leur enregistrement. La recherche porte sur les titres et les résultats sont paginés.
+
+Une note accepte jusqu’à **1 Mio de texte UTF-8** et une pièce jointe de **32 Mio** maximum. Vous pouvez choisir un fichier de l’appareil ou rattacher un fichier déjà présent dans le coffre. L’import ajoute une copie chiffrée ; l’original reste à son emplacement. Les notes sont rendues en texte brut : le HTML saisi reste du texte.
+
+Cliquez sur une note pour la lire, la modifier ou exporter sa pièce jointe. L’export crée une copie **en clair** à la destination choisie. Le rattachement et l’intégrité du fichier sont vérifiés avant cet export. Une modification simultanée est refusée : rouvrez la note pour repartir de la version enregistrée.
+
+**Détacher** ou supprimer la note conserve le fichier dans **Fichiers**. Un fichier encore rattaché ne peut pas être supprimé depuis Fichiers : détachez-le d’abord de chaque note concernée. Les notes et fichiers joints font partie des sauvegardes du coffre.
+
+Pour envoyer une note, ouvrez **Transferts → Envoyer → Notes**. Sa pièce jointe est incluse et le destinataire rechiffre l’ensemble avec sa propre clé. Les deux appareils doivent prendre en charge le transfert des notes. Le verrouillage ferme l’éditeur et purge les vues du coffre ; enregistrez votre rédaction avant de verrouiller.
 
 ## Coffre-fort de fichiers
 
@@ -392,6 +406,14 @@ Après la réinitialisation, vous serez redirigé vers la page de création de c
 ---
 
 ## Questions fréquentes
+
+### Comment utiliser l’extension d’autofill ?
+
+L’extension Chromium est disponible en développement local avec l’application issue des mêmes sources. Suivez [les instructions de construction, d’installation et d’appairage](../browser-extension/README.md). Elle n’est pas encore publiée dans un store.
+
+Dans **Paramètres → Extension de navigateur**, activez la passerelle puis connectez le profil en comparant les empreintes dans les deux fenêtres. Pour remplir une page HTTPS, ouvrez l’extension et authentifiez-vous dans la fenêtre de l’application FluXlock. Revenez ensuite dans l’extension et choisissez l’email/username voulu ; aucun mot de passe n’est affiché dans cette liste. Le coffre se verrouille avant l’envoi du seul mot de passe choisi. Une nouvelle demande exige une nouvelle authentification.
+
+Le nom de site et son port doivent correspondre exactement à l’URL enregistrée, après normalisation IDNA ; `www` et les sous-domaines sont distincts. Le navigateur et le site peuvent lire les valeurs du compte choisi une fois remplies dans le formulaire. Les mots de passe des autres comptes ne leur sont pas envoyés. La révocation d’un profil se fait dans les paramètres du coffre.
 
 ### Que se passe-t-il si je perds mon mot de passe maître ?
 

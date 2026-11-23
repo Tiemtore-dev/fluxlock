@@ -36,11 +36,13 @@ Les paquets « FluXlock Test » de GitHub Actions utilisent un profil de coffre 
 
 ### Premier démarrage
 
-1. Créez votre coffre local avec un mot de passe maître d’au moins 12 caractères. Conservez ce mot de passe en lieu sûr. Il est nécessaire pour ouvrir une sauvegarde.
+1. Créez votre coffre local, choisissez son nom et définissez un mot de passe maître d’au moins 12 caractères. Conservez ce mot de passe en lieu sûr. Il est nécessaire pour ouvrir une sauvegarde.
 2. Ajoutez un mot de passe ou ouvrez **Mots de passe → Importer un CSV**. Vous pouvez examiner les entrées et choisir le traitement des doublons avant de confirmer.
 3. Créez une archive chiffrée depuis **Sauvegardes** et conservez-la sur un autre support.
 
-Si vous avez déjà un coffre sur cet appareil, installez la version officielle par-dessus la précédente et déverrouillez-le avec votre mot de passe maître. Pour restaurer sur un autre appareil, créez le coffre de destination, puis ouvrez **Sauvegardes**. La restauration remplace son contenu et demande les mots de passe du coffre actuel et de la sauvegarde. [Guide de sauvegarde et de restauration](docs/USER_GUIDE.md#sauvegarde-et-restauration)
+Vous pouvez créer plusieurs coffres, chacun avec ses propres données et son mot de passe maître. Un seul coffre peut être déverrouillé à la fois. Le bouton **Changer de coffre** verrouille le coffre ouvert et permet d’en sélectionner un autre. Le nom se modifie dans **Paramètres**.
+
+Si vous avez déjà un coffre sur cet appareil, installez la version officielle par-dessus la précédente et déverrouillez-le avec votre mot de passe maître. Pour restaurer sur un autre appareil, créez le coffre de destination, puis ouvrez **Sauvegardes**. La restauration remplace uniquement le contenu du coffre sélectionné, conserve son nom et demande les mots de passe du coffre actuel et de la sauvegarde. [Guide de sauvegarde et de restauration](docs/USER_GUIDE.md#sauvegarde-et-restauration)
 
 ## Dans le coffre
 
@@ -48,6 +50,7 @@ Si vous avez déjà un coffre sur cet appareil, installez la version officielle 
 | --- | --- |
 | **Mots de passe** | Enregistrer, rechercher et générer des mots de passe. Importer des exports CSV de Brave, Chrome, Firefox, Apple, Bitwarden, 1Password, LastPass ou FluXlock. |
 | **Fichiers** | Chiffrer des fichiers en conservant l’original à son emplacement. Exporter une copie déchiffrée vers la destination choisie. |
+| **Notes** | Enregistrer un titre et un texte chiffrés, joindre un fichier ou rattacher un fichier du coffre, rechercher par titre et transférer une note avec sa pièce jointe. |
 | **Clés** | Générer, importer et conserver des clés cryptographiques, dont des clés Ed25519, X25519, ML-KEM-768 et ML-DSA-65. |
 | **Transferts** | Choisir les éléments à envoyer à un autre appareil sur le réseau local et confirmer la connexion par un code. La version 2.3 requiert une mise à jour des deux appareils pour les transferts et l’appairage. |
 | **Sauvegardes** | Archiver la base du coffre et les fichiers protégés. Restaurer l’archive sur un appareil compatible. |
@@ -63,6 +66,10 @@ Les CSV exportés contiennent des mots de passe en clair. Les fichiers transitan
 - **Sauvegardes.** FluXlock vérifie l’intégrité des archives avant de remplacer le coffre de destination. Les anciens fichiers compagnons sont pris en charge dans les archives authentifiées.
 
 ## Développement
+
+L’extension d’autofill Chromium et son relais natif sont disponibles dans les sources, avec authentification dans l’application et sélection du seul compte du site exact. Ils nécessitent l’application construite depuis ces sources et une installation locale explicite ; ils ne sont pas publiés dans un store. Voir [la construction et l’installation](browser-extension/README.md) et [les vérifications de sécurité](docs/implementation/browser-extension-verification.md).
+
+Le canal d’extension **v2** combine **ML-KEM-768 et X25519**, avec authentification **ML-DSA-65**. La migration exige la mise à jour des trois composants et un nouvel appairage ; aucun repli classique. [Profil cryptographique, migration et vérifications](docs/implementation/autofill-post-quantum-v2.md).
 
 Le dépôt contient l’interface React et TypeScript, l’application native Tauri et le noyau cryptographique Rust. Référez-vous aux [prérequis Tauri](https://v2.tauri.app/start/prerequisites/) pour installer les dépendances de votre plateforme.
 

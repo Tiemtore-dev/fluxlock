@@ -1,9 +1,10 @@
+import { setVaultToken } from '../lib/vault-context'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff, Fingerprint } from 'lucide-react'
 import { Button, Input, Spinner } from '../design-system/atoms'
 import { useToast } from '../design-system/organisms'
-import { auth, biometric, type AuthResponse, type BiometricStatus } from '../lib/vault-service'
+import { auth, biometric, vaults, type AuthResponse, type BiometricStatus } from '../lib/vault-service'
 import { androidBiometricAvailable, androidHasStoredKey, androidKeystoreRetrieve, hasAndroidKeystore } from '../lib/android-biometric'
 import { biometricAccount, enrollBiometrics } from '../lib/biometric-enrollment'
 import { useAuthStore } from '../stores/authStore'
@@ -12,8 +13,15 @@ export default function LoginPage() {
   const navigate = useNavigate()
   const { toast } = useToast()
   const passwordInput = useRef<HTMLInputElement>(null)
+  const startupError = useAuthStore((state) => state.startupError)
   const dbReady = useAuthStore((state) => state.dbReady)
   const locking = useAuthStore((state) => state.locking)
+  const selectedVault = useAuthStore((state) => state.selectedVault)
+  const availableVaults = useAuthStore((state) => state.vaults)
+  const setSelectedVault = useAuthStore((state) => state.setSelectedVault)
+  const lockError = useAuthStore((state) => state.lockError)
+  const clearAuth = useAuthStore((state) => state.clearAuth)
+  const [selecting, setSelecting] = useState(false)
   const setAuth = useAuthStore((state) => state.setAuth)
   const [hasAccount, setHasAccount] = useState<boolean>()
   const [status, setStatus] = useState<BiometricStatus>()
@@ -37,7 +45,15 @@ export default function LoginPage() {
   }
 
   useEffect(() => {
-    if (!dbReady) return
+    if (!dbReady || locking) return
+    setPassword('')
+    setVisible(false)
+    setStatus(undefined)
+    setSetupBiometrics(false)
+    setError('')
+    setRetryAt(0)
+    if (!selectedVault) { setHasAccount(false); return }
+    setHasAccount(undefined)
     let active = true
     auth.hasExistingUser().then((exists) => {
       if (!active) return
@@ -54,7 +70,7 @@ export default function LoginPage() {
       if (active) setError('Impossible d’ouvrir le coffre. Redémarrez FluXlock pour réessayer.')
     })
     return () => { active = false }
-  }, [dbReady])
+  }, [dbReady, selectedVault?.id, locking])
 
   const retryPending = remaining > 0
   useEffect(() => {
@@ -67,11 +83,11 @@ export default function LoginPage() {
     if (!response.success || !response.token || response.user_id == null || !response.username) {
       throw new Error(response.message)
     }
-    return { id: String(response.user_id), username: response.username, email: response.email || '' }
+    return { id: String(response.user_id), username: response.username, email: response.email || '', token: response.token }
   }
 
   function enterVault(user: ReturnType<typeof authenticatedUser>) {
-    setAuth(user)
+    setAuth({ id: user.id, username: user.username, email: user.email }, user.token)
     navigate('/', { replace: true })
   }
 
@@ -82,6 +98,7 @@ export default function LoginPage() {
     setError('')
     try {
       const user = authenticatedUser(await auth.login(password))
+      setVaultToken(user.token)
       if (setupBiometrics && bioAvailable) {
         try {
           await enrollBiometrics(password, user.username)
@@ -131,6 +148,17 @@ export default function LoginPage() {
     }
   }
 
+  async function selectVault(id: string) {
+    if (locking || pending || selecting) return
+    setSelecting(true)
+    setPassword('')
+    setVisible(false)
+    setError('')
+    try { setSelectedVault(await vaults.select(id)) }
+    catch (reason) { setError(String(reason)) }
+    finally { setSelecting(false) }
+  }
+
   const unavailableReason = !android ? status?.unavailable_reason : undefined
   const hasCompatibilitySetup = !android && status?.compatibility_available && !status.compatibility_enrolled
   const showBiometrics = hasAccount && !unavailableReason && !hasCompatibilitySetup && (bioAvailable || enrolled)
@@ -153,22 +181,35 @@ export default function LoginPage() {
               <button type="button" className="auth-biometrics" aria-label={biometricLabel} title={biometricLabel}
                 aria-describedby={biometricHint ? 'biometric-hint' : undefined}
                 aria-pressed={enrolled ? undefined : setupBiometrics}
-                disabled={locking || !!pending || remaining > 0} onClick={unlockWithBiometrics}>
+                disabled={selecting || locking || !!pending || remaining > 0} onClick={unlockWithBiometrics}>
                 {pending === 'biometric' ? <Spinner size={20} /> : <Fingerprint size={23} strokeWidth={1.65} aria-hidden="true" />}
               </button>
             )}
           </div>
+          {availableVaults.length > 0 && <label className="workspace-field vault-picker">Coffre
+            <select aria-label="Coffre" value={selectedVault?.id || ''} disabled={selecting || locking || !!pending}
+              onChange={(event) => void selectVault(event.target.value)}>
+              {!selectedVault && <option value="" disabled>Choisir un coffre</option>}
+              {availableVaults.map((vault) => <option key={vault.id} value={vault.id}>{vault.name}</option>)}
+            </select>
+          </label>}
           <h1>{hasAccount === false ? 'Bienvenue dans FluXlock' : 'Déverrouiller le coffre'}</h1>
+          {startupError && <p className="auth-error" role="alert">{startupError}</p>}
+          {lockError && <div role="alert" className="auth-error">
+            <p>Le verrouillage n’a pas pu être confirmé : {lockError}</p>
+            <Button variant="secondary" onClick={() => void clearAuth().catch(() => {})}>Réessayer le verrouillage</Button>
+          </div>}
           {error && <p className="auth-error" role="alert">{error}</p>}
-          {hasAccount === undefined && !error && <p role="status"><Spinner size={20} /> Ouverture du coffre…</p>}
+          {locking && !lockError && <p role="status"><Spinner size={20} /> Verrouillage du coffre…</p>}
+          {hasAccount === undefined && !locking && !error && !startupError && <p role="status"><Spinner size={20} /> Ouverture du coffre…</p>}
           {hasAccount === false && (
-            <Link className="auth-primary-link" to="/register">Créer mon compte <ArrowRight size={18} aria-hidden="true" /></Link>
+            <Link className="auth-primary-link" to={selectedVault ? "/register?configure=1" : "/register"}>{selectedVault ? "Configurer ce coffre" : "Créer mon coffre"} <ArrowRight size={18} aria-hidden="true" /></Link>
           )}
           {hasAccount && (
             <>
               <form className="auth-form" onSubmit={submit}>
                 <Input ref={passwordInput} label="Mot de passe maître" size="lg" type={visible ? 'text' : 'password'}
-                  autoComplete="current-password" value={password} required disabled={locking || !!pending}
+                  autoComplete="current-password" value={password} required disabled={selecting || locking || !!pending}
                   onChange={(event) => {
                     setPassword(event.target.value)
                     if (error) setError('')
@@ -179,7 +220,7 @@ export default function LoginPage() {
                 {biometricHint && <p id="biometric-hint" className="auth-notice" role="status">{biometricHint}</p>}
                 {remaining > 0 && <p className="auth-notice" role="status">Réessayez dans {remaining} s.</p>}
                 <Button type="submit" size="lg" fullWidth
-                  disabled={locking || !!pending || remaining > 0} loading={pending === 'password'}>
+                  disabled={selecting || locking || !!pending || remaining > 0} loading={pending === 'password'}>
                   {setupBiometrics ? 'Déverrouiller et activer' : 'Déverrouiller'}
                 </Button>
               </form>
@@ -189,6 +230,9 @@ export default function LoginPage() {
               </details>
             </>
           )}
+          {hasAccount && !locking && !pending && <Link className="auth-primary-link" to="/register">
+            Créer un autre coffre <ArrowRight size={18} aria-hidden="true" />
+          </Link>}
         </div>
       </div>
     </main>

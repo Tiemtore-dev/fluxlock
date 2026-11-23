@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release guards and synchronized versions
+        run: python3 -m unittest discover -s scripts/tests -v
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
         working-directory: rust-crypto-core
@@ -37,11 +39,11 @@ jobs:
       matrix:
         include:
           - name: macOS ARM64
-            runner: macos-15
+            runner: macos-latest
             target: aarch64-apple-darwin
             bundle: app
           - name: macOS Intel
-            runner: macos-15
+            runner: macos-latest
             target: x86_64-apple-darwin
             bundle: app
           - name: Windows x64
@@ -54,6 +56,8 @@ jobs:
             bundle: deb
     env:
       FLUXLOCK_TEST_BUILD: '1'
+      # Crypto/vault fixtures can exceed the default Rust test-thread stack.
+      RUST_MIN_STACK: '16777216'
     defaults:
       run:
         working-directory: tauri-desktop

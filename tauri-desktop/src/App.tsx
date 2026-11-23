@@ -1,16 +1,19 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { invoke } from './lib/vault-context'
 import { useAuthStore } from './stores/authStore'
 import { type AutoLockStatus } from './lib/vault-service'
 import { ToastProvider } from './design-system/organisms'
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
+import { vaults } from './lib/vault-service'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import ResetVaultPage from './pages/ResetVaultPage'
 import DashboardPage from './pages/DashboardPage'
 import PasswordsPage from './pages/PasswordsPage'
 import FilesPage from './pages/FilesPage'
+import NotesPage from './pages/NotesPage'
 import KeysPage from './pages/KeysPage'
 import { AutoUpdater } from './components/AutoUpdater'
 import { AndroidUpdater } from './components/AndroidUpdater'
@@ -24,6 +27,15 @@ import TransferPage from './pages/TransferPage'
 function AppRoutes() {
   const { isAuthenticated, clearAuth, setDbReady } = useAuthStore()
   useKeyboardShortcuts()
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen('autofill-vault-locked', () => useAuthStore.getState().acceptNativeLock()).then((off) => {
+      if (disposed) off()
+      else unlisten = off
+    }).catch(() => {})
+    return () => { disposed = true; unlisten?.() }
+  }, [])
 
   useEffect(() => {
     const saved = localStorage.getItem('theme')
@@ -36,31 +48,33 @@ function AppRoutes() {
     else document.documentElement.removeAttribute('data-theme')
 
     invoke<string>('init_local_db')
-      .then(() => setDbReady(true))
+      .then(() => vaults.list())
+      .then((overview) => { useAuthStore.getState().setOverview(overview); setDbReady(true) })
       .catch((e) => {
         console.error('[App] init_local_db failed:', e)
-        // Still mark dbReady so login page can show the actual error
-        setDbReady(true)
+        useAuthStore.getState().setStartupError(String(e))
       })
   }, [])
 
   // Validate backend session is still alive when frontend thinks user is authenticated
   useEffect(() => {
     if (!isAuthenticated) return
+    let active = true
 
     // Validate session with a command that requires auth
     // If it fails, the backend session expired (app restart, etc.) → force re-login
     invoke<AutoLockStatus>('check_auto_lock')
       .then((status) => {
         // If auto-lock says we're locked, force re-login to unlock the enclave
-        if (status?.locked) {
-          clearAuth()
+        if (active && status?.locked) {
+          void clearAuth().catch(() => {})
         }
       })
       .catch(() => {
         // Backend session not active → force re-login (enclave unlock required)
-        clearAuth()
+        if (active) void clearAuth().catch(() => {})
       })
+    return () => { active = false }
   }, [isAuthenticated])
 
   return (
@@ -76,6 +90,7 @@ function AppRoutes() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/passwords" element={<PasswordsPage />} />
           <Route path="/files" element={<FilesPage />} />
+          <Route path="/notes" element={<NotesPage />} />
           <Route path="/keys" element={<KeysPage />} />
           <Route path="/security" element={<SecurityPage />} />
           <Route path="/system-security" element={<SystemSecurityPage />} />

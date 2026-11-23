@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remplissage sécurisé — FluXlock</title>
+  <script src="theme.js"></script>
+  <link rel="icon" href="icons/32.png">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <defs>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a18 18 0 0 1 0 18 18 18 0 0 1 0-18"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 6-1 1a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m0 4 1-1a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0" transform="translate(2 1)"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="m12 3 10 18H2L12 3Zm0 6v5m0 3v.01"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+    </defs>
+  </svg>
+  <a class="skip-link" href="#main">Aller au remplissage</a>
+  <div class="popup-shell">
+    <header class="brand-header">
+      <div class="brand"><img src="icons/128.png" alt="" width="32" height="32"><div><h1>FluXlock</h1><p>Remplissage sécurisé</p></div></div>
+      <span class="local-label"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Local</span>
+    </header>
+    <main id="main" tabindex="-1">
+      <section class="site-card" aria-labelledby="site-label">
+        <span class="site-icon"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg></span>
+        <div class="site-copy"><p id="site-label" class="eyebrow">Site actuel</p><p id="origin" dir="ltr">Vérification du site…</p></div>
+      </section>
+      <ol id="steps" class="steps" aria-label="Étapes du remplissage">
+        <li data-step="1" aria-current="step"><span>1</span><span class="step-label">Authentifier</span></li>
+        <li data-step="2"><span>2</span><span class="step-label">Choisir</span></li>
+        <li data-step="3"><span>3</span><span class="step-label">Remplir</span></li>
+      </ol>
+      <section class="state-panel" aria-labelledby="state-title" data-state="idle">
+        <span id="state-symbol" class="state-symbol"><svg class="icon" aria-hidden="true"><use id="state-icon" href="#i-lock"/></svg></span>
+        <div class="state-copy"><div class="state-title-row"><h2 id="state-title">Remplir ce site</h2><span id="count" class="count"></span></div><p id="status" role="status">Authentifiez-vous dans FluXlock pour choisir votre compte.</p></div>
+        <div id="fingerprint-panel" class="fingerprint-panel" hidden><p class="eyebrow">Empreinte de connexion</p><code id="fingerprint" dir="ltr"></code><p>Elle doit être identique dans l’application.</p></div>
+      </section>
+      <div id="error-panel" class="error-panel" hidden><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg><p id="error" role="alert"></p></div>
+      <section id="account-section" aria-labelledby="accounts-title" hidden>
+        <h3 id="accounts-title" class="visually-hidden">Comptes disponibles</h3>
+        <div id="accounts" class="account-list"></div>
+        <nav id="pagination" class="pagination" aria-label="Pages de comptes" hidden>
+          <button id="previous" class="icon-button" type="button" aria-label="Comptes précédents"><svg class="icon reverse" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+          <p id="page-label"></p>
+          <button id="next" class="icon-button" type="button" aria-label="Comptes suivants"><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+        </nav>
+      </section>
+      <div class="actions">
+        <button id="start" class="button button-primary" type="button"><span id="start-label">Autoriser dans FluXlock</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+        <button id="confirm" class="button button-primary" type="button" hidden><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Confirmer cette empreinte</button>
+      </div>
+    </main>
+    <footer>
+      <p id="security-note" class="security-note"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg><span>Authentification dans FluXlock.</span></p>
+      <button id="cancel" class="button button-quiet" type="button" hidden>Annuler</button>
+      <details id="connection" class="connection">
+        <summary><span><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>Connexion et aide</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+        <div class="connection-content">
+          <h2>Connecter ce navigateur</h2><p>Ouvrez FluXlock et déverrouillez le coffre à connecter.</p>
+          <ol class="help-steps"><li>Ouvrez <strong>Paramètres → Extension de navigateur</strong> dans FluXlock.</li><li>Choisissez <strong>Connecter un navigateur</strong>, puis connectez-vous ici.</li><li>Comparez les empreintes et confirmez dans les deux fenêtres.</li></ol>
+          <button id="connect" class="button button-secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>Connecter ce navigateur</button>
+          <details class="advanced"><summary>Options du profil</summary><p>À utiliser si vous souhaitez recommencer l’appairage.</p><button id="reset" class="text-button danger" type="button">Réinitialiser le lien avec FluXlock</button></details>
+        </div>
+      </details>
+    </footer>
+  </div>
+  <dialog id="reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
+    <form method="dialog" class="reset-content"><span class="state-symbol"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg></span><h2 id="reset-title">Reconnecter ce navigateur ?</h2><p id="reset-description">Le coffre reste intact. Révoquez l’ancien profil dans FluXlock, puis effectuez un nouvel appairage.</p><button id="reset-cancel" class="button button-secondary" autofocus value="cancel">Conserver la connexion</button><button id="reset-confirm" class="button button-danger" value="confirm">Réinitialiser le lien</button></form>
+  </dialog>
+  <template id="account-template"><button type="button" class="account-button"><span class="avatar" aria-hidden="true"></span><span class="account-copy"><span class="account-name" dir="auto"></span><span class="account-kind">Identifiant enregistré</span></span><svg class="icon account-arrow" aria-hidden="true"><use href="#i-arrow"/></svg></button></template>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
