@@ -110,8 +110,8 @@ footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: s
 .security-note .icon { width: var(--text-xs); height: var(--text-xs); flex: none; }
 .security-note span { overflow-wrap: anywhere; }
 summary { cursor: pointer; }
-.connection { flex: none; }
-.connection > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); padding: var(--space-2); border-radius: var(--radius-full); font-size: var(--label-size); line-height: var(--caption-line-height); color: var(--text-secondary); min-height: var(--control-compact); list-style: none; }
+.connection { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.connection > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); padding: var(--space-2); border-radius: var(--radius-full); font-size: var(--label-size); line-height: var(--caption-line-height); color: var(--text-secondary); min-width: 0; max-width: 100%; min-height: var(--control-compact); list-style: none; }
 .connection > summary::-webkit-details-marker { display: none; }
 .connection > summary > span { display: flex; align-items: center; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
 .connection > summary > svg { width: var(--text-xs); height: var(--text-xs); }

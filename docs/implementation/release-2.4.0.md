@@ -31,6 +31,8 @@ La première exécution a réussi pour le coffre Linux, le noyau crypto et l’e
 - Les tests Windows s’arrêtaient dans le chargeur avant leur exécution (`0xc0000139`). Le [problème Tauri de manifeste Common Controls v6](https://github.com/tauri-apps/tauri/issues/13419) correspond à ce cas. Le build embarque désormais le manifeste dans tous les artefacts liés, dont les tests, et désactive la copie de ressource par défaut pour éviter un doublon. Les tests restent actifs.
 - Le test Linux détectait un débordement horizontal à 200 % de taille de texte. Les blocs et boutons permettent maintenant la réduction et le retour à la ligne ; la régression force aussi des barres de défilement classiques et produit une capture ainsi qu’un diagnostic détaillé des éléments débordants.
 
+Le diagnostic suivant a isolé un débordement de 322 px pour un viewport de 320 px dans `details#connection` et son `summary`. Le bloc d’aide et son résumé sont désormais bornés à la largeur disponible et peuvent se réduire. Le test à 200 % contrôle explicitement l’aide ouverte/fermée, avec la police système et une police monospace plus large.
+
 Les deux jobs macOS de l’application étaient en file d’attente sur `macos-15`, sans runner attribué ni étape exécutée. Ils utilisent désormais `macos-latest`, comme le job d’extension macOS qui avait réussi (image macOS 26 ARM64 dans cette exécution). Les cibles de compilation ARM64 et Intel sont conservées, y compris pour les relais de release.
 
 Ces corrections doivent être confirmées par la nouvelle exécution de CI ; un résultat local ne remplace pas ce contrôle distant.
