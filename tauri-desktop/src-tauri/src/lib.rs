@@ -30,7 +30,12 @@ use database::Database;
 use threat_reactor::ThreatReactor;
 use config::Config;
 use vault_key_cache::VaultKeyCache;
+#[cfg(desktop)]
 pub mod autofill;
+#[cfg(mobile)]
+#[path = "autofill/mobile.rs"]
+pub mod autofill;
+#[cfg(desktop)]
 use autofill::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -407,14 +412,14 @@ pub fn run() {
             // overflows it. Use stacker to dynamically grow the stack.
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
                 Box::new(tauri::generate_handler![
-                autofill_settings,
-                autofill_enable,
-                autofill_start_pairing,
-                autofill_revoke,
-                autofill_prompt,
-                autofill_confirm_pair,
-                autofill_cancel_native,
-                autofill_authenticate,
+                #[cfg(desktop)] autofill_settings,
+                #[cfg(desktop)] autofill_enable,
+                #[cfg(desktop)] autofill_start_pairing,
+                #[cfg(desktop)] autofill_revoke,
+                #[cfg(desktop)] autofill_prompt,
+                #[cfg(desktop)] autofill_confirm_pair,
+                #[cfg(desktop)] autofill_cancel_native,
+                #[cfg(desktop)] autofill_authenticate,
                 get_app_version,
                 check_backend_status,
                 init_local_db,

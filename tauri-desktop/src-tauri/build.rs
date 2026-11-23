@@ -19,7 +19,27 @@ fn main() {
         compile_biometric_compatibility();
     }
 
-    tauri_build::build()
+    let attributes = tauri_build::Attributes::new();
+    #[cfg(windows)]
+    let attributes = if target_os == "windows"
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        // Tauri's default resource embeds the Common Controls v6 manifest only
+        // into application binaries. MockRuntime tests link the same native
+        // APIs and otherwise fail in the loader with 0xc0000139, before tests.
+        // Ask MSVC to embed the same manifest in every linked artifact instead;
+        // disable the resource's copy to avoid two RT_MANIFEST definitions.
+        // https://github.com/tauri-apps/tauri/issues/13419
+        let manifest =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("windows-app-manifest.xml");
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+        attributes.windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest())
+    } else {
+        attributes
+    };
+    tauri_build::try_build(attributes).expect("Tauri build metadata")
 }
 
 #[cfg(target_os = "macos")]

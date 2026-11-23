@@ -117,8 +117,19 @@ try {
   await page.locator('#reset').click(); await page.locator('#reset-confirm').click()
   await page.waitForFunction(() => window.calls.some((c) => c.op === 'reset'))
   await load('idle', 320)
+  // Classic scrollbars reserve layout width on Linux; macOS normally overlays
+  // them. Force that geometry so the same reflow regression is caught locally.
+  await page.addStyleTag({ content: 'html::-webkit-scrollbar { width: 16px; } body { min-height: 1200px; }' })
   await page.evaluate(() => document.documentElement.style.fontSize = '200%')
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
+  const reflow = await page.evaluate(() => ({
+    viewport: innerWidth, width: document.documentElement.scrollWidth,
+    overflow: [...document.querySelectorAll('body *')].filter((el) => {
+      const r = el.getBoundingClientRect()
+      return r.width && (r.right > innerWidth + 1 || r.left < -1)
+    }).map((el) => ({ tag: el.tagName, id: el.id, class: el.className.baseVal ?? el.className, text: el.textContent.trim().slice(0, 80) })),
+  }))
+  await page.locator('body').screenshot({ path: path.join(output, 'reflow-200-percent.png') })
+  assert.ok(reflow.width <= reflow.viewport, `200% text reflow: ${JSON.stringify(reflow)}`)
   await page.keyboard.press('Tab')
   assert.ok(await page.evaluate(() => parseFloat(getComputedStyle(document.activeElement).outlineWidth) >= 2))
   assert.deepEqual(errors, [])

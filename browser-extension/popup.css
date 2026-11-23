@@ -40,7 +40,7 @@
    with 100vw during initial measurement can keep them needlessly narrow. */
 html { width: var(--popup-width); background: var(--bg-void); border-radius: var(--popup-radius); overflow-x: hidden; }
 html:not([data-extension-popup]) { max-width: 100vw; }
-body { width: 100%; margin: 0; padding: var(--space-3); background: var(--bg-void); color: var(--text-primary); font: var(--text-sm)/var(--leading-normal) var(--font-body); -webkit-font-smoothing: antialiased; }
+body { width: 100%; margin: 0; padding: var(--space-3); background: var(--bg-void); color: var(--text-primary); font: var(--text-sm)/var(--leading-normal) var(--font-body); overflow-wrap: anywhere; -webkit-font-smoothing: antialiased; }
 h1, h2, h3, p, ol { margin: 0; }
 button, summary, a { -webkit-tap-highlight-color: transparent; }
 button { font: inherit; cursor: pointer; }
@@ -54,6 +54,7 @@ button[aria-disabled="true"] { opacity: var(--opacity-busy); cursor: progress; }
 .popup-shell { border-radius: var(--popup-radius); }
 .brand-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-1) var(--space-2) var(--space-3); }
 .brand { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.brand > div { min-width: 0; }
 .brand img { flex: none; width: var(--avatar-size); height: var(--avatar-size); border-radius: var(--item-radius); }
 .brand h1 { font-size: var(--text-lg); font-weight: 650; letter-spacing: var(--tracking-tight); line-height: var(--title-line-height); }
 .brand p { color: var(--text-muted); font-size: var(--label-size); line-height: var(--caption-line-height); }
@@ -98,7 +99,7 @@ main { padding: var(--space-4); min-width: 0; border: var(--border-width) solid 
 .reverse { transform: rotate(180deg); }
 .actions { display: grid; gap: var(--space-2); }
 .actions:has(#start[hidden]):has(#confirm[hidden]) { display: none; }
-.button { display: flex; align-items: center; justify-content: center; gap: var(--space-2); width: 100%; min-height: var(--control-height); padding: var(--space-2) var(--space-4); border: var(--border-width) solid transparent; border-radius: var(--radius-full); font-weight: 550; line-height: var(--leading-tight); transition: background-color var(--motion-duration) var(--motion-ease), border-color var(--motion-duration) var(--motion-ease); }
+.button { display: flex; align-items: center; justify-content: center; gap: var(--space-2); width: 100%; min-width: 0; min-height: var(--control-height); padding: var(--space-2) var(--space-4); border: var(--border-width) solid transparent; border-radius: var(--radius-full); font-weight: 550; line-height: var(--leading-tight); transition: background-color var(--motion-duration) var(--motion-ease), border-color var(--motion-duration) var(--motion-ease); }
 .button-primary { background: var(--accent); color: var(--text-inverse); }
 .button > span { min-width: 0; overflow-wrap: anywhere; }
 .button-secondary { background: var(--bg-surface); color: var(--text-primary); border-color: var(--border-hover); }

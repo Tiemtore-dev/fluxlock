@@ -559,3 +559,8 @@ pub fn command_allowed(label: &str, command: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+// Exercise the mobile rejection/lifecycle contract on desktop CI as well.
+#[cfg(test)]
+#[path = "mobile.rs"]
+mod mobile_contract;
