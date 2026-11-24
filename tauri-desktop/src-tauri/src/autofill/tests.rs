@@ -459,3 +459,160 @@ async fn inactivity_is_enforced_on_sensitive_reads_without_frontend_polling() {
     *state.auto_lock_minutes.lock().await = 0;
     assert_eq!(crate::validate_session(&state).await.unwrap(), 1);
 }
+
+#[test]
+fn relay_invocation_detection_validates_chromium_extension_origins() {
+    let valid_origin = format!("chrome-extension://{}/", host_relay::DEFAULT_EXTENSION_ID);
+    assert_eq!(
+        host_relay::detect_relay_invocation(["fluxlock", &valid_origin]),
+        Some(host_relay::DEFAULT_EXTENSION_ID.to_owned())
+    );
+    assert_eq!(
+        host_relay::detect_relay_invocation([
+            "fluxlock.exe",
+            &valid_origin,
+            "--parent-window=12345"
+        ]),
+        Some(host_relay::DEFAULT_EXTENSION_ID.to_owned())
+    );
+    assert_eq!(
+        host_relay::detect_relay_invocation([
+            "fluxlock",
+            "--native-messaging-host",
+            &valid_origin
+        ]),
+        Some(host_relay::DEFAULT_EXTENSION_ID.to_owned())
+    );
+    assert_eq!(host_relay::detect_relay_invocation(["fluxlock"]), None);
+    assert_eq!(
+        host_relay::detect_relay_invocation(["fluxlock", "chrome-extension://invalid/"]),
+        None
+    );
+    assert_eq!(
+        host_relay::detect_relay_invocation([
+            "fluxlock",
+            "chrome-extension://oifhfkkohaimodaedcjbnfbamhgocndz/"
+        ]),
+        None
+    );
+}
+
+#[tokio::test]
+async fn builtin_relay_translates_frame_byte_order_and_rejects_invalid_envelopes() {
+    let data = br#"{"version":2,"frame":"opaque-ciphertext"}"#;
+    let (mut a, mut b) = tokio::io::duplex(1024);
+    host_relay::relay_send(&mut a, data, true).await.unwrap();
+    assert_eq!(host_relay::relay_frame(&mut b, true).await.unwrap(), data);
+    host_relay::relay_send(&mut a, data, false).await.unwrap();
+    assert_eq!(host_relay::relay_frame(&mut b, false).await.unwrap(), data);
+    let wrong = br#"{"version":2,"frame":"x","extra":"forbidden"}"#;
+    host_relay::relay_send(&mut a, wrong, true).await.unwrap();
+    assert!(host_relay::relay_frame(&mut b, true).await.is_err());
+    let (mut c, mut d) = tokio::io::duplex(16);
+    c.write_all(&((host_relay::MAX_RELAY_FRAME + 1) as u32).to_ne_bytes())
+        .await
+        .unwrap();
+    assert!(host_relay::relay_frame(&mut d, true).await.is_err());
+}
+
+#[test]
+fn auto_installer_updates_binary_path_preserves_custom_origins_and_rejects_symlinks() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin_v1 = root.join("fluxlock-v1");
+    let bin_v2 = root.join("fluxlock-v2");
+    std::fs::write(&bin_v1, b"#!/bin/sh\n").unwrap();
+    std::fs::write(&bin_v2, b"#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin_v1, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&bin_v2, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let chrome_dir = root.join("Google/Chrome/NativeMessagingHosts");
+    let brave_dir = root.join("BraveSoftware/Brave-Browser/NativeMessagingHosts");
+    let dirs = vec![
+        ("chrome", chrome_dir.clone()),
+        ("brave", brave_dir.clone()),
+    ];
+    let custom_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    // Initial install with v1 binary + custom developer extension ID
+    let status1 = host_relay::install_manifests_in_dirs(
+        root,
+        &dirs,
+        &bin_v1,
+        "com.fluxlock.browser",
+        Some(custom_id),
+    )
+    .unwrap();
+    assert!(status1.installed);
+    assert_eq!(status1.manifests.len(), 2);
+
+    let chrome_manifest = chrome_dir.join("com.fluxlock.browser.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::symlink_metadata(&chrome_manifest)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    // Simulate desktop app auto-update to v2 binary without specifying custom_id again
+    let status2 = host_relay::install_manifests_in_dirs(
+        root,
+        &dirs,
+        &bin_v2,
+        "com.fluxlock.browser",
+        None,
+    )
+    .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&chrome_manifest).unwrap()).unwrap();
+    assert_eq!(
+        parsed["path"].as_str().unwrap(),
+        std::fs::canonicalize(&bin_v2).unwrap().to_str().unwrap()
+    );
+    let origins = parsed["allowed_origins"].as_array().unwrap();
+    assert_eq!(origins.len(), 2);
+    assert!(status2
+        .allowed_origins
+        .contains(&format!("chrome-extension://{}/", host_relay::DEFAULT_EXTENSION_ID)));
+    assert!(status2
+        .allowed_origins
+        .contains(&format!("chrome-extension://{custom_id}/")));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // World-writable binary must be rejected
+        let insecure_bin = root.join("fluxlock-insecure");
+        std::fs::write(&insecure_bin, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&insecure_bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(host_relay::install_manifests_in_dirs(
+            root,
+            &dirs,
+            &insecure_bin,
+            "com.fluxlock.browser",
+            None
+        )
+        .is_err());
+
+        // Symlinked manifest file must be rejected
+        std::fs::remove_file(&chrome_manifest).unwrap();
+        let target_file = root.join("hijack.json");
+        std::fs::write(&target_file, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target_file, &chrome_manifest).unwrap();
+        assert!(host_relay::install_manifests_in_dirs(
+            root,
+            &dirs,
+            &bin_v2,
+            "com.fluxlock.browser",
+            None
+        )
+        .is_err());
+    }
+}

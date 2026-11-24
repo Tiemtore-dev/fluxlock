@@ -8,7 +8,7 @@ export default function BrowserSettings() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const status = useQuery({ queryKey: ['browser-settings'], queryFn: () => invoke<{ enabled: boolean; listening: boolean; profiles: { public: string; name: string }[] }>('autofill_settings'), refetchInterval: 3000 })
+  const status = useQuery({ queryKey: ['browser-settings'], queryFn: () => invoke<{ enabled: boolean; listening: boolean; native_host_installed: boolean; extension_id: string; profiles: { public: string; name: string }[] }>('autofill_settings'), refetchInterval: 3000 })
   async function action(command: string, args?: Record<string, unknown>) {
     setBusy(true); setError(''); setMessage('')
     try {
@@ -23,7 +23,7 @@ export default function BrowserSettings() {
     <p>Chaque remplissage demande une nouvelle authentification dans FluXlock. Seuls les comptes du site exact sont proposés dans l’extension.</p>
     <p>Le canal utilise une protection hybride post-quantique. Les anciens profils doivent être reconnectés après cette mise à jour.</p>
     {status.data?.enabled ? <>
-      <p>{status.data.listening ? 'Passerelle locale active.' : 'Passerelle locale indisponible.'}</p>
+      <p>{status.data.listening ? 'Passerelle locale active.' : 'Passerelle locale indisponible.'} {status.data.native_host_installed ? `Relais natif synchronisé automatiquement (ID extension : ${status.data.extension_id}).` : 'Relais natif en attente de synchronisation.'}</p>
       {!status.data.listening && <Button variant="secondary" disabled={busy} onClick={() => void action('autofill_enable')}>Relancer la passerelle</Button>}
       <Button variant="secondary" disabled={busy || !status.data.listening} onClick={() => void action('autofill_start_pairing')}>Connecter un navigateur</Button>
       {status.data.profiles.map((profile) => <div className="workspace-actions" key={profile.public}>

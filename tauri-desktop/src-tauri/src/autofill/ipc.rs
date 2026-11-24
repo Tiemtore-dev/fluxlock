@@ -155,6 +155,7 @@ pub async fn boot(app: tauri::AppHandle) {
     let state = app.state::<AppState>();
     if let Ok(Some(identity)) = identity::load(false).await {
         *state.autofill.identity.lock().await = Some(identity);
+        let _ = super::host_relay::ensure_installed(None);
         let _ = start_listener(app.clone()).await;
     }
     loop {

@@ -59,7 +59,7 @@ test('exact origin matching: IDNA, ports, subdomains and ambiguous inputs', () =
   assert.equal(sameOrigin('https://faß.de', 'https://fass.de'), false)
   for (const bad of ['https://user@paypal.com', 'https://paypal.com.', 'https://paypal.com\\@evil.test', 'data:text/html,x']) assert.throws(() => canonicalOrigin(bad))
 })
-test('packaged manifest has minimal permissions and no page-facing bridge', async () => {
+test('packaged manifest has minimal permissions, deterministic key and no page-facing bridge', async () => {
   const manifest = JSON.parse(await readFile(new URL('../dist/manifest.json', import.meta.url), 'utf8'))
   assert.deepEqual(manifest.permissions.sort(), ['activeTab', 'nativeMessaging', 'scripting'].sort())
   assert.equal(manifest.host_permissions, undefined)
@@ -67,6 +67,10 @@ test('packaged manifest has minimal permissions and no page-facing bridge', asyn
   assert.equal(manifest.web_accessible_resources, undefined)
   assert.equal(manifest.content_scripts, undefined)
   assert.ok(!manifest.content_security_policy.extension_pages.includes("'unsafe-eval'"))
+  assert.equal(typeof manifest.key, 'string')
+  const digest = createHash('sha256').update(Buffer.from(manifest.key, 'base64')).digest('hex').slice(0, 32)
+  const extensionId = [...digest].map((c) => String.fromCharCode(97 + parseInt(c, 16))).join('')
+  assert.equal(extensionId, 'oifhfkkohaimodaedcjbnfbamhgocndg')
 })
 test('packaged WASM and native Rust interoperate, authenticate and reject replay', async () => {
   const { api, run } = await abi()

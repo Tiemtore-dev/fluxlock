@@ -9,6 +9,9 @@ import re
 import tempfile
 
 
+DEFAULT_EXTENSION_ID = "oifhfkkohaimodaedcjbnfbamhgocndg"
+
+
 def prepare(host: Path, extension_id: str, browser: str, test: bool):
     if not re.fullmatch(r"[a-p]{32}", extension_id):
         raise ValueError("L’identifiant Chromium doit contenir exactement 32 lettres de a à p.")
@@ -32,7 +35,7 @@ def prepare(host: Path, extension_id: str, browser: str, test: bool):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True, type=Path)
-    parser.add_argument("--extension-id", required=True)
+    parser.add_argument("--extension-id", default=DEFAULT_EXTENSION_ID)
     parser.add_argument("--browser", choices=["chrome", "brave", "edge"], required=True)
     parser.add_argument("--test-profile", action="store_true")
     parser.add_argument("--install", action="store_true")

@@ -1,5 +1,6 @@
 //! Browser clients never receive a general vault session or master key.
 mod commands;
+pub mod host_relay;
 mod identity;
 mod ipc;
 #[cfg(windows)]
