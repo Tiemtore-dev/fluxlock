@@ -5,6 +5,8 @@ use tauri::{State, WebviewWindow};
 pub struct BridgeStatus {
     pub enabled: bool,
     pub listening: bool,
+    pub native_host_installed: bool,
+    pub extension_id: String,
     pub profiles: Vec<identity::Profile>,
 }
 #[tauri::command]
@@ -14,9 +16,18 @@ pub async fn autofill_settings(
 ) -> Result<BridgeStatus, String> {
     let _life = crate::vault::access(&state, &context).await?;
     let identity = state.autofill.identity.lock().await;
+    let enabled = identity.is_some();
+    let mut host_status = super::host_relay::current_status();
+    if enabled && !host_status.installed {
+        if let Ok(installed) = super::host_relay::ensure_installed(None) {
+            host_status = installed;
+        }
+    }
     Ok(BridgeStatus {
-        enabled: identity.is_some(),
+        enabled,
         listening: state.autofill.listening.load(Ordering::SeqCst),
+        native_host_installed: host_status.installed,
+        extension_id: host_status.extension_id,
         profiles: identity.as_ref().map_or_else(Vec::new, |i| {
             i.profiles
                 .iter()
@@ -31,6 +42,7 @@ pub async fn autofill_enable(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     context: crate::vault::VaultContext,
+    extension_id: Option<String>,
 ) -> Result<(), String> {
     let _life = crate::vault::access(&state, &context).await?;
     let mut guard = state.autofill.identity.lock().await;
@@ -38,6 +50,7 @@ pub async fn autofill_enable(
         *guard = identity::load(true).await?;
     }
     drop(guard);
+    let _ = super::host_relay::ensure_installed(extension_id.as_deref())?;
     ipc::start_listener(app).await
 }
 #[tauri::command]

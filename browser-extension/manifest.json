@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "FluXlock",
   "version": "0.4.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1fThMqGlHo15GKi8TI8Zy6S9//OSycnsD8RwnDhS7sX9QxUce63H9c22ScG7PcKU22KOGyEFkmP2l6f4L+aNzOLmdL1Bvfmyxd+2txmzTUHYr4RTGzWfnEZ73J+vAXWP8VyWhT/9vqmOQ8/JqhiCyjgW6YyAphPHX+/lmA7W5LA+GNTiSM4cehPs9qGnGljLCjwwg8eUJ/cZzog025PombeuD7EeXkE4MbrVgmUs3moKPhdtXBvT8U3vJ1GfWWlHZZkJDSCjzJ5PyHnvg5nHbBGQbu/DipEqdeqgPHW3bY0tYiE693Xg9pzyAOgcozkFQZgBgSzc/PdybgfxQbFwQwIDAQAB",
   "description": "Remplissage autorisé par votre coffre local FluXlock.",
   "minimum_chrome_version": "106",
   "permissions": ["nativeMessaging", "activeTab", "scripting"],
