@@ -7,6 +7,16 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.4.2] - 2026-11-24
+
+### Extension Navigateur & Relais Natif Automatique
+
+- **Identifiant d'extension Chromium déterministe (`oifhfkkohaimodaedcjbnfbamhgocndg`)** : épinglage d'une clé publique RSA-2048 SubjectPublicKeyInfo dans `browser-extension/manifest.json` garantissant un identifiant d'extension constant sur Chrome, Brave, Edge et Chromium sous macOS, Windows et Linux.
+- **Relais Native Messaging intégré au binaire Desktop** : interception immédiate des invocations `chrome-extension://<id>/` au démarrage de `main()` avant toute initialisation de Tauri, WebView ou SQLite, exécutant un relais `stdio <-> IPC local` isolé avec validation stricte des enveloppes JSON v2 (`MAX = 64 Ko`).
+- **Auto-installation et auto-mise à jour des manifestes Native Messaging** : synchronisation automatique de `com.fluxlock.browser.json` (et des clés de registre `HKCU\Software\...\NativeMessagingHosts` sous Windows via FFI Win32 direct) au lancement de FluXlock (`autofill::boot`) et à l'activation de la passerelle (`autofill_enable`), avec écriture atomique en permissions `0600`, protection anti-symlink sur toute l'arborescence, vérification des permissions du binaire et préservation des `allowed_origins` personnalisées.
+
+---
+
 ## [2.4.1] - 2026-11-23
 
 ### Sécurité & Cryptographie Post-Quantique
