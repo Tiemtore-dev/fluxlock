@@ -26,12 +26,19 @@ argon2 = { version = "0.5", features = ["std", "zeroize"] }  # Argon2id — stan
 # ═══════════════════════════════════════════════════════
 # PQC — Post-Quantum Cryptography (NIST Standards 2024)
 # ═══════════════════════════════════════════════════════
-# M05 — Mis à jour vers la dernière RC disponible. Passer à la version stable 0.3.0
-# dès sa publication sur crates.io (surveiller https://crates.io/crates/ml-kem)
-ml-kem = { version = "=0.3.0-rc.2", features = ["getrandom", "zeroize"] }  # ML-KEM-768 — FIPS 203
-ml-dsa = { version = "=0.1.0-rc.8", features = ["zeroize"] }  # ML-DSA-65 — FIPS 204 (signatures PQ)
-pkcs8 = "=0.11.0-rc.11" # Epinglé pour compatibilité avec ml-dsa 0.1.0-rc.8
-getrandom = { version = "0.4", features = ["std"] }            # RNG compatible rand_core 0.10 (pour ml-dsa)
+ml-kem = { version = "0.3.4", features = ["getrandom", "zeroize"] }  # ML-KEM-768 — FIPS 203 (stable)
+ml-dsa = { version = "0.1.2", features = ["zeroize"] }               # ML-DSA-65 — FIPS 204 (stable)
+
+# ═══════════════════════════════════════════════════════
+# OpenSSH — Format de clés RFC 4251/4253/8709 & PROTOCOL.key
+# ═══════════════════════════════════════════════════════
+ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "std", "getrandom"] }
+
+# ═══════════════════════════════════════════════════════
+# Décodage QR Code 100% Pur Rust Multiplateforme (macOS, Windows, Linux, Android)
+# ═══════════════════════════════════════════════════════
+rqrr = "0.11.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 
 # ═══════════════════════════════════════════════════════
 # Hash & MAC

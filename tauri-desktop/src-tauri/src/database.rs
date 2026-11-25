@@ -29,6 +29,95 @@ pub struct Password {
     pub url: Option<String>,
     pub notes: Option<String>,
     pub category: Option<String>,
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totp_secret: Option<String>, // Encrypted (v2:aad:...)
+    #[sqlx(default)]
+    #[serde(default)]
+    pub has_totp: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PaymentCard {
+    pub id: i64,
+    pub user_id: i64,
+    pub title: String,
+    pub cardholder_name: String,
+    pub card_number: String, // Encrypted (lazy decrypted)
+    pub brand: String,
+    pub last4: String,
+    pub exp_month: String,
+    pub exp_year: String,
+    pub cvv: String, // Encrypted (lazy decrypted)
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct IdentityDocument {
+    pub id: i64,
+    pub user_id: i64,
+    pub doc_type: String,
+    pub title: String,
+    pub full_name: String,
+    pub document_number: String, // Encrypted (lazy decrypted)
+    pub issuing_authority: Option<String>,
+    pub issue_date: Option<String>,
+    pub expiry_date: Option<String>,
+    pub nationality: Option<String>,
+    pub birth_date: Option<String>,
+    pub notes: Option<String>,
+    pub sd_jwt_credential: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PasskeyEntry {
+    pub id: i64,
+    pub user_id: i64,
+    pub credential_id: String,
+    pub rp_id: String,
+    pub rp_name: String,
+    pub user_handle: String,
+    pub user_name: String,
+    pub user_display_name: String,
+    pub cose_algorithm: i64,
+    pub public_key: String,
+    pub private_key: String, // Encrypted (redacted in list responses)
+    pub sign_count: i64,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SyncOpLogEntry {
+    pub id: i64,
+    pub user_id: i64,
+    pub op_id: String,
+    pub entity_type: String,
+    pub entity_uuid: String,
+    pub op_kind: String,
+    pub hlc_timestamp: String,
+    pub payload_json: String,
+    pub signer_verifying_key: String,
+    pub signature_mldsa65: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TotpEntryRow {
+    pub id: i64,
+    pub user_id: i64,
+    pub issuer: String,
+    pub account: String,
+    pub secret_uri: String, // Encrypted (v2:aad:...)
+    pub algorithm: String,
+    pub digits: i64,
+    pub period: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -63,11 +152,14 @@ pub struct FileShare {
     pub owner_id: i64,
     pub recipient_email: String,
     pub share_token: String, // Token unique pour accéder au fichier
-    pub encrypted_key: String, // Clé de déchiffrement chiffrée avec la clé du destinataire
+    pub encrypted_key: String, // Clé éphémère de partage chiffrée (jamais la clé maître du coffre)
     pub expires_at: String,
     pub accessed: bool,
     pub access_count: i64,
     pub created_at: String,
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
@@ -311,6 +403,130 @@ impl Database {
         .await?;
 
         crate::commands::notes::migrate(&self.pool).await?;
+
+        // Migration: add totp_secret column to passwords table for existing databases
+        let _ = sqlx::query("ALTER TABLE passwords ADD COLUMN totp_secret TEXT")
+            .execute(&self.pool)
+            .await;
+
+        // Create payment_cards table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS payment_cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                cardholder_name TEXT NOT NULL,
+                card_number TEXT NOT NULL,
+                brand TEXT NOT NULL,
+                last4 TEXT NOT NULL,
+                exp_month TEXT NOT NULL,
+                exp_year TEXT NOT NULL,
+                cvv TEXT NOT NULL,
+                notes TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create identity_documents table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS identity_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                doc_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                document_number TEXT NOT NULL,
+                issuing_authority TEXT,
+                issue_date TEXT,
+                expiry_date TEXT,
+                nationality TEXT,
+                birth_date TEXT,
+                notes TEXT,
+                sd_jwt_credential TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create passkeys table (W3C WebAuthn Level 3 Software Authenticator)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS passkeys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                credential_id TEXT NOT NULL UNIQUE,
+                rp_id TEXT NOT NULL,
+                rp_name TEXT NOT NULL,
+                user_handle TEXT NOT NULL,
+                user_name TEXT NOT NULL,
+                user_display_name TEXT NOT NULL,
+                cose_algorithm INTEGER NOT NULL DEFAULT -8,
+                public_key TEXT NOT NULL,
+                private_key TEXT NOT NULL,
+                sign_count INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_used_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create sync_oplog table (HLC + CRDT Merkle-Delta signed ML-DSA-65)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sync_oplog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                op_id TEXT NOT NULL UNIQUE,
+                entity_type TEXT NOT NULL,
+                entity_uuid TEXT NOT NULL,
+                op_kind TEXT NOT NULL,
+                hlc_timestamp TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                signer_verifying_key TEXT NOT NULL,
+                signature_mldsa65 TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create totp_entries table (Dedicated TOTP Authenticator tab — RFC 6238)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS totp_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                issuer TEXT NOT NULL,
+                account TEXT NOT NULL,
+                secret_uri TEXT NOT NULL,
+                algorithm TEXT NOT NULL DEFAULT 'SHA1',
+                digits INTEGER NOT NULL DEFAULT 6,
+                period INTEGER NOT NULL DEFAULT 30,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -445,6 +661,424 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn set_password_totp_secret(&self, id: i64, user_id: i64, totp_secret: Option<&str>) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE passwords SET totp_secret = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+        )
+        .bind(totp_secret)
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // Payment Card operations
+    pub async fn create_payment_card(
+        &self,
+        user_id: i64,
+        title: &str,
+        cardholder_name: &str,
+        card_number: &str,
+        brand: &str,
+        last4: &str,
+        exp_month: &str,
+        exp_year: &str,
+        cvv: &str,
+        notes: Option<&str>,
+    ) -> Result<i64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO payment_cards (user_id, title, cardholder_name, card_number, brand, last4, exp_month, exp_year, cvv, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(user_id)
+        .bind(title)
+        .bind(cardholder_name)
+        .bind(card_number)
+        .bind(brand)
+        .bind(last4)
+        .bind(exp_month)
+        .bind(exp_year)
+        .bind(cvv)
+        .bind(notes)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn get_payment_cards(&self, user_id: i64) -> Result<Vec<PaymentCard>, sqlx::Error> {
+        sqlx::query_as::<_, PaymentCard>(
+            "SELECT * FROM payment_cards WHERE user_id = ? ORDER BY updated_at DESC"
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn get_payment_card(&self, id: i64, user_id: i64) -> Result<Option<PaymentCard>, sqlx::Error> {
+        sqlx::query_as::<_, PaymentCard>(
+            "SELECT * FROM payment_cards WHERE id = ? AND user_id = ?"
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn update_payment_card(
+        &self,
+        id: i64,
+        user_id: i64,
+        title: &str,
+        cardholder_name: &str,
+        card_number: &str,
+        brand: &str,
+        last4: &str,
+        exp_month: &str,
+        exp_year: &str,
+        cvv: &str,
+        notes: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE payment_cards
+            SET title = ?, cardholder_name = ?, card_number = ?, brand = ?, last4 = ?,
+                exp_month = ?, exp_year = ?, cvv = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_id = ?
+            "#
+        )
+        .bind(title)
+        .bind(cardholder_name)
+        .bind(card_number)
+        .bind(brand)
+        .bind(last4)
+        .bind(exp_month)
+        .bind(exp_year)
+        .bind(cvv)
+        .bind(notes)
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_payment_card(&self, id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM payment_cards WHERE id = ? AND user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // Identity Document operations
+    pub async fn create_identity_document(
+        &self,
+        user_id: i64,
+        doc_type: &str,
+        title: &str,
+        full_name: &str,
+        document_number: &str,
+        issuing_authority: Option<&str>,
+        issue_date: Option<&str>,
+        expiry_date: Option<&str>,
+        nationality: Option<&str>,
+        birth_date: Option<&str>,
+        notes: Option<&str>,
+        sd_jwt_credential: Option<&str>,
+    ) -> Result<i64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO identity_documents (
+                user_id, doc_type, title, full_name, document_number,
+                issuing_authority, issue_date, expiry_date, nationality,
+                birth_date, notes, sd_jwt_credential
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(user_id)
+        .bind(doc_type)
+        .bind(title)
+        .bind(full_name)
+        .bind(document_number)
+        .bind(issuing_authority)
+        .bind(issue_date)
+        .bind(expiry_date)
+        .bind(nationality)
+        .bind(birth_date)
+        .bind(notes)
+        .bind(sd_jwt_credential)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn get_identity_documents(&self, user_id: i64) -> Result<Vec<IdentityDocument>, sqlx::Error> {
+        sqlx::query_as::<_, IdentityDocument>(
+            "SELECT * FROM identity_documents WHERE user_id = ? ORDER BY updated_at DESC"
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn get_identity_document(&self, id: i64, user_id: i64) -> Result<Option<IdentityDocument>, sqlx::Error> {
+        sqlx::query_as::<_, IdentityDocument>(
+            "SELECT * FROM identity_documents WHERE id = ? AND user_id = ?"
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn update_identity_document(
+        &self,
+        id: i64,
+        user_id: i64,
+        doc_type: &str,
+        title: &str,
+        full_name: &str,
+        document_number: &str,
+        issuing_authority: Option<&str>,
+        issue_date: Option<&str>,
+        expiry_date: Option<&str>,
+        nationality: Option<&str>,
+        birth_date: Option<&str>,
+        notes: Option<&str>,
+        sd_jwt_credential: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE identity_documents
+            SET doc_type = ?, title = ?, full_name = ?, document_number = ?,
+                issuing_authority = ?, issue_date = ?, expiry_date = ?,
+                nationality = ?, birth_date = ?, notes = ?, sd_jwt_credential = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_id = ?
+            "#
+        )
+        .bind(doc_type)
+        .bind(title)
+        .bind(full_name)
+        .bind(document_number)
+        .bind(issuing_authority)
+        .bind(issue_date)
+        .bind(expiry_date)
+        .bind(nationality)
+        .bind(birth_date)
+        .bind(notes)
+        .bind(sd_jwt_credential)
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_identity_document(&self, id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM identity_documents WHERE id = ? AND user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // Passkeys (WebAuthn Level 3) operations
+    pub async fn create_passkey(
+        &self,
+        user_id: i64,
+        credential_id: &str,
+        rp_id: &str,
+        rp_name: &str,
+        user_handle: &str,
+        user_name: &str,
+        user_display_name: &str,
+        cose_algorithm: i64,
+        public_key: &str,
+        private_key: &str,
+    ) -> Result<i64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO passkeys (
+                user_id, credential_id, rp_id, rp_name, user_handle,
+                user_name, user_display_name, cose_algorithm, public_key, private_key, sign_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            "#
+        )
+        .bind(user_id)
+        .bind(credential_id)
+        .bind(rp_id)
+        .bind(rp_name)
+        .bind(user_handle)
+        .bind(user_name)
+        .bind(user_display_name)
+        .bind(cose_algorithm)
+        .bind(public_key)
+        .bind(private_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn get_passkeys(&self, user_id: i64) -> Result<Vec<PasskeyEntry>, sqlx::Error> {
+        sqlx::query_as::<_, PasskeyEntry>(
+            "SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at DESC"
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn get_passkey(&self, id: i64, user_id: i64) -> Result<Option<PasskeyEntry>, sqlx::Error> {
+        sqlx::query_as::<_, PasskeyEntry>(
+            "SELECT * FROM passkeys WHERE id = ? AND user_id = ?"
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn update_passkey_sign_count(&self, id: i64, user_id: i64, new_sign_count: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE passkeys SET sign_count = ?, last_used_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+        )
+        .bind(new_sign_count)
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_passkey(&self, id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM passkeys WHERE id = ? AND user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // Continuous P2P Sync OpLog (HLC + CRDT Merkle-Delta signed ML-DSA-65)
+    pub async fn insert_sync_op(
+        &self,
+        user_id: i64,
+        op_id: &str,
+        entity_type: &str,
+        entity_uuid: &str,
+        op_kind: &str,
+        hlc_timestamp: &str,
+        payload_json: &str,
+        signer_verifying_key: &str,
+        signature_mldsa65: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO sync_oplog (
+                user_id, op_id, entity_type, entity_uuid, op_kind,
+                hlc_timestamp, payload_json, signer_verifying_key, signature_mldsa65
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(user_id)
+        .bind(op_id)
+        .bind(entity_type)
+        .bind(entity_uuid)
+        .bind(op_kind)
+        .bind(hlc_timestamp)
+        .bind(payload_json)
+        .bind(signer_verifying_key)
+        .bind(signature_mldsa65)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn get_sync_ops_since(&self, user_id: i64, since_hlc: Option<&str>) -> Result<Vec<SyncOpLogEntry>, sqlx::Error> {
+        if let Some(hlc) = since_hlc {
+            sqlx::query_as::<_, SyncOpLogEntry>(
+                "SELECT * FROM sync_oplog WHERE user_id = ? AND hlc_timestamp > ? ORDER BY hlc_timestamp ASC LIMIT 512"
+            )
+            .bind(user_id)
+            .bind(hlc)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query_as::<_, SyncOpLogEntry>(
+                "SELECT * FROM sync_oplog WHERE user_id = ? ORDER BY hlc_timestamp ASC LIMIT 512"
+            )
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await
+        }
+    }
+
+    pub async fn get_latest_sync_hlc(&self, user_id: i64) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT hlc_timestamp FROM sync_oplog WHERE user_id = ? ORDER BY hlc_timestamp DESC LIMIT 1"
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(h,)| h))
+    }
+
+    // Dedicated TOTP Authenticator entries (RFC 6238)
+    pub async fn create_totp_entry(
+        &self,
+        user_id: i64,
+        issuer: &str,
+        account: &str,
+        secret_uri: &str,
+        algorithm: &str,
+        digits: i64,
+        period: i64,
+    ) -> Result<i64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO totp_entries (user_id, issuer, account, secret_uri, algorithm, digits, period)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(user_id)
+        .bind(issuer)
+        .bind(account)
+        .bind(secret_uri)
+        .bind(algorithm)
+        .bind(digits)
+        .bind(period)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn get_totp_entries(&self, user_id: i64) -> Result<Vec<TotpEntryRow>, sqlx::Error> {
+        sqlx::query_as::<_, TotpEntryRow>(
+            "SELECT * FROM totp_entries WHERE user_id = ? ORDER BY updated_at DESC"
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn delete_totp_entry(&self, id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM totp_entries WHERE id = ? AND user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 

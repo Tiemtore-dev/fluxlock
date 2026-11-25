@@ -65,8 +65,14 @@
       <p id="security-note" class="security-note"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg><span>Authentification dans FluXlock.</span></p>
       <button id="cancel" class="button button-quiet" type="button" hidden>Annuler</button>
       <details id="connection" class="connection">
-        <summary><span><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>Connexion et aide</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+        <summary><span><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>Plus d’options et aide</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
         <div class="connection-content">
+          <h2>Passkey, Carte &amp; Capture</h2>
+          <div class="actions" style="margin-bottom: 12px">
+            <button id="start-passkey" class="button button-secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><span>Passkey WebAuthn (1-clic)</span></button>
+            <button id="start-card" class="button button-secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg><span>Remplir une carte bancaire</span></button>
+            <button id="save-captured" class="button button-secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>Enregistrer le mot de passe saisi</span></button>
+          </div>
           <h2>Connecter ce navigateur</h2><p>Ouvrez FluXlock et déverrouillez le coffre à connecter.</p>
           <ol class="help-steps"><li>Ouvrez <strong>Paramètres → Extension de navigateur</strong> dans FluXlock.</li><li>Choisissez <strong>Connecter un navigateur</strong>, puis connectez-vous ici.</li><li>Comparez les empreintes et confirmez dans les deux fenêtres.</li></ol>
           <button id="connect" class="button button-secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>Connecter ce navigateur</button>

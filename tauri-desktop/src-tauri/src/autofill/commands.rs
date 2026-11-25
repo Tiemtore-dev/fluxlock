@@ -101,8 +101,24 @@ pub async fn autofill_prompt(
     let guard = state.autofill.pending.lock().await;
     let p = guard.as_ref().ok_or("Demande expirée")?;
     check_window(p, &request_id, &window)?;
+    let kind = if p.target.is_none() {
+        "pair"
+    } else if p.save_payload.is_some() {
+        "save"
+    } else if p.passkey_request.is_some() {
+        "passkey"
+    } else if p.card_mode {
+        "fill_card"
+    } else {
+        "fill"
+    };
+    let save_username = p
+        .save_payload
+        .as_ref()
+        .map(|(u, _)| u.as_str())
+        .or_else(|| p.passkey_request.as_ref().map(|r| r.username.as_str()));
     Ok(
-        serde_json::json!({"kind":if p.target.is_some(){"fill"}else{"pair"},"origin":p.target.as_ref().map(|t|&t.origin),"fingerprint":p.fingerprint,"browser_confirmed":p.browser_confirmed}),
+        serde_json::json!({"kind":kind,"origin":p.target.as_ref().map(|t|&t.origin),"username":save_username,"fingerprint":p.fingerprint,"browser_confirmed":p.browser_confirmed}),
     )
 }
 #[tauri::command]
@@ -256,15 +272,284 @@ pub async fn autofill_authenticate(
     let key = verification?;
     let db_guard = state.db.lock().await;
     let db = db_guard.as_ref().ok_or("Base indisponible")?;
-    let found = candidates(
-        db,
-        &key,
-        user.id,
-        &p.target.as_ref().ok_or("Site absent")?.origin,
-    )
-    .await?;
-    check_window(p, &request_id, &window)?;
-    p.candidates = found;
+    let target_origin = p.target.as_ref().ok_or("Site absent")?.origin.clone();
+
+    if let Some((save_username, save_password)) = p.save_payload.take() {
+        // Capture & Save : enregistre ou met à jour l'identifiant capturé depuis le navigateur
+        // avec chiffrement ChaCha20-Poly1305 lié par AAD (v2:aad:), puis verrouille immédiatement le coffre.
+        let enc_pw = crate::crypto::encrypt_field_secure(
+            &save_password,
+            &key,
+            user.id,
+            "passwords",
+            "password",
+        )?;
+        let title_str = target_origin
+            .strip_prefix("https://")
+            .unwrap_or(&target_origin)
+            .to_string();
+        let enc_title = crate::crypto::encrypt_field_secure(
+            &title_str,
+            &key,
+            user.id,
+            "passwords",
+            "title",
+        )?;
+        let enc_user = if save_username.is_empty() {
+            None
+        } else {
+            Some(crate::crypto::encrypt_field_secure(
+                &save_username,
+                &key,
+                user.id,
+                "passwords",
+                "username",
+            )?)
+        };
+        let enc_url = crate::crypto::encrypt_field_secure(
+            &target_origin,
+            &key,
+            user.id,
+            "passwords",
+            "url",
+        )?;
+        let enc_cat = crate::crypto::encrypt_field_secure(
+            "Web",
+            &key,
+            user.id,
+            "passwords",
+            "category",
+        )?;
+
+        // Vérifier s'il existe déjà une entrée pour cette origine et ce même username
+        let existing_rows = db.get_passwords(user.id).await.map_err(|e| e.to_string())?;
+        let mut updated_existing = false;
+        for row in existing_rows {
+            let Some(ref u_enc) = row.url else { continue };
+            let Ok(u_plain) = crate::crypto::decrypt_field_secure(u_enc, &key, user.id, "passwords", "url") else { continue };
+            if super::origin::canonical(&u_plain).ok().as_deref() != Some(target_origin.as_str()) {
+                continue;
+            }
+            let row_user = row
+                .username
+                .as_ref()
+                .and_then(|usr| crate::crypto::decrypt_field_secure(usr, &key, user.id, "passwords", "username").ok())
+                .unwrap_or_default();
+            if row_user == save_username {
+                db.update_password(
+                    row.id,
+                    user.id,
+                    &row.title,
+                    enc_user.as_deref(),
+                    &enc_pw,
+                    Some(&enc_url),
+                    row.notes.as_deref(),
+                    row.category.as_deref(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                let _ = db.log_action(user.id, "UPDATE", "password", Some(row.id)).await;
+                updated_existing = true;
+                break;
+            }
+        }
+
+        if !updated_existing {
+            let new_id = db
+                .create_password(
+                    user.id,
+                    &enc_title,
+                    enc_user.as_deref(),
+                    &enc_pw,
+                    Some(&enc_url),
+                    None,
+                    Some(&enc_cat),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = db.log_action(user.id, "CREATE", "password", Some(new_id)).await;
+        }
+
+        check_window(p, &request_id, &window)?;
+        p.saved_done = true;
+        p.authenticated = true;
+        p.key = None; // Zeroize la clé immédiatement après écriture SQLite
+        p.expires = Instant::now() + Duration::from_secs(30);
+        drop(db_guard);
+        drop(guard);
+        crate::commands::session::lock_vault_data(&state).await;
+        let _ = app.emit("autofill-vault-locked", ());
+        let _ = window.close();
+        return Ok(());
+    }
+
+    if let Some(pk_req) = p.passkey_request.take() {
+        // Cérémonie Passkey WebAuthn Level 3 Zéro-Friction :
+        // 1. Si une Passkey existe déjà pour ce rp_id (et ce compte), signe immédiatement une assertion webauthn.get.
+        // 2. Sinon, génère une nouvelle Passkey résidente COSE EdDSA (-8) webauthn.create, chiffre la clé privée (v2:aad:)
+        //    et retourne uniquement la clé publique et l'attestation.
+        let existing_pks = db.get_passkeys(user.id).await.map_err(|e| e.to_string())?;
+        let mut matched_pk = None;
+        for row in existing_pks {
+            if row.rp_id.eq_ignore_ascii_case(&pk_req.rp_id) {
+                let row_user = crate::crypto::decrypt_field_secure(
+                    &row.user_name,
+                    &key,
+                    user.id,
+                    "passkeys",
+                    "user_name",
+                )
+                .unwrap_or_default();
+                if pk_req.username.is_empty() || row_user.eq_ignore_ascii_case(&pk_req.username) {
+                    matched_pk = Some((row, row_user));
+                    break;
+                }
+            }
+        }
+
+        let passkey_json = if let Some((pk_row, row_user)) = matched_pk {
+            let priv_b64 = Zeroizing::new(crate::crypto::decrypt_field_secure(
+                &pk_row.private_key,
+                &key,
+                user.id,
+                "passkeys",
+                "private_key",
+            )?);
+            let user_handle = crate::crypto::decrypt_field_secure(
+                &pk_row.user_handle,
+                &key,
+                user.id,
+                "passkeys",
+                "user_handle",
+            )
+            .ok();
+            let assertion = secure_vault_crypto::authenticate_passkey_assertion(
+                &pk_row.rp_id,
+                &pk_row.credential_id,
+                &priv_b64,
+                pk_row.sign_count as u32,
+                &pk_req.challenge_b64url,
+                &target_origin,
+                user_handle.as_deref(),
+            )
+            .map_err(|e| format!("Erreur signature Passkey: {}", e))?;
+            db.update_passkey_sign_count(pk_row.id, user.id, assertion.new_sign_count as i64)
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = db.log_action(user.id, "AUTHENTICATE", "passkey", Some(pk_row.id)).await;
+            serde_json::json!({
+                "state": "passkey_once",
+                "mode": "get",
+                "request_id": p.id,
+                "credential_id_b64url": assertion.credential_id_b64url,
+                "rp_id": assertion.rp_id,
+                "user_name": row_user,
+                "user_handle_b64url": assertion.user_handle_b64url,
+                "authenticator_data_b64url": assertion.authenticator_data_b64url,
+                "client_data_json_b64url": assertion.client_data_json_b64url,
+                "signature_b64url": assertion.signature_b64url,
+                "new_sign_count": assertion.new_sign_count,
+            })
+        } else {
+            let effective_user = if pk_req.username.is_empty() {
+                user.email.clone()
+            } else {
+                pk_req.username.clone()
+            };
+            let user_handle_raw = format!("fluxlock-user-{}-{}", user.id, effective_user);
+            let created = secure_vault_crypto::create_passkey_credential(
+                &pk_req.rp_id,
+                &pk_req.rp_name,
+                user_handle_raw.as_bytes(),
+                &effective_user,
+                &effective_user,
+                &pk_req.challenge_b64url,
+                &target_origin,
+            )
+            .map_err(|e| format!("Erreur création Passkey: {}", e))?;
+
+            let enc_handle = crate::crypto::encrypt_field_secure(
+                &created.user_handle_b64url,
+                &key,
+                user.id,
+                "passkeys",
+                "user_handle",
+            )?;
+            let enc_uname = crate::crypto::encrypt_field_secure(
+                &created.user_name,
+                &key,
+                user.id,
+                "passkeys",
+                "user_name",
+            )?;
+            let enc_dname = crate::crypto::encrypt_field_secure(
+                &created.user_display_name,
+                &key,
+                user.id,
+                "passkeys",
+                "user_display_name",
+            )?;
+            let enc_priv = crate::crypto::encrypt_field_secure(
+                &created.private_key_b64url,
+                &key,
+                user.id,
+                "passkeys",
+                "private_key",
+            )?;
+
+            let pk_id = db
+                .create_passkey(
+                    user.id,
+                    &created.credential_id_b64url,
+                    &created.rp_id,
+                    &created.rp_name,
+                    &enc_handle,
+                    &enc_uname,
+                    &enc_dname,
+                    created.cose_algorithm as i64,
+                    &created.public_key_b64url,
+                    &enc_priv,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = db.log_action(user.id, "CREATE", "passkey", Some(pk_id)).await;
+            serde_json::json!({
+                "state": "passkey_once",
+                "mode": "create",
+                "request_id": p.id,
+                "credential_id_b64url": created.credential_id_b64url,
+                "rp_id": created.rp_id,
+                "user_name": created.user_name,
+                "user_handle_b64url": created.user_handle_b64url,
+                "public_key_b64url": created.public_key_b64url,
+                "cose_public_key_b64url": created.cose_public_key_b64url,
+                "authenticator_data_b64url": created.authenticator_data_b64url,
+                "client_data_json_b64url": created.client_data_json_b64url,
+            })
+        };
+
+        check_window(p, &request_id, &window)?;
+        p.passkey_result = Some(passkey_json);
+        p.authenticated = true;
+        p.key = None; // Zeroize la clé maître immédiatement après signature/création
+        p.expires = Instant::now() + Duration::from_secs(30);
+        drop(db_guard);
+        drop(guard);
+        crate::commands::session::lock_vault_data(&state).await;
+        let _ = app.emit("autofill-vault-locked", ());
+        let _ = window.close();
+        return Ok(());
+    }
+
+    if p.card_mode {
+        let found_cards = super::card_candidates(db, &key, user.id).await?;
+        check_window(p, &request_id, &window)?;
+        p.card_candidates = found_cards;
+    } else {
+        let found = candidates(db, &key, user.id, &target_origin).await?;
+        check_window(p, &request_id, &window)?;
+        p.candidates = found;
+    }
     p.user = user.id;
     p.key = Some(key);
     p.authenticated = true;

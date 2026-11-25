@@ -11,8 +11,8 @@ snow = { version = "=0.10.0", default-features = false, features = ["default-res
 sha2 = "0.10"
 zeroize = "1.8"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-ml-kem = { version = "=0.3.0-rc.2", default-features = false, features = ["zeroize"] }
-ml-dsa = { version = "=0.1.0-rc.8", default-features = false, features = ["zeroize"] }
+ml-kem = { version = "0.3.4", default-features = false, features = ["alloc", "zeroize"] }
+ml-dsa = { version = "0.1.2", default-features = false, features = ["alloc", "zeroize"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = "0.3"

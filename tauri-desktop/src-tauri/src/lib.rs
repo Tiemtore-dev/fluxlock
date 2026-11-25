@@ -203,6 +203,8 @@ pub struct CreatePasswordRequest {
     pub url: Option<String>,
     pub notes: Option<String>,
     pub category: Option<String>,
+    #[serde(default)]
+    pub totp_secret: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,6 +216,8 @@ pub struct UpdatePasswordRequest {
     pub url: Option<String>,
     pub notes: Option<String>,
     pub category: Option<String>,
+    #[serde(default)]
+    pub totp_secret: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -441,6 +445,26 @@ pub fn run() {
             decrypt_password,
             update_password,
             delete_password,
+            generate_password_totp,
+            create_totp_authenticator,
+            get_totp_authenticators,
+            delete_totp_authenticator,
+            import_totp_migration_batch,
+            create_payment_card,
+            get_payment_cards,
+            decrypt_payment_card_secret,
+            update_payment_card,
+            delete_payment_card,
+            create_identity_document,
+            get_identity_documents,
+            decrypt_identity_document_number,
+            generate_identity_sd_jwt,
+            delete_identity_document,
+            create_passkey_entry,
+            get_passkeys_list,
+            authenticate_passkey_entry,
+            delete_passkey_entry,
+            transfer::vault_sync::get_vault_sync_status,
             list_notes,
             get_note,
             save_note,

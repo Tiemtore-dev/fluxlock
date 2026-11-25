@@ -37,6 +37,8 @@ pub mod key_management;
 pub mod errors;
 pub mod utils;
 pub mod migration;
+pub mod totp;
+pub mod webauthn;
 
 // Réexporter les types principaux pour faciliter l'usage
 // --- Legacy (v1) ---
@@ -50,7 +52,7 @@ pub use key_derivation::{
 };
 pub use signatures::ed25519::{KeyPair as Ed25519KeyPair, sign_message, verify_signature, verify_signature_from_bytes};
 pub use signatures::ml_dsa::{MlDsaKeyPair, verify_ml_dsa};
-pub use key_exchange::x25519::{generate_keypair, compute_shared_secret};
+pub use key_exchange::x25519::{generate_keypair, generate_static_keypair_bytes, compute_shared_secret};
 pub use hashing::{blake3_hash, sha3_256_hash, sha256_hash};
 pub use secure_memory::{SecretBytes, SecretString};
 pub use errors::{CryptoError, Result};
@@ -61,7 +63,7 @@ pub use blake3;
 // --- Post-Quantum / v2 ---
 pub use crypto::vault::{encrypt_vault, decrypt_vault, SealedVault, VaultData, VaultEntry, VaultMeta};
 pub use crypto::kdf::{derive_master_key, MasterKey, KdfParams};
-pub use crypto::cipher::{encrypt, decrypt, EncryptedBlob};
+pub use crypto::cipher::{encrypt, decrypt, encrypt_with_aad, decrypt_with_aad, EncryptedBlob};
 pub use crypto::stream_cipher::{encrypt_stream, decrypt_stream, is_senc_format, SENC_MAGIC, SENC_HEADER_SIZE, DEFAULT_STREAM_CHUNK_SIZE};
 pub use crypto::integrity::{compute_header_mac, verify_header_mac};
 pub use crypto::kem::{
@@ -69,6 +71,17 @@ pub use crypto::kem::{
     KemPublicKey, KemPrivateKey, SharedSecret as KemSharedSecret,
 };
 pub use migration::migrate::{migrate_v1_to_v2, MigrationReport};
+pub use totp::{
+    TotpAlgorithm, TotpConfig, TotpOutput, SdJwtClaim, IssuedSdJwt,
+    base32_decode, base32_encode, generate_hotp_raw, generate_totp, verify_totp_window,
+    parse_otpauth_migration_uri, parse_totp_migration_input, decode_qr_image_bytes,
+    validate_luhn, detect_card_brand, extract_card_last4, sanitize_card_pan,
+    issue_sd_jwt, verify_sd_jwt,
+};
+pub use webauthn::{
+    CreatedPasskey, PasskeyAssertion, FLUXLOCK_PASSKEY_AAGUID,
+    create_passkey_credential, authenticate_passkey_assertion, encode_cose_ed25519_public_key,
+};
 
 // Version du crate
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

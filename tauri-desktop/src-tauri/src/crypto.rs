@@ -1,7 +1,11 @@
 use secure_vault_crypto::{
     key_derivation::argon2::{derive_key_from_password_with_config, Argon2Config},
     crypto::aes_gcm::decrypt_aes_gcm,                          // v1 legacy (déchiffrement rétrocompatible)
-    crypto::cipher::{encrypt as encrypt_chacha, decrypt as decrypt_chacha, EncryptedBlob}, // v2 PQC
+    crypto::cipher::{
+        encrypt as encrypt_chacha, decrypt as decrypt_chacha,
+        encrypt_with_aad as encrypt_chacha_aad, decrypt_with_aad as decrypt_chacha_aad,
+        EncryptedBlob,
+    }, // v2 PQC + AAD
     secure_memory::EncryptedData,
     errors::CryptoError as CoreCryptoError,
     SecretString,
@@ -16,6 +20,17 @@ use crate::secure_key::SecureKey;
 /// Préfixe des données chiffrées en v2 (ChaCha20-Poly1305)
 /// Les données sans ce préfixe sont considérées v1 (AES-256-GCM) pour rétrocompatibilité
 const V2_PREFIX: &str = "v2:";
+
+/// Préfixe des données chiffrées en v2 avec liaison contextuelle AAD (RFC 8439).
+/// Commence par `"v2:"` pour préserver la compatibilité des contrôles de format v2.
+pub const V2_AAD_PREFIX: &str = "v2:aad:";
+
+/// Construit l'AAD (Associated Authenticated Data) canonique liant un champ SQLite
+/// à son propriétaire (`user_id`), sa table (`table`) et sa colonne (`field`).
+/// Empêche toute attaque par échange de colonnes ou de lignes (*ciphertext swapping*).
+pub fn field_aad(user_id: i64, table: &str, field: &str) -> Vec<u8> {
+    format!("fluxlock/v2/user:{user_id}/table:{table}/field:{field}").into_bytes()
+}
 
 /// Configuration Argon2id centréalisée (OWASP recommandations)
 /// Modifier ici pour ajuster les paramètres de dérivation globalement
@@ -58,6 +73,12 @@ impl std::fmt::Display for CryptoError {
 }
 
 impl std::error::Error for CryptoError {}
+
+impl From<CryptoError> for String {
+    fn from(err: CryptoError) -> Self {
+        err.to_string()
+    }
+}
 
 impl From<CoreCryptoError> for CryptoError {
     fn from(err: CoreCryptoError) -> Self {
@@ -277,6 +298,30 @@ pub fn encrypt_data_secure(data: &str, key: &SecureKey) -> Result<String, Crypto
     key.use_key(|k| encrypt_data(data, k))
 }
 
+/// Chiffre des données avec ChaCha20-Poly1305 et AAD contextuelle (RFC 8439).
+/// Format de sortie : `"v2:aad:" + base64(nonce || ciphertext+tag)`
+pub fn encrypt_data_with_aad(data: &str, key: &[u8], aad: &[u8]) -> Result<String, CryptoError> {
+    if key.len() != 32 {
+        return Err(CryptoError::InvalidKey);
+    }
+    let key_arr: &[u8; 32] = key.try_into().map_err(|_| CryptoError::InvalidKey)?;
+    let blob = encrypt_chacha_aad(key_arr, data.as_bytes(), aad)?;
+    let encoded = general_purpose::STANDARD.encode(blob.to_bytes());
+    Ok(format!("{}{}", V2_AAD_PREFIX, encoded))
+}
+
+/// Chiffre un champ de base de données avec liaison contextuelle AAD (`user_id`, `table`, `field`).
+pub fn encrypt_field_secure(
+    data: &str,
+    key: &SecureKey,
+    user_id: i64,
+    table: &str,
+    field: &str,
+) -> Result<String, CryptoError> {
+    let aad = field_aad(user_id, table, field);
+    key.use_key(|k| encrypt_data_with_aad(data, k, &aad))
+}
+
 /// Chiffre des données binaires avec ChaCha20-Poly1305 (vault v2)
 /// 
 /// Utilisé pour les fichiers binaires (images, vidéos, PDFs, etc.)
@@ -312,6 +357,12 @@ pub fn encrypt_data_bytes_secure(data: &[u8], key: &SecureKey) -> Result<String,
 pub fn decrypt_data(encrypted_base64: &str, key: &[u8]) -> Result<String, CryptoError> {
     if key.len() != 32 {
         return Err(CryptoError::InvalidKey);
+    }
+
+    if encrypted_base64.starts_with(V2_AAD_PREFIX) {
+        return Err(CryptoError::DecryptionError(
+            "Contextual AAD required to decrypt v2:aad: ciphertext".to_string(),
+        ));
     }
 
     if let Some(v2_data) = encrypted_base64.strip_prefix(V2_PREFIX) {
@@ -351,6 +402,47 @@ pub fn decrypt_data_secure(encrypted_base64: &str, key: &SecureKey) -> Result<St
     key.use_key(|k| decrypt_data(encrypted_base64, k))
 }
 
+/// Déchiffre des données liées par AAD (`"v2:aad:"`), avec rétrocompatibilité lecture
+/// pour les entrées historiques `"v2:"` (sans AAD) et `v1` (AES-256-GCM).
+///
+/// Si l'entrée porte le préfixe `"v2:aad:"`, la vérification de `aad` est STRICTE :
+/// tout échange de colonne, de table ou d'utilisateur échoue avec `DecryptionError`.
+pub fn decrypt_data_with_aad(
+    encrypted_base64: &str,
+    key: &[u8],
+    aad: &[u8],
+) -> Result<String, CryptoError> {
+    if key.len() != 32 {
+        return Err(CryptoError::InvalidKey);
+    }
+    if let Some(v2_aad_data) = encrypted_base64.strip_prefix(V2_AAD_PREFIX) {
+        let combined = general_purpose::STANDARD
+            .decode(v2_aad_data)
+            .map_err(|e| CryptoError::DecryptionError(format!("Base64 decode error: {}", e)))?;
+        let key_arr: &[u8; 32] = key.try_into().map_err(|_| CryptoError::InvalidKey)?;
+        let blob = EncryptedBlob::from_bytes(&combined)?;
+        let plaintext = decrypt_chacha_aad(key_arr, &blob, aad)?;
+        let s = std::str::from_utf8(&plaintext)
+            .map_err(|e| CryptoError::DecryptionError(format!("UTF-8 decode error: {}", e)))?
+            .to_string();
+        Ok(s)
+    } else {
+        decrypt_data(encrypted_base64, key)
+    }
+}
+
+/// Déchiffre un champ de base de données en vérifiant son AAD (`user_id`, `table`, `field`).
+pub fn decrypt_field_secure(
+    encrypted_base64: &str,
+    key: &SecureKey,
+    user_id: i64,
+    table: &str,
+    field: &str,
+) -> Result<String, CryptoError> {
+    let aad = field_aad(user_id, table, field);
+    key.use_key(|k| decrypt_data_with_aad(encrypted_base64, k, &aad))
+}
+
 /// Déchiffre des données binaires (v2 ChaCha20-Poly1305 ou v1 AES-256-GCM en fallback)
 /// 
 /// Utilisé pour les fichiers binaires (images, vidéos, PDFs, etc.)
@@ -358,6 +450,12 @@ pub fn decrypt_data_secure(encrypted_base64: &str, key: &SecureKey) -> Result<St
 pub fn decrypt_data_bytes(encrypted_base64: &str, key: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if key.len() != 32 {
         return Err(CryptoError::InvalidKey);
+    }
+
+    if encrypted_base64.starts_with(V2_AAD_PREFIX) {
+        return Err(CryptoError::DecryptionError(
+            "Contextual AAD required to decrypt v2:aad: ciphertext".to_string(),
+        ));
     }
 
     if let Some(v2_data) = encrypted_base64.strip_prefix(V2_PREFIX) {
@@ -602,6 +700,38 @@ mod tests {
         
         // Les sels doivent être différents (aléatoires)
         assert_ne!(salt1, salt2);
+    }
+
+    #[test]
+    fn test_field_aad_prevents_column_table_and_user_swapping() {
+        let key = SecureKey::new(generate_encryption_key());
+        let enc_pw = encrypt_field_secure("SuperSecretPassword!", &key, 1, "passwords", "password").unwrap();
+
+        assert!(enc_pw.starts_with("v2:"));
+        assert!(enc_pw.starts_with(V2_AAD_PREFIX));
+
+        // 1. Déchiffrement légitime avec le bon contexte
+        let dec = decrypt_field_secure(&enc_pw, &key, 1, "passwords", "password").unwrap();
+        assert_eq!(dec, "SuperSecretPassword!");
+
+        // 2. Attaque par échange de colonne (password copié dans title) -> REJET
+        assert!(decrypt_field_secure(&enc_pw, &key, 1, "passwords", "title").is_err());
+
+        // 3. Attaque par échange de table (passwords copié dans secure_keys) -> REJET
+        assert!(decrypt_field_secure(&enc_pw, &key, 1, "secure_keys", "password").is_err());
+
+        // 4. Attaque par échange d'utilisateur (user_id=1 copié dans user_id=2) -> REJET
+        assert!(decrypt_field_secure(&enc_pw, &key, 2, "passwords", "password").is_err());
+
+        // 5. Tentative de déchiffrement sans AAD via decrypt_data_secure -> REJET
+        assert!(decrypt_data_secure(&enc_pw, &key).is_err());
+
+        // 6. Rétrocompatibilité lecture pour les anciens enregistrements v2: sans AAD
+        let legacy_v2 = encrypt_data_secure("LegacyV2Value", &key).unwrap();
+        assert_eq!(
+            decrypt_field_secure(&legacy_v2, &key, 1, "passwords", "title").unwrap(),
+            "LegacyV2Value"
+        );
     }
 }
 

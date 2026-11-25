@@ -10,9 +10,12 @@ const copy: Record<string, {title: string; description: string; icon: string}> =
   paired: { title: 'Votre navigateur est connecté.', description: 'Vous pouvez maintenant autoriser un remplissage pour ce site.', icon: 'check' },
   auth_required: { title: 'Validez dans FluXlock', description: 'Puis revenez ici pour choisir votre compte.', icon: 'lock' },
   ready: { title: 'Choisissez un compte', description: 'Seul le compte choisi sera rempli sur ce site.', icon: 'user' },
-  consuming: { title: 'Remplissage en cours…', description: 'Le seul compte choisi est transmis au formulaire.', icon: 'clock' },
-  filled: { title: 'Formulaire rempli', description: 'Le coffre est verrouillé. Vous pouvez vous connecter.', icon: 'check' },
-  empty: { title: 'Aucun compte pour ce site', description: 'Ajoutez son URL HTTPS exacte dans FluXlock, puis réessayez.', icon: 'search' },
+  consuming: { title: 'Remplissage en cours…', description: 'Le seul élément choisi est transmis au formulaire.', icon: 'clock' },
+  filled: { title: 'Formulaire rempli', description: 'Le coffre est verrouillé. Vous pouvez continuer.', icon: 'check' },
+  saved: { title: 'Mot de passe enregistré', description: 'Chiffré avec ChaCha20-Poly1305 (AAD) dans votre coffre FluXlock.', icon: 'check' },
+  passkey_created: { title: 'Passkey WebAuthn créée', description: 'Clé résidente COSE Ed25519 générée et transmise au site. Coffre verrouillé.', icon: 'check' },
+  passkey_authenticated: { title: 'Authentifié par Passkey', description: 'Assertion WebAuthn signée et transmise au site. Coffre verrouillé.', icon: 'check' },
+  empty: { title: 'Aucun élément pour ce site', description: 'Ajoutez son URL HTTPS exacte ou une carte dans FluXlock, puis réessayez.', icon: 'search' },
   expired: { title: 'Le délai est écoulé.', description: 'Pour protéger vos identifiants, autorisez une nouvelle demande dans FluXlock.', icon: 'clock' },
   error: { title: 'Remplissage interrompu', description: 'Vérifiez que FluXlock est ouvert, puis réessayez.', icon: 'alert' },
 }
@@ -63,9 +66,13 @@ function render(view: View, focusAccounts = false) {
   element('fingerprint-panel').hidden = !pairing
   element('fingerprint').textContent = pairing ? view.fingerprint || '' : ''
   element('confirm').hidden = !pairing
-  element('start').hidden = ['pairing', 'auth_required', 'ready', 'connecting', 'consuming'].includes(state)
+  const hideStartControls = ['pairing', 'auth_required', 'ready', 'connecting', 'consuming'].includes(state)
+  element('start').hidden = hideStartControls
+  element('start-passkey').hidden = hideStartControls
+  element('start-card').hidden = hideStartControls
+  element('save-captured').hidden = hideStartControls
   element('cancel').hidden = !['pairing', 'auth_required', 'ready'].includes(state)
-  element('start-label').textContent = state === 'filled' ? 'Remplir à nouveau' : ['empty', 'expired', 'error'].includes(state) ? 'Réessayer' : 'Autoriser dans FluXlock'
+  element('start-label').textContent = ['filled', 'saved', 'passkey_created', 'passkey_authenticated'].includes(state) ? 'Remplir à nouveau' : ['empty', 'expired', 'error'].includes(state) ? 'Réessayer' : 'Autoriser dans FluXlock'
   element('security-note').querySelector('span')!.textContent = ready ? 'Une utilisation, puis verrouillage.' : 'Authentification dans FluXlock.'
   polling = view.ok && ['pairing', 'auth_required', 'ready'].includes(state)
   element<HTMLButtonElement>('connect').disabled = ['pairing', 'auth_required', 'ready', 'consuming', 'connecting'].includes(state)
@@ -81,7 +88,7 @@ function setBusy(value: boolean) {
 async function call(message: Record<string, unknown>) {
   if (busy) return
   const previousState = current.state, previousOrigin = current.origin
-  if (message.op === 'start') { offset = 0; render({ ok: true, state: 'connecting', origin: previousOrigin }) }
+  if (['start', 'start_passkey', 'start_card', 'save_captured'].includes(String(message.op))) { offset = 0; render({ ok: true, state: 'connecting', origin: previousOrigin }) }
   if (message.op === 'fill') render({ ...current, state: 'consuming' })
   setBusy(true)
   try {
@@ -97,6 +104,9 @@ document.addEventListener('click', (event) => {
   if (busy && (event.target as Element).closest('button')) { event.preventDefault(); event.stopImmediatePropagation() }
 }, true)
 element('start').addEventListener('click', () => void call({ op: 'start' }))
+element('start-passkey').addEventListener('click', () => { element<HTMLDetailsElement>('connection').open = false; void call({ op: 'start_passkey' }) })
+element('start-card').addEventListener('click', () => { element<HTMLDetailsElement>('connection').open = false; void call({ op: 'start_card' }) })
+element('save-captured').addEventListener('click', () => { element<HTMLDetailsElement>('connection').open = false; void call({ op: 'save_captured' }) })
 element('connect').addEventListener('click', () => void call({ op: 'start' }))
 element('confirm').addEventListener('click', () => void call({ op: 'pair_confirm' }))
 element('cancel').addEventListener('click', () => void call({ op: 'cancel' }))

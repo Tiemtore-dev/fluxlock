@@ -30,7 +30,7 @@ use super::protocol::{self, TransferMessage, TransferItem, TransferItemType, DEF
 use super::session::SecureSession;
 use super::{ConnectionMethod, TransferState, TransferInfo, WORMHOLE_TTL_SECS};
 
-use crate::crypto::{encrypt_data_secure, decrypt_data_secure};
+use crate::crypto::{encrypt_data_secure, decrypt_data_secure, encrypt_field_secure, decrypt_field_secure};
 
 /// Données d'un mot de passe sérialisées pour le transfert (plaintext transitoire)
 #[derive(Debug, Serialize, Deserialize)]
@@ -1176,25 +1176,25 @@ pub async fn transfer_confirm_and_execute(
                                 // ═══ PASSWORD PAYLOAD: JSON pur ═══
                                 // Zeroize reassembled plaintext buffer
                                 complete_data.zeroize();
-                            // Re-encrypt ALL fields with our vault key (title & category included)
-                            let encrypted_title = encrypt_data_secure(&payload.title, &vault_key)
+                            // Re-encrypt ALL fields with our vault key and contextual AAD
+                            let encrypted_title = encrypt_field_secure(&payload.title, &vault_key, user_id, "passwords", "title")
                                 .map_err(|e| format!("Erreur chiffrement titre: {}", e))?;
-                            let encrypted_password = encrypt_data_secure(&payload.password, &vault_key)
+                            let encrypted_password = encrypt_field_secure(&payload.password, &vault_key, user_id, "passwords", "password")
                                 .map_err(|e| format!("Erreur re-chiffrement: {}", e))?;
                             let encrypted_username = payload.username.as_ref()
-                                .map(|u| encrypt_data_secure(u, &vault_key))
+                                .map(|u| encrypt_field_secure(u, &vault_key, user_id, "passwords", "username"))
                                 .transpose()
                                 .map_err(|e| format!("Erreur chiffrement username: {}", e))?;
                             let encrypted_url = payload.url.as_ref()
-                                .map(|u| encrypt_data_secure(u, &vault_key))
+                                .map(|u| encrypt_field_secure(u, &vault_key, user_id, "passwords", "url"))
                                 .transpose()
                                 .map_err(|e| format!("Erreur chiffrement url: {}", e))?;
                             let encrypted_notes = payload.notes.as_ref()
-                                .map(|n| encrypt_data_secure(n, &vault_key))
+                                .map(|n| encrypt_field_secure(n, &vault_key, user_id, "passwords", "notes"))
                                 .transpose()
                                 .map_err(|e| format!("Erreur chiffrement notes: {}", e))?;
                             let encrypted_category = payload.category.as_ref()
-                                .map(|c| encrypt_data_secure(c, &vault_key))
+                                .map(|c| encrypt_field_secure(c, &vault_key, user_id, "passwords", "category"))
                                 .transpose()
                                 .map_err(|e| format!("Erreur chiffrement catégorie: {}", e))?;
 
@@ -1204,7 +1204,7 @@ pub async fn transfer_confirm_and_execute(
                                 let final_category = if let Some(ref cat) = encrypted_category {
                                     cat.clone()
                                 } else {
-                                    encrypt_data_secure("📥 Transfert", &vault_key)
+                                    encrypt_field_secure("📥 Transfert", &vault_key, user_id, "passwords", "category")
                                         .unwrap_or_else(|_| "📥 Transfert".to_string())
                                 };
                                 match db.create_password(
@@ -1334,19 +1334,19 @@ pub async fn transfer_confirm_and_execute(
 
                 for (idx, pw_id) in item_ids.iter().enumerate() {
                     if let Ok(Some(pw)) = db.get_password(*pw_id, user_id).await {
-                        // Decrypt ALL sensitive fields (title & category are also encrypted in DB)
-                        let decrypted_title = decrypt_data_secure(&pw.title, &vault_key)
+                        // Decrypt ALL sensitive fields with contextual AAD verification
+                        let decrypted_title = decrypt_field_secure(&pw.title, &vault_key, user_id, "passwords", "title")
                             .unwrap_or_else(|_| pw.title.clone());
-                        let decrypted_password = decrypt_data_secure(&pw.password, &vault_key)
+                        let decrypted_password = decrypt_field_secure(&pw.password, &vault_key, user_id, "passwords", "password")
                             .unwrap_or_else(|_| pw.password.clone());
                         let decrypted_username = pw.username.as_ref()
-                            .and_then(|u| decrypt_data_secure(u, &vault_key).ok());
+                            .and_then(|u| decrypt_field_secure(u, &vault_key, user_id, "passwords", "username").ok());
                         let decrypted_url = pw.url.as_ref()
-                            .and_then(|u| decrypt_data_secure(u, &vault_key).ok());
+                            .and_then(|u| decrypt_field_secure(u, &vault_key, user_id, "passwords", "url").ok());
                         let decrypted_notes = pw.notes.as_ref()
-                            .and_then(|n| decrypt_data_secure(n, &vault_key).ok());
+                            .and_then(|n| decrypt_field_secure(n, &vault_key, user_id, "passwords", "notes").ok());
                         let decrypted_category = pw.category.as_ref()
-                            .and_then(|c| decrypt_data_secure(c, &vault_key).ok());
+                            .and_then(|c| decrypt_field_secure(c, &vault_key, user_id, "passwords", "category").ok());
 
                         let payload = TransferPasswordPayload {
                             title: decrypted_title,

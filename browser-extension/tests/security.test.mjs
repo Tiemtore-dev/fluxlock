@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { canonicalOrigin, sameOrigin } from '../dist/origin.js'
 import { b64, unb64 } from '../dist/noise.js'
+import { formAction, cardFormAction, captureFormAction, passkeyFormAction } from '../dist/form.js'
 
 async function abi(random = (bytes) => { crypto.getRandomValues(bytes); return 1 }) {
   const wasm = await readFile(new URL('../dist/noise.wasm', import.meta.url))
@@ -126,4 +127,24 @@ test('WASM rejects an altered ML-DSA server proof before exporting any channel',
     assert.equal(api.output_len(), 0)
     assert.equal(api.execute(5, 0), 0)
   } finally { api.clear(); child.kill() }
+})
+
+test('formAction handles WHATWG multi-token autocomplete, searchbox exclusion and React _valueTracker', () => {
+  assert.equal(typeof formAction, 'function')
+  const source = formAction.toString()
+  assert.ok(source.includes('_valueTracker'), 'must update React _valueTracker when present')
+  assert.ok(source.includes('searchbox'), 'must exclude role=searchbox from username candidates')
+  assert.ok(source.includes('current-password'), 'must disambiguate focused or current-password inputs')
+})
+
+test('cardFormAction, captureFormAction and passkeyFormAction enforce origin check and WHATWG/WebAuthn tokens', () => {
+  assert.equal(typeof cardFormAction, 'function')
+  assert.equal(typeof captureFormAction, 'function')
+  assert.equal(typeof passkeyFormAction, 'function')
+  const cardSrc = cardFormAction.toString()
+  assert.ok(cardSrc.includes('cc-number') && cardSrc.includes('cc-csc') && cardSrc.includes('cc-exp'))
+  const capSrc = captureFormAction.toString()
+  assert.ok(capSrc.includes('new-password') && capSrc.includes('expectedOrigin'))
+  const pkSrc = passkeyFormAction.toString()
+  assert.ok(pkSrc.includes('fluxlock:webauthn-passkey') && pkSrc.includes('rp_id'))
 })

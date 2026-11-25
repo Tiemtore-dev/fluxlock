@@ -2,7 +2,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom'
 import { useEffect, useRef } from 'react'
 import {
   Archive, ArrowLeftRight, MoreHorizontal, Files, KeyRound, LayoutDashboard,
-  LockKeyhole, Settings, ShieldCheck, Fingerprint, FileText, X,
+  LockKeyhole, Settings, ShieldCheck, Fingerprint, FileText, CreditCard, UserCheck, Clock, X,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 
@@ -12,6 +12,10 @@ const vaultLinks = [
   { label: 'Fichiers', to: '/files', icon: Files },
   { label: 'Notes', to: '/notes', icon: FileText },
   { label: 'Clés cryptographiques', to: '/keys', icon: Fingerprint },
+  { label: 'Codes 2FA (TOTP)', to: '/totp', icon: Clock },
+  { label: 'Cartes bancaires', to: '/cards', icon: CreditCard },
+  { label: 'Documents d’identité', to: '/identities', icon: UserCheck },
+  { label: 'Passkeys WebAuthn', to: '/passkeys', icon: ShieldCheck },
 ]
 
 const settingsLinks = [

@@ -212,6 +212,12 @@ async fn fixture() -> Fixture {
         key: Some(key),
         user,
         candidates,
+        card_mode: false,
+        card_candidates: Vec::new(),
+        save_payload: None,
+        saved_done: false,
+        passkey_request: None,
+        passkey_result: None,
     });
     state.autofill.busy.store(true, Ordering::SeqCst);
     let app = mock_builder()

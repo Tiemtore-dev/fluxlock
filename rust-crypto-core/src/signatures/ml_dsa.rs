@@ -15,11 +15,9 @@
 //! Les pairs vérifient les signatures pendant la synchronisation P2P
 //! pour empêcher l'injection d'entrées falsifiées.
 
-use ml_dsa::{MlDsa65, KeyGen};
+use ml_dsa::{Generate, MlDsa65, SigningKey};
 use ml_dsa::signature::{Keypair, Signer, Verifier, SignatureEncoding};
 use ml_dsa::pkcs8::{EncodePublicKey, DecodePublicKey, EncodePrivateKey, DecodePrivateKey};
-use getrandom::SysRng;
-use getrandom::rand_core::UnwrapErr;
 use std::mem::MaybeUninit;
 use zeroize::Zeroizing;
 
@@ -30,25 +28,24 @@ pub const SIGNING_SEED_SIZE: usize = 32;
 
 /// Paire de clés ML-DSA-65
 pub struct MlDsaKeyPair {
-    signing_key: Box<MaybeUninit<ml_dsa::SigningKey<MlDsa65>>>,
+    signing_key: Box<MaybeUninit<SigningKey<MlDsa65>>>,
 }
 
 impl MlDsaKeyPair {
-    fn new(signing_key: ml_dsa::SigningKey<MlDsa65>) -> Self {
+    fn new(signing_key: SigningKey<MlDsa65>) -> Self {
         Self {
             signing_key: Box::new(MaybeUninit::new(signing_key)),
         }
     }
 
-    fn key(&self) -> &ml_dsa::SigningKey<MlDsa65> {
+    fn key(&self) -> &SigningKey<MlDsa65> {
         // SAFETY: initialisé dans `new` et détruit uniquement dans `Drop::drop`.
         unsafe { self.signing_key.assume_init_ref() }
     }
 
-    /// Génère une nouvelle paire de clés ML-DSA-65
+    /// Génère une nouvelle paire de clés ML-DSA-65 (FIPS 204 — ml-dsa 0.1.2 stable)
     pub fn generate() -> Result<Self> {
-        let mut rng = UnwrapErr(SysRng);
-        let signing_key = MlDsa65::key_gen(&mut rng);
+        let signing_key = SigningKey::<MlDsa65>::generate();
         Ok(Self::new(signing_key))
     }
 

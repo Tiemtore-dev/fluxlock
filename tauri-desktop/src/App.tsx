@@ -12,6 +12,10 @@ import RegisterPage from './pages/RegisterPage'
 import ResetVaultPage from './pages/ResetVaultPage'
 import DashboardPage from './pages/DashboardPage'
 import PasswordsPage from './pages/PasswordsPage'
+import TotpPage from './pages/TotpPage'
+import CardsPage from './pages/CardsPage'
+import IdentitiesPage from './pages/IdentitiesPage'
+import PasskeysPage from './pages/PasskeysPage'
 import FilesPage from './pages/FilesPage'
 import NotesPage from './pages/NotesPage'
 import KeysPage from './pages/KeysPage'
@@ -89,6 +93,10 @@ function AppRoutes() {
         <>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/passwords" element={<PasswordsPage />} />
+          <Route path="/totp" element={<TotpPage />} />
+          <Route path="/cards" element={<CardsPage />} />
+          <Route path="/identities" element={<IdentitiesPage />} />
+          <Route path="/passkeys" element={<PasskeysPage />} />
           <Route path="/files" element={<FilesPage />} />
           <Route path="/notes" element={<NotesPage />} />
           <Route path="/keys" element={<KeysPage />} />

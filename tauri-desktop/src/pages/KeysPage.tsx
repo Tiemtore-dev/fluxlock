@@ -31,7 +31,33 @@ const keyColor = (t: string) => {
     default: return 'var(--text-muted)'
   }
 }
-const fmtDate = (d: string) => new Date(d).toLocaleDateString('fr-FR', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+const DEFAULT_ALGO_BY_TYPE: Record<string, string> = {
+  api: 'ChaCha20-Poly1305',
+  ssh: 'ssh-ed25519',
+  gpg: 'ML-DSA-65',
+  encryption: 'ChaCha20-Poly1305',
+}
+
+const ALGO_OPTIONS_BY_TYPE: Record<string, { value: string; label: string }[]> = {
+  api: [
+    { value: 'ChaCha20-Poly1305', label: 'ChaCha20-Poly1305 (256 bits)' },
+    { value: 'AES-256-GCM', label: 'AES-256-GCM (256 bits)' },
+  ],
+  ssh: [
+    { value: 'ssh-ed25519', label: 'ssh-ed25519 (OpenSSH RFC 8709)' },
+    { value: 'Ed25519', label: 'Ed25519 (RFC 8032)' },
+  ],
+  gpg: [
+    { value: 'ML-DSA-65', label: 'ML-DSA-65 (Post-Quantique FIPS 204)' },
+    { value: 'Ed25519', label: 'Ed25519 (Signature RFC 8032)' },
+  ],
+  encryption: [
+    { value: 'ChaCha20-Poly1305', label: 'ChaCha20-Poly1305 (Symétrique 256b)' },
+    { value: 'AES-256-GCM', label: 'AES-256-GCM (Symétrique 256b)' },
+    { value: 'ML-KEM-768', label: 'ML-KEM-768 (Post-Quantique FIPS 203)' },
+    { value: 'X25519', label: 'X25519 (Diffie-Hellman RFC 7748)' },
+  ],
+}
 
 /* ───── KeyDataViewer (reusable for SSH split keys) ───── */
 function KeyDataViewer({ data, name, onCopy }: { data: string; name: string; onCopy: (text: string, label: string) => void }) {
@@ -175,21 +201,28 @@ export default function KeysPage() {
     if (!rightPanel) return null
 
     if (rightPanel.type === 'create') {
+      const algoOptions = ALGO_OPTIONS_BY_TYPE[keyType] ?? ALGO_OPTIONS_BY_TYPE.api
       return (
         <form onSubmit={(e) => { e.preventDefault(); if (!keyName.trim()) { toast('Nom requis', 'error'); return }; createMut.mutate() }} className="flex flex-col gap-5 h-full animate-fade-in">
           <Input label="Nom de la clé" value={keyName} onChange={e => setKeyName(e.target.value)} placeholder="Ex: GitHub SSH" required />
           <div>
             <label htmlFor="generate-key-type" className="block text-xs font-medium text-tx-secondary font-body tracking-wide uppercase mb-1">Type</label>
-            <select id="generate-key-type" value={keyType} onChange={e => setKeyType(e.target.value)} className="w-full px-3 py-2.5 bg-input border border-bd rounded-lg text-tx-primary font-body text-sm outline-none focus:border-accent">
-              <option value="api">API</option><option value="ssh">SSH</option><option value="gpg">GPG</option><option value="encryption">Chiffrement</option>
+            <select id="generate-key-type" value={keyType} onChange={e => {
+              const nextType = e.target.value
+              setKeyType(nextType)
+              setAlgorithm(DEFAULT_ALGO_BY_TYPE[nextType] ?? 'ChaCha20-Poly1305')
+            }} className="w-full px-3 py-2.5 bg-input border border-bd rounded-lg text-tx-primary font-body text-sm outline-none focus:border-accent">
+              <option value="api">API</option><option value="ssh">SSH</option><option value="gpg">Signature / GPG</option><option value="encryption">Chiffrement / KEM</option>
             </select>
           </div>
           <div>
             <label htmlFor="generate-key-algorithm" className="block text-xs font-medium text-tx-secondary font-body tracking-wide uppercase mb-1">Algorithme</label>
             <select id="generate-key-algorithm" value={algorithm} onChange={e => setAlgorithm(e.target.value)} className="w-full px-3 py-2.5 bg-input border border-bd rounded-lg text-tx-primary font-body text-sm outline-none focus:border-accent">
-              <option value="AES-256-GCM">AES-256-GCM</option><option value="AES-256-CBC">AES-256-CBC</option><option value="ChaCha20-Poly1305">ChaCha20-Poly1305</option>
+              {algoOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
             </select>
-            <p className="mt-1 text-xs text-tx-disabled font-body">Toutes les clés sont chiffrées en AES-256-GCM dans le coffre.</p>
+            <p className="mt-1 text-xs text-tx-disabled font-body">Toutes les clés sont chiffrées en ChaCha20-Poly1305 (AEAD + AAD) dans le coffre.</p>
           </div>
           <div className="flex gap-3 pt-2 mt-auto">
             <Button type="submit" fullWidth loading={createMut.isPending}>Générer</Button>
@@ -212,8 +245,9 @@ export default function KeysPage() {
           <div>
             <label htmlFor="import-key-algorithm" className="block text-xs font-medium text-tx-secondary font-body tracking-wide uppercase mb-1">Algorithme d'origine</label>
             <select id="import-key-algorithm" value={impAlgo} onChange={e => setImpAlgo(e.target.value)} className="w-full px-3 py-2.5 bg-input border border-bd rounded-lg text-tx-primary font-body text-sm outline-none focus:border-accent">
-              <optgroup label="Symétrique"><option value="AES-256-GCM">AES-256-GCM</option><option value="AES-256-CBC">AES-256-CBC</option><option value="AES-192-GCM">AES-192-GCM</option><option value="AES-128-GCM">AES-128-GCM</option><option value="ChaCha20-Poly1305">ChaCha20-Poly1305</option></optgroup>
-              <optgroup label="Asymétrique"><option value="RSA-4096">RSA-4096</option><option value="RSA-2048">RSA-2048</option><option value="Ed25519">Ed25519</option><option value="ECDSA-P256">ECDSA-P256</option><option value="ECDSA-P384">ECDSA-P384</option></optgroup>
+              <optgroup label="Post-Quantique (NIST)"><option value="ML-DSA-65">ML-DSA-65 (FIPS 204)</option><option value="ML-KEM-768">ML-KEM-768 (FIPS 203)</option></optgroup>
+              <optgroup label="Symétrique"><option value="ChaCha20-Poly1305">ChaCha20-Poly1305</option><option value="AES-256-GCM">AES-256-GCM</option><option value="AES-256-CBC">AES-256-CBC</option><option value="AES-192-GCM">AES-192-GCM</option><option value="AES-128-GCM">AES-128-GCM</option></optgroup>
+              <optgroup label="Asymétrique"><option value="Ed25519">Ed25519</option><option value="X25519">X25519</option><option value="RSA-4096">RSA-4096</option><option value="RSA-2048">RSA-2048</option><option value="ECDSA-P256">ECDSA-P256</option><option value="ECDSA-P384">ECDSA-P384</option></optgroup>
               <optgroup label="SSH"><option value="ssh-rsa">ssh-rsa</option><option value="ssh-ed25519">ssh-ed25519</option><option value="ecdsa-sha2-nistp256">ecdsa-sha2-nistp256</option><option value="ecdsa-sha2-nistp384">ecdsa-sha2-nistp384</option></optgroup>
               <optgroup label="Autre"><option value="Custom">Autre</option></optgroup>
             </select>

@@ -37,7 +37,33 @@ export default function PasswordsPage() {
   const [showModal, setShowModal] = useState(false)
   const [editing, setEditing] = useState<Password | null>(null)
   const [revealed, setRevealed] = useState<Set<number>>(new Set())
+  const [decryptedSecrets, setDecryptedSecrets] = useState<Map<number, string>>(new Map())
+  const secretTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [copied, setCopied] = useState<number | null>(null)
+
+  // Auto-purge des secrets déchiffrés à la demande après 60 secondes
+  useEffect(() => {
+    if (decryptedSecrets.size === 0) return
+    if (secretTimerRef.current) clearTimeout(secretTimerRef.current)
+    secretTimerRef.current = setTimeout(() => {
+      setDecryptedSecrets(new Map())
+      setRevealed(new Set())
+    }, 60_000)
+    return () => {
+      if (secretTimerRef.current) clearTimeout(secretTimerRef.current)
+    }
+  }, [decryptedSecrets.size])
+
+  const resolvePasswordSecret = async (item: Password): Promise<string> => {
+    const cached = decryptedSecrets.get(item.id)
+    if (cached !== undefined) return cached
+    if (item.password && !item.password.startsWith('v2:')) {
+      return item.password
+    }
+    const plain = await passwords.decrypt(item.password)
+    setDecryptedSecrets((prev) => new Map(prev).set(item.id, plain))
+    return plain
+  }
   const [pwLength, setPwLength] = useState(20)
   const [pwUpper, setPwUpper] = useState(true)
   const [pwLower, setPwLower] = useState(true)
@@ -50,6 +76,24 @@ export default function PasswordsPage() {
   const [url, setUrl] = useState('')
   const [notes, setNotes] = useState('')
   const [category, setCategory] = useState('')
+  const [totpSecret, setTotpSecret] = useState('')
+  const [activeTotpCodes, setActiveTotpCodes] = useState<Record<number, { code: string; remaining: number }>>({})
+
+  useEffect(() => {
+    if (Object.keys(activeTotpCodes).length === 0) return
+    const timer = setInterval(() => {
+      setActiveTotpCodes((prev) => {
+        const next: Record<number, { code: string; remaining: number }> = {}
+        for (const [k, v] of Object.entries(prev)) {
+          if (v.remaining > 1) {
+            next[Number(k)] = { code: v.code, remaining: v.remaining - 1 }
+          }
+        }
+        return next
+      })
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [Object.keys(activeTotpCodes).length])
 
   // ── CSV Import/Export state ──
   const [showImportModal, setShowImportModal] = useState(false)
@@ -106,13 +150,13 @@ export default function PasswordsPage() {
   }
 
   const createMut = useMutation({
-    mutationFn: () => passwords.create({ title, username, password, url, notes, category }),
+    mutationFn: () => passwords.create({ title, username, password, url, notes, category, ...(totpSecret.trim() ? { totp_secret: totpSecret.trim() } : {}) }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['passwords'] }); close(); toast('Mot de passe créé', 'success') },
     onError: handleMutError,
   })
 
   const updateMut = useMutation({
-    mutationFn: () => passwords.update({ id: editing!.id, title, username, password, url, notes, category }),
+    mutationFn: () => passwords.update({ id: editing!.id, title, username, password, url, notes, category, ...(totpSecret.trim() ? { totp_secret: totpSecret.trim() } : {}) }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['passwords'] }); close(); toast('Mot de passe modifié', 'success') },
     onError: handleMutError,
   })
@@ -140,10 +184,24 @@ export default function PasswordsPage() {
   // Extract unique categories from the password list for filter chips
   const categories = Array.from(new Set(list.map((p) => p.category).filter(Boolean) as string[]))
 
-  const resetForm = () => { setTitle(''); setUsername(''); setPassword(''); setUrl(''); setNotes(''); setCategory(''); setEditing(null) }
+  const resetForm = () => { setTitle(''); setUsername(''); setPassword(''); setUrl(''); setNotes(''); setCategory(''); setTotpSecret(''); setEditing(null) }
   const close = () => { setShowModal(false); resetForm() }
   const openCreate = () => { resetForm(); setShowModal(true) }
-  const openEdit = (p: Password) => { setEditing(p); setTitle(p.title); setUsername(p.username || ''); setPassword(p.password); setUrl(p.url || ''); setNotes(p.notes || ''); setCategory(p.category || ''); setShowModal(true) }
+  const openEdit = async (p: Password) => {
+    setEditing(p)
+    setTitle(p.title)
+    setUsername(p.username || '')
+    setUrl(p.url || '')
+    setNotes(p.notes || '')
+    setCategory(p.category || '')
+    try {
+      const secret = await resolvePasswordSecret(p)
+      setPassword(secret)
+    } catch {
+      setPassword('')
+    }
+    setShowModal(true)
+  }
 
   // ── CSV Import helpers ──
   const resetImportModal = () => {
@@ -325,6 +383,7 @@ export default function PasswordsPage() {
       </div>
       <Input label="URL" inputMode="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com" />
       <Input label="Catégorie" value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Social, Email, Travail…" />
+      <Input label="Clé TOTP 2FA (Base32 ou otpauth:// RFC 6238)" value={totpSecret} onChange={(e) => setTotpSecret(e.target.value)} placeholder="Ex: JBSWY3DPEHPK3PXP ou otpauth://totp/…" />
       <div>
         <label htmlFor="password-notes" className="block text-xs font-medium text-tx-secondary font-body tracking-wide uppercase mb-1">Notes</label>
         <textarea
@@ -376,19 +435,63 @@ export default function PasswordsPage() {
                   {item.username && <span>{item.username}</span>}
                   {item.url && <span>{item.url}</span>}
                   {item.category && <span>{item.category}</span>}
+                  {item.has_totp && (
+                    <span>
+                      {activeTotpCodes[item.id]
+                        ? `TOTP 2FA : ${activeTotpCodes[item.id].code} (${activeTotpCodes[item.id].remaining}s)`
+                        : '2FA TOTP (RFC 6238) actif'}
+                    </span>
+                  )}
                 </div>
                 <div className="workspace-secret">
-                  <PasswordField value={item.password} revealed={revealed.has(item.id)}
-                    onToggleReveal={() => setRevealed((previous) => {
-                      const next = new Set(previous)
-                      if (next.has(item.id)) next.delete(item.id)
-                      else next.add(item.id)
-                      return next
-                    })}
-                    onCopy={() => handleCopy(item.password, item.id)} copied={copied === item.id} />
+                  <PasswordField value={decryptedSecrets.get(item.id) ?? (item.password.startsWith('v2:') ? '••••••••••••' : item.password)} revealed={revealed.has(item.id)}
+                    onToggleReveal={async () => {
+                      if (revealed.has(item.id)) {
+                        setRevealed((previous) => {
+                          const next = new Set(previous)
+                          next.delete(item.id)
+                          return next
+                        })
+                        return
+                      }
+                      try {
+                        await resolvePasswordSecret(item)
+                        setRevealed((previous) => new Set(previous).add(item.id))
+                      } catch (err) {
+                        toast('Erreur déchiffrement : ' + String(err), 'error')
+                      }
+                    }}
+                    onCopy={async () => {
+                      try {
+                        const secret = await resolvePasswordSecret(item)
+                        handleCopy(secret, item.id)
+                      } catch (err) {
+                        toast('Erreur déchiffrement : ' + String(err), 'error')
+                      }
+                    }} copied={copied === item.id} />
                 </div>
                 <div className="workspace-actions">
-                  <Button variant="secondary" size="sm" icon={Edit2} onClick={() => openEdit(item)}
+                  {item.has_totp && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={async () => {
+                        try {
+                          const res = await passwords.generateTotp(item.id)
+                          setActiveTotpCodes((prev) => ({
+                            ...prev,
+                            [item.id]: { code: res.code, remaining: res.remaining_seconds },
+                          }))
+                          handleCopy(res.code, item.id)
+                        } catch (err) {
+                          toast('Erreur TOTP : ' + String(err), 'error')
+                        }
+                      }}
+                    >
+                      {activeTotpCodes[item.id] ? `${activeTotpCodes[item.id].code} (${activeTotpCodes[item.id].remaining}s)` : 'Code 2FA'}
+                    </Button>
+                  )}
+                  <Button variant="secondary" size="sm" icon={Edit2} onClick={() => void openEdit(item)}
                     disabled={isReadonly} aria-label={`Modifier ${item.title}`}>Modifier</Button>
                   <Button variant="ghost" size="sm" icon={Trash2} disabled={isReadonly}
                     aria-label={`Supprimer ${item.title}`}

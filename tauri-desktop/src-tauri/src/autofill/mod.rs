@@ -63,6 +63,24 @@ impl Drop for Candidate {
         self.username.zeroize();
     }
 }
+pub struct CardCandidate {
+    handle: String,
+    id: i64,
+    stamp: String,
+    label: String,
+}
+impl Drop for CardCandidate {
+    fn drop(&mut self) {
+        self.label.zeroize();
+    }
+}
+#[derive(Clone)]
+pub struct PasskeyPendingRequest {
+    pub rp_id: String,
+    pub rp_name: String,
+    pub username: String,
+    pub challenge_b64url: String,
+}
 pub struct Pending {
     id: String,
     connection: String,
@@ -80,6 +98,12 @@ pub struct Pending {
     key: Option<SecureKey>,
     user: i64,
     candidates: Vec<Candidate>,
+    card_mode: bool,
+    card_candidates: Vec<CardCandidate>,
+    save_payload: Option<(String, Zeroizing<String>)>,
+    saved_done: bool,
+    passkey_request: Option<PasskeyPendingRequest>,
+    passkey_result: Option<serde_json::Value>,
 }
 #[derive(Default)]
 pub struct Service {
@@ -189,7 +213,7 @@ async fn candidates(
         if url.len() > 16384 {
             continue;
         }
-        let Ok(url) = crate::crypto::decrypt_data_secure(url, key) else {
+        let Ok(url) = crate::crypto::decrypt_field_secure(url, key, user, "passwords", "url") else {
             continue;
         };
         if origin::canonical(&url).ok().as_deref() != Some(origin) {
@@ -199,7 +223,7 @@ async fn candidates(
             continue;
         };
         let username =
-            crate::crypto::decrypt_data_secure(username, key).map_err(|_| "Identifiant altéré")?;
+            crate::crypto::decrypt_field_secure(username, key, user, "passwords", "username").map_err(|_| "Identifiant altéré")?;
         if username.is_empty() || username.len() > 1024 || username.chars().any(char::is_control) {
             continue;
         }
@@ -215,11 +239,70 @@ async fn candidates(
     }
     Ok(result)
 }
+fn card_stamp(row: &crate::database::PaymentCard) -> String {
+    let mut hash = Sha256::new();
+    for field in [
+        &row.card_number,
+        &row.cvv,
+        &row.exp_month,
+        &row.exp_year,
+    ] {
+        hash.update((field.len() as u64).to_be_bytes());
+        hash.update(field.as_bytes());
+    }
+    hex::encode(hash.finalize())
+}
+async fn card_candidates(
+    db: &Database,
+    key: &SecureKey,
+    user: i64,
+) -> Result<Vec<CardCandidate>, String> {
+    let rows = db.get_payment_cards(user).await.map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    for row in rows {
+        let title = crate::crypto::decrypt_field_secure(&row.title, key, user, "payment_cards", "title")
+            .unwrap_or_else(|_| "Carte".into());
+        let brand = crate::crypto::decrypt_field_secure(&row.brand, key, user, "payment_cards", "brand")
+            .unwrap_or_else(|_| "Carte".into());
+        let last4 = crate::crypto::decrypt_field_secure(&row.last4, key, user, "payment_cards", "last4")
+            .unwrap_or_else(|_| "****".into());
+        let label = format!("{} ({} •••• {})", title, brand, last4);
+        result.push(CardCandidate {
+            handle: token(),
+            id: row.id,
+            stamp: card_stamp(&row),
+            label,
+        });
+        if result.len() > 64 {
+            break;
+        }
+    }
+    Ok(result)
+}
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     PairConfirm,
     BeginFill {
+        target: Target,
+    },
+    BeginCardFill {
+        target: Target,
+    },
+    ProposeSave {
+        target: Target,
+        username: String,
+        password: String,
+    },
+    BeginPasskey {
+        target: Target,
+        rp_id: String,
+        rp_name: String,
+        username: Option<String>,
+        challenge_b64url: String,
+    },
+    CompletePasskey {
+        request_id: String,
         target: Target,
     },
     Status {
@@ -229,7 +312,16 @@ enum Request {
         request_id: String,
         offset: usize,
     },
+    ListCardCandidates {
+        request_id: String,
+        offset: usize,
+    },
     SelectAndFill {
+        request_id: String,
+        handle: String,
+        target: Target,
+    },
+    SelectAndFillCard {
         request_id: String,
         handle: String,
         target: Target,
@@ -321,6 +413,12 @@ async fn process<R: tauri::Runtime>(
                 key: None,
                 user: 0,
                 candidates: Vec::new(),
+                card_mode: false,
+                card_candidates: Vec::new(),
+                save_payload: None,
+                saved_done: false,
+                passkey_request: None,
+                passkey_result: None,
             });
             drop(guard);
             show_prompt(app, &window, &id)?;
@@ -329,6 +427,182 @@ async fn process<R: tauri::Runtime>(
                 serde_json::json!({"state":"auth_required","request_id":id}),
                 false,
             )
+        }
+        Request::BeginCardFill { target } => {
+            target.validate()?;
+            let mut guard = service.pending.lock().await;
+            if guard.is_some() {
+                return Err("Une demande est déjà ouverte".into());
+            }
+            let id = token();
+            let window = format!("autofill-auth-{}", &id[..16]);
+            *guard = Some(Pending {
+                id: id.clone(),
+                connection: connection.into(),
+                peer: peer.into(),
+                vault_id: vault,
+                window: window.clone(),
+                expires: Instant::now() + Duration::from_secs(60),
+                target: Some(target),
+                fingerprint: String::new(),
+                browser_confirmed: false,
+                native_confirmed: false,
+                accepted: false,
+                verifying: false,
+                authenticated: false,
+                key: None,
+                user: 0,
+                candidates: Vec::new(),
+                card_mode: true,
+                card_candidates: Vec::new(),
+                save_payload: None,
+                saved_done: false,
+                passkey_request: None,
+                passkey_result: None,
+            });
+            drop(guard);
+            show_prompt(app, &window, &id)?;
+            seal(
+                channel,
+                serde_json::json!({"state":"auth_required","request_id":id}),
+                false,
+            )
+        }
+        Request::ProposeSave {
+            target,
+            username,
+            password,
+        } => {
+            target.validate()?;
+            let pw = Zeroizing::new(password);
+            if pw.trim().is_empty() || pw.len() > 16384 || username.len() > 1024 || username.chars().any(char::is_control) {
+                return Err("Identifiant ou mot de passe invalide pour l'enregistrement".into());
+            }
+            let mut guard = service.pending.lock().await;
+            if guard.is_some() {
+                return Err("Une demande est déjà ouverte".into());
+            }
+            let id = token();
+            let window = format!("autofill-auth-{}", &id[..16]);
+            *guard = Some(Pending {
+                id: id.clone(),
+                connection: connection.into(),
+                peer: peer.into(),
+                vault_id: vault,
+                window: window.clone(),
+                expires: Instant::now() + Duration::from_secs(60),
+                target: Some(target),
+                fingerprint: String::new(),
+                browser_confirmed: false,
+                native_confirmed: false,
+                accepted: false,
+                verifying: false,
+                authenticated: false,
+                key: None,
+                user: 0,
+                candidates: Vec::new(),
+                card_mode: false,
+                card_candidates: Vec::new(),
+                save_payload: Some((username.trim().to_string(), pw)),
+                saved_done: false,
+                passkey_request: None,
+                passkey_result: None,
+            });
+            drop(guard);
+            show_prompt(app, &window, &id)?;
+            seal(
+                channel,
+                serde_json::json!({"state":"auth_required","request_id":id}),
+                false,
+            )
+        }
+        Request::BeginPasskey {
+            target,
+            rp_id,
+            rp_name,
+            username,
+            challenge_b64url,
+        } => {
+            target.validate()?;
+            let parsed_origin = url::Url::parse(&target.origin).map_err(|_| "Origine invalide")?;
+            let origin_host = parsed_origin
+                .host_str()
+                .ok_or("Hôte d'origine absent")?
+                .to_ascii_lowercase();
+            let norm_rp = rp_id.trim().to_ascii_lowercase();
+            // W3C WebAuthn §5.1.3 : rp_id doit correspondre exactement à l'hôte de l'origine HTTPS vérifiée
+            if norm_rp.is_empty() || norm_rp != origin_host {
+                return Err("Domaine Relying Party (rp_id) incompatible avec l'origine HTTPS".into());
+            }
+            if challenge_b64url.trim().is_empty() || challenge_b64url.len() > 512 {
+                return Err("Challenge WebAuthn invalide".into());
+            }
+            let user_str = username.unwrap_or_default().trim().to_string();
+            if user_str.len() > 1024 || user_str.chars().any(char::is_control) {
+                return Err("Identifiant utilisateur Passkey invalide".into());
+            }
+            let mut guard = service.pending.lock().await;
+            if guard.is_some() {
+                return Err("Une demande est déjà ouverte".into());
+            }
+            let id = token();
+            let window = format!("autofill-auth-{}", &id[..16]);
+            *guard = Some(Pending {
+                id: id.clone(),
+                connection: connection.into(),
+                peer: peer.into(),
+                vault_id: vault,
+                window: window.clone(),
+                expires: Instant::now() + Duration::from_secs(60),
+                target: Some(target),
+                fingerprint: String::new(),
+                browser_confirmed: false,
+                native_confirmed: false,
+                accepted: false,
+                verifying: false,
+                authenticated: false,
+                key: None,
+                user: 0,
+                candidates: Vec::new(),
+                card_mode: false,
+                card_candidates: Vec::new(),
+                save_payload: None,
+                saved_done: false,
+                passkey_request: Some(PasskeyPendingRequest {
+                    rp_id: norm_rp.clone(),
+                    rp_name: if rp_name.trim().is_empty() {
+                        norm_rp
+                    } else {
+                        rp_name.trim().chars().take(128).collect()
+                    },
+                    username: user_str,
+                    challenge_b64url: challenge_b64url.trim().to_string(),
+                }),
+                passkey_result: None,
+            });
+            drop(guard);
+            show_prompt(app, &window, &id)?;
+            seal(
+                channel,
+                serde_json::json!({"state":"auth_required","request_id":id}),
+                false,
+            )
+        }
+        Request::CompletePasskey { request_id, target } => {
+            target.validate()?;
+            let mut guard = service.pending.lock().await;
+            let p = owned(&guard, connection, &request_id, &vault)?;
+            if !p.authenticated || p.target.as_ref() != Some(&target) || p.passkey_result.is_none() {
+                return Err("Assertion Passkey non autorisée".into());
+            }
+            let mut p = guard.take().ok_or("Demande Passkey consommée")?;
+            drop(guard);
+            let payload = p.passkey_result.take().ok_or("Résultat Passkey absent")?;
+            drop(p);
+            crate::commands::session::lock_vault_data(&state).await;
+            service.busy.store(false, Ordering::SeqCst);
+            let _ = app.emit("autofill-vault-locked", ());
+            seal(channel, payload, true)
         }
         Request::Cancel { request_id } => {
             let mut guard = service.pending.lock().await;
@@ -345,13 +619,30 @@ async fn process<R: tauri::Runtime>(
             if request_id.is_none() {
                 return seal(channel, serde_json::json!({"state":"paired"}), false);
             }
-            let guard = service.pending.lock().await;
+            let mut guard = service.pending.lock().await;
             let p = owned(
                 &guard,
                 connection,
                 request_id.as_deref().unwrap_or(""),
                 &vault,
             )?;
+            if p.saved_done {
+                let done_id = p.id.clone();
+                guard.take();
+                service.busy.store(false, Ordering::SeqCst);
+                return seal(
+                    channel,
+                    serde_json::json!({"state":"saved","request_id":done_id}),
+                    true,
+                );
+            }
+            if p.passkey_result.is_some() {
+                return seal(
+                    channel,
+                    serde_json::json!({"state":"passkey_ready","request_id":p.id}),
+                    false,
+                );
+            }
             seal(
                 channel,
                 serde_json::json!({"state":if p.authenticated{"ready"}else{"auth_required"},"request_id":p.id}),
@@ -361,7 +652,7 @@ async fn process<R: tauri::Runtime>(
         Request::ListCandidates { request_id, offset } => {
             let guard = service.pending.lock().await;
             let p = owned(&guard, connection, &request_id, &vault)?;
-            if !p.authenticated || p.key.is_none() {
+            if !p.authenticated || p.key.is_none() || p.card_mode {
                 return Err("Authentification native requise".into());
             }
             if offset > 128 {
@@ -379,6 +670,129 @@ async fn process<R: tauri::Runtime>(
                 serde_json::json!({"state":"ready","entries":entries,"total":p.candidates.len()}),
                 false,
             )
+        }
+        Request::ListCardCandidates { request_id, offset } => {
+            let guard = service.pending.lock().await;
+            let p = owned(&guard, connection, &request_id, &vault)?;
+            if !p.authenticated || p.key.is_none() || !p.card_mode {
+                return Err("Authentification native requise".into());
+            }
+            if offset > 64 {
+                return Err("Pagination invalide".into());
+            }
+            let entries: Vec<_> = p
+                .card_candidates
+                .iter()
+                .skip(offset)
+                .take(10)
+                .map(|c| serde_json::json!({"handle":c.handle,"username":c.label}))
+                .collect();
+            seal(
+                channel,
+                serde_json::json!({"state":"ready","entries":entries,"total":p.card_candidates.len()}),
+                false,
+            )
+        }
+        Request::SelectAndFillCard {
+            request_id,
+            handle,
+            target,
+        } => {
+            target.validate()?;
+            let mut guard = service.pending.lock().await;
+            let p = owned(&guard, connection, &request_id, &vault)?;
+            if !p.authenticated || !p.card_mode || p.target.as_ref() != Some(&target) {
+                return Err("Contexte de remplissage carte refusé".into());
+            }
+            if !p.card_candidates.iter().any(|c| c.handle == handle) {
+                return Err("Carte refusée".into());
+            }
+            let p = guard.take().ok_or("Demande consommée")?;
+            drop(guard);
+            let result = async {
+                let candidate = p
+                    .card_candidates
+                    .iter()
+                    .find(|c| c.handle == handle)
+                    .ok_or("Carte absente")?;
+                let key = p.key.as_ref().ok_or("Authentification absente")?;
+                let db_guard = state.db.lock().await;
+                let db = db_guard.as_ref().ok_or("Base indisponible")?;
+                if db
+                    .check_account_locked(p.user)
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err("Compte verrouillé".into());
+                }
+                let row = db
+                    .get_payment_card(candidate.id, p.user)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Carte supprimée")?;
+                if card_stamp(&row) != candidate.stamp {
+                    return Err("La carte a changé. Recommencez.".into());
+                }
+                let cardholder_name = Zeroizing::new(
+                    crate::crypto::decrypt_field_secure(&row.cardholder_name, key, p.user, "payment_cards", "cardholder_name")
+                        .map_err(|_| "Titulaire altéré")?,
+                );
+                let card_number = Zeroizing::new(
+                    crate::crypto::decrypt_field_secure(&row.card_number, key, p.user, "payment_cards", "card_number")
+                        .map_err(|_| "Numéro de carte altéré")?,
+                );
+                let exp_month = Zeroizing::new(
+                    crate::crypto::decrypt_field_secure(&row.exp_month, key, p.user, "payment_cards", "exp_month")
+                        .map_err(|_| "Mois d'expiration altéré")?,
+                );
+                let exp_year = Zeroizing::new(
+                    crate::crypto::decrypt_field_secure(&row.exp_year, key, p.user, "payment_cards", "exp_year")
+                        .map_err(|_| "Année d'expiration altérée")?,
+                );
+                let cvv = Zeroizing::new(
+                    crate::crypto::decrypt_field_secure(&row.cvv, key, p.user, "payment_cards", "cvv")
+                        .map_err(|_| "CVV altéré")?,
+                );
+                let brand = Zeroizing::new(
+                    crate::crypto::decrypt_field_secure(&row.brand, key, p.user, "payment_cards", "brand")
+                        .unwrap_or_else(|_| "Carte".into()),
+                );
+
+                #[derive(Serialize)]
+                struct CardSecretReply<'a> {
+                    state: &'a str,
+                    request_id: &'a str,
+                    cardholder_name: &'a str,
+                    card_number: &'a str,
+                    exp_month: &'a str,
+                    exp_year: &'a str,
+                    cvv: &'a str,
+                    brand: &'a str,
+                }
+                let bytes = Zeroizing::new(
+                    serde_json::to_vec(&CardSecretReply {
+                        state: "fill_card_once",
+                        request_id: &p.id,
+                        cardholder_name: &cardholder_name,
+                        card_number: &card_number,
+                        exp_month: &exp_month,
+                        exp_year: &exp_year,
+                        cvv: &cvv,
+                        brand: &brand,
+                    })
+                    .map_err(|_| "Réponse carte invalide")?,
+                );
+                Ok(Reply {
+                    frame: fluxlock_autofill_protocol::encrypt(channel, &bytes)?,
+                    close: true,
+                })
+            }
+            .await;
+            drop(p);
+            crate::commands::session::lock_vault_data(&state).await;
+            service.busy.store(false, Ordering::SeqCst);
+            let _ = app.emit("autofill-vault-locked", ());
+            result
         }
         Request::SelectAndFill {
             request_id,
@@ -422,9 +836,12 @@ async fn process<R: tauri::Runtime>(
                     return Err("Le compte a changé. Recommencez.".into());
                 }
                 let url = Zeroizing::new(
-                    crate::crypto::decrypt_data_secure(
+                    crate::crypto::decrypt_field_secure(
                         row.url.as_deref().ok_or("URL absente")?,
                         key,
+                        p.user,
+                        "passwords",
+                        "url",
                     )
                     .map_err(|_| "URL altérée")?,
                 );
@@ -432,7 +849,7 @@ async fn process<R: tauri::Runtime>(
                     return Err("Origine différente".into());
                 }
                 let password = Zeroizing::new(
-                    crate::crypto::decrypt_data_secure(&row.password, key)
+                    crate::crypto::decrypt_field_secure(&row.password, key, p.user, "passwords", "password")
                         .map_err(|_| "Mot de passe altéré")?,
                 );
                 if password.len() > 16384 {

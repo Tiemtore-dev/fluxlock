@@ -10,7 +10,7 @@
 //! - **IETF standard** : RFC 8439.
 
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Nonce,
 };
 use rand::RngCore;
@@ -63,7 +63,7 @@ impl EncryptedBlob {
     }
 }
 
-/// Chiffre un plaintext avec ChaCha20-Poly1305.
+/// Chiffre un plaintext avec ChaCha20-Poly1305 sans AAD additionnelle.
 ///
 /// # Arguments
 /// * `key` - Clé de 256 bits (32 bytes).
@@ -74,6 +74,19 @@ impl EncryptedBlob {
 /// - Tag Poly1305 128 bits intégré au ciphertext.
 /// - Le plaintext n'est jamais copié inutilement.
 pub fn encrypt(key: &[u8; KEY_SIZE], plaintext: &[u8]) -> Result<EncryptedBlob, CryptoError> {
+    encrypt_with_aad(key, plaintext, &[])
+}
+
+/// Chiffre un plaintext avec ChaCha20-Poly1305 et des données associées authentifiées (AAD — RFC 8439).
+///
+/// L'AAD n'est pas chiffrée mais est liée cryptographiquement au tag Poly1305 :
+/// toute modification du contexte (ex. `user_id`, table SQLite, nom de colonne) fait
+/// échouer le déchiffrement avec `CryptoError::AuthenticationFailed`.
+pub fn encrypt_with_aad(
+    key: &[u8; KEY_SIZE],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<EncryptedBlob, CryptoError> {
     let cipher = ChaCha20Poly1305::new_from_slice(key)
         .map_err(|e| CryptoError::EncryptionError(format!("Invalid key: {}", e)))?;
 
@@ -83,9 +96,13 @@ pub fn encrypt(key: &[u8; KEY_SIZE], plaintext: &[u8]) -> Result<EncryptedBlob, 
         .map_err(|e| CryptoError::RandomGenerationError(format!("Nonce generation failed: {}", e)))?;
 
     let nonce = Nonce::from_slice(&nonce_bytes);
+    let payload = Payload {
+        msg: plaintext,
+        aad,
+    };
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(nonce, payload)
         .map_err(|e| CryptoError::EncryptionError(format!("ChaCha20-Poly1305 encrypt failed: {}", e)))?;
 
     Ok(EncryptedBlob {
@@ -94,7 +111,7 @@ pub fn encrypt(key: &[u8; KEY_SIZE], plaintext: &[u8]) -> Result<EncryptedBlob, 
     })
 }
 
-/// Déchiffre un `EncryptedBlob` avec ChaCha20-Poly1305.
+/// Déchiffre un `EncryptedBlob` avec ChaCha20-Poly1305 sans AAD.
 ///
 /// # Arguments
 /// * `key` - Clé de 256 bits (32 bytes).
@@ -105,13 +122,26 @@ pub fn encrypt(key: &[u8; KEY_SIZE], plaintext: &[u8]) -> Result<EncryptedBlob, 
 /// - En cas d'échec, aucune donnée partielle n'est retournée.
 /// - Le plaintext est retourné dans un `Zeroizing<Vec<u8>>` pour effacement automatique.
 pub fn decrypt(key: &[u8; KEY_SIZE], blob: &EncryptedBlob) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    decrypt_with_aad(key, blob, &[])
+}
+
+/// Déchiffre un `EncryptedBlob` avec ChaCha20-Poly1305 en vérifiant l'AAD (RFC 8439).
+pub fn decrypt_with_aad(
+    key: &[u8; KEY_SIZE],
+    blob: &EncryptedBlob,
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     let cipher = ChaCha20Poly1305::new_from_slice(key)
         .map_err(|e| CryptoError::DecryptionError(format!("Invalid key: {}", e)))?;
 
     let nonce = Nonce::from_slice(&blob.nonce);
+    let payload = Payload {
+        msg: blob.ciphertext.as_ref(),
+        aad,
+    };
 
     let plaintext = cipher
-        .decrypt(nonce, blob.ciphertext.as_ref())
+        .decrypt(nonce, payload)
         .map_err(|_| CryptoError::AuthenticationFailed)?;
 
     Ok(Zeroizing::new(plaintext))
@@ -193,5 +223,27 @@ mod tests {
         let restored = EncryptedBlob::from_bytes(&bytes).unwrap();
         let decrypted = decrypt(&key, &restored).unwrap();
         assert_eq!(&*decrypted, b"serialize me");
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_with_aad_roundtrip_and_mismatch_rejection() {
+        let key = test_key();
+        let aad = b"fluxlock/v2/user:1/table:passwords/field:password";
+        let wrong_aad = b"fluxlock/v2/user:1/table:passwords/field:title";
+        let blob = encrypt_with_aad(&key, b"top-secret", aad).unwrap();
+
+        let decrypted = decrypt_with_aad(&key, &blob, aad).unwrap();
+        assert_eq!(&*decrypted, b"top-secret");
+
+        // Column swap / wrong AAD must fail authentication
+        assert!(matches!(
+            decrypt_with_aad(&key, &blob, wrong_aad),
+            Err(CryptoError::AuthenticationFailed)
+        ));
+        // Missing AAD must also fail authentication
+        assert!(matches!(
+            decrypt(&key, &blob),
+            Err(CryptoError::AuthenticationFailed)
+        ));
     }
 }

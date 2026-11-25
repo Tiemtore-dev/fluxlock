@@ -11,7 +11,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 use crate::{AppState};
-use crate::crypto::{encrypt_data_secure, decrypt_data_secure, verify_password};
+use crate::crypto::{encrypt_field_secure, decrypt_field_secure, verify_password};
 use crate::security_monitor::get_security_monitor;
 use crate::database::Password;
 use serde::{Deserialize, Serialize};
@@ -507,16 +507,16 @@ async fn process_csv(
     // Decrypt existing passwords for duplicate comparison
     let mut decrypted_existing: Vec<Password> = Vec::new();
     for mut pw in existing_passwords {
-        if let Ok(d) = decrypt_data_secure(&pw.title, encryption_key) {
+        if let Ok(d) = decrypt_field_secure(&pw.title, encryption_key, user_id, "passwords", "title") {
             pw.title = d;
         }
         if let Some(ref u) = pw.username {
-            if let Ok(d) = decrypt_data_secure(u, encryption_key) {
+            if let Ok(d) = decrypt_field_secure(u, encryption_key, user_id, "passwords", "username") {
                 pw.username = Some(d);
             }
         }
         if let Some(ref u) = pw.url {
-            if let Ok(d) = decrypt_data_secure(u, encryption_key) {
+            if let Ok(d) = decrypt_field_secure(u, encryption_key, user_id, "passwords", "url") {
                 pw.url = Some(d);
             }
         }
@@ -655,33 +655,33 @@ async fn process_csv(
                     continue;
                 }
 
-                // Encrypt all fields
-                let enc_title = encrypt_data_secure(&entry.title, encryption_key)
+                // Encrypt all fields with contextual AAD
+                let enc_title = encrypt_field_secure(&entry.title, encryption_key, user_id, "passwords", "title")
                     .map_err(|e| format!("Chiffrement titre: {}", e))?;
                 let enc_username = entry
                     .username
                     .as_ref()
-                    .map(|u| encrypt_data_secure(u, encryption_key))
+                    .map(|u| encrypt_field_secure(u, encryption_key, user_id, "passwords", "username"))
                     .transpose()
                     .map_err(|e| format!("Chiffrement username: {}", e))?;
-                let enc_password = encrypt_data_secure(raw_password, encryption_key)
+                let enc_password = encrypt_field_secure(raw_password, encryption_key, user_id, "passwords", "password")
                     .map_err(|e| format!("Chiffrement password: {}", e))?;
                 let enc_url = entry
                     .url
                     .as_ref()
-                    .map(|u| encrypt_data_secure(u, encryption_key))
+                    .map(|u| encrypt_field_secure(u, encryption_key, user_id, "passwords", "url"))
                     .transpose()
                     .map_err(|e| format!("Chiffrement URL: {}", e))?;
                 let enc_notes = entry
                     .notes
                     .as_ref()
-                    .map(|n| encrypt_data_secure(n, encryption_key))
+                    .map(|n| encrypt_field_secure(n, encryption_key, user_id, "passwords", "notes"))
                     .transpose()
                     .map_err(|e| format!("Chiffrement notes: {}", e))?;
                 let enc_category = entry
                     .category
                     .as_ref()
-                    .map(|c| encrypt_data_secure(c, encryption_key))
+                    .map(|c| encrypt_field_secure(c, encryption_key, user_id, "passwords", "category"))
                     .transpose()
                     .map_err(|e| format!("Chiffrement catégorie: {}", e))?;
 
@@ -836,15 +836,15 @@ pub async fn export_passwords_csv(
     let mut decrypt_errors: Vec<String> = Vec::new();
 
     for pw in &passwords {
-        // Decrypt all fields
-        let title = decrypt_data_secure(&pw.title, &encryption_key)
+        // Decrypt all fields with contextual AAD verification
+        let title = decrypt_field_secure(&pw.title, &encryption_key, user_id, "passwords", "title")
             .unwrap_or_else(|_| pw.title.clone());
         let username = pw
             .username
             .as_ref()
-            .map(|u| decrypt_data_secure(u, &encryption_key).unwrap_or_else(|_| u.clone()))
+            .map(|u| decrypt_field_secure(u, &encryption_key, user_id, "passwords", "username").unwrap_or_else(|_| u.clone()))
             .unwrap_or_default();
-        let password = match decrypt_data_secure(&pw.password, &encryption_key) {
+        let password = match decrypt_field_secure(&pw.password, &encryption_key, user_id, "passwords", "password") {
             Ok(d) => d,
             Err(e) => {
                 decrypt_errors.push(format!(
@@ -857,17 +857,17 @@ pub async fn export_passwords_csv(
         let url = pw
             .url
             .as_ref()
-            .map(|u| decrypt_data_secure(u, &encryption_key).unwrap_or_else(|_| u.clone()))
+            .map(|u| decrypt_field_secure(u, &encryption_key, user_id, "passwords", "url").unwrap_or_else(|_| u.clone()))
             .unwrap_or_default();
         let notes = pw
             .notes
             .as_ref()
-            .map(|n| decrypt_data_secure(n, &encryption_key).unwrap_or_else(|_| n.clone()))
+            .map(|n| decrypt_field_secure(n, &encryption_key, user_id, "passwords", "notes").unwrap_or_else(|_| n.clone()))
             .unwrap_or_default();
         let category = pw
             .category
             .as_ref()
-            .map(|c| decrypt_data_secure(c, &encryption_key).unwrap_or_else(|_| c.clone()))
+            .map(|c| decrypt_field_secure(c, &encryption_key, user_id, "passwords", "category").unwrap_or_else(|_| c.clone()))
             .unwrap_or_default();
 
         csv_writer
@@ -934,8 +934,8 @@ mod tests {
         EntryAction { index, action: action.into(), overwrite_id }
     }
 
-    fn decrypt_optional(value: Option<&str>, key: &SecureKey) -> Option<String> {
-        value.map(|value| decrypt_data_secure(value, key).unwrap())
+    fn decrypt_optional(value: Option<&str>, key: &SecureKey, user_id: i64, field: &str) -> Option<String> {
+        value.map(|value| decrypt_field_secure(value, key, user_id, "passwords", field).unwrap())
     }
 
     #[tokio::test]
@@ -976,12 +976,12 @@ mod tests {
                 assert!(stored.password.starts_with("v2:"));
                 assert!(stored.title.starts_with("v2:"));
                 assert_ne!(stored.password, expected["password"]);
-                stored.title = decrypt_data_secure(&stored.title, &key).unwrap();
-                stored.password = decrypt_data_secure(&stored.password, &key).unwrap();
-                stored.username = decrypt_optional(stored.username.as_deref(), &key);
-                stored.url = decrypt_optional(stored.url.as_deref(), &key);
-                stored.notes = decrypt_optional(stored.notes.as_deref(), &key);
-                stored.category = decrypt_optional(stored.category.as_deref(), &key);
+                stored.title = decrypt_field_secure(&stored.title, &key, user_id, "passwords", "title").unwrap();
+                stored.password = decrypt_field_secure(&stored.password, &key, user_id, "passwords", "password").unwrap();
+                stored.username = decrypt_optional(stored.username.as_deref(), &key, user_id, "username");
+                stored.url = decrypt_optional(stored.url.as_deref(), &key, user_id, "url");
+                stored.notes = decrypt_optional(stored.notes.as_deref(), &key, user_id, "notes");
+                stored.category = decrypt_optional(stored.category.as_deref(), &key, user_id, "category");
                 let value = serde_json::to_value(stored).unwrap();
                 for field in ["title", "password", "username", "url", "notes", "category"] {
                     assert_eq!(value[field], expected[field], "{} field {field}", fixture.label);
@@ -1032,13 +1032,13 @@ mod tests {
         let report = process_csv(&db, user_id, &key, replacement, None, CsvOperation::Import(&wrong_action)).await.unwrap();
         assert!(!report.success);
         assert_eq!(report.overwritten_count, 0);
-        assert_eq!(decrypt_data_secure(&db.get_password(other_id, user_id).await.unwrap().unwrap().password, &key).unwrap(), "autre");
+        assert_eq!(decrypt_field_secure(&db.get_password(other_id, user_id).await.unwrap().unwrap().password, &key, user_id, "passwords", "password").unwrap(), "autre");
 
         let overwrite = [action(0, "overwrite", Some(expected_id))];
         let report = process_csv(&db, user_id, &key, replacement, None, CsvOperation::Import(&overwrite)).await.unwrap();
         assert!(report.success);
         assert_eq!(report.overwritten_count, 1);
-        assert_eq!(decrypt_data_secure(&db.get_password(expected_id, user_id).await.unwrap().unwrap().password, &key).unwrap(), "nouveau");
+        assert_eq!(decrypt_field_secure(&db.get_password(expected_id, user_id).await.unwrap().unwrap().password, &key, user_id, "passwords", "password").unwrap(), "nouveau");
 
         assert!(csv_operation("unexpected", Some(&add)).is_err());
         assert!(csv_operation("import", None).is_err());

@@ -1,6 +1,6 @@
 {
   "name": "fluxlock-desktop",
-  "version": "2.4.2",
+  "version": "2.5.0",
   "description": "FluXlock - Application de gestion de mots de passe sécurisée",
   "type": "module",
   "scripts": {

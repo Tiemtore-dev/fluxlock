@@ -86,6 +86,62 @@ impl KeyPair {
             Err(_) => Ok(false),
         }
     }
+
+    /// Encode la clé publique au format wire SSH (RFC 4251 §5 / RFC 4253 §6.6 / RFC 8709)
+    /// via la crate officielle RustCrypto `ssh-key`.
+    pub fn to_ssh_public_wire_bytes(&self) -> Vec<u8> {
+        let ssh_pub = ssh_key::public::Ed25519PublicKey::from(&self.public_key);
+        let pub_key = ssh_key::PublicKey::from(ssh_pub);
+        pub_key.to_bytes().unwrap_or_default()
+    }
+
+    /// Calcule l'empreinte officielle OpenSSH `SHA256:<base64_no_pad>` via `ssh-key`.
+    pub fn openssh_fingerprint(&self) -> String {
+        let ssh_pub = ssh_key::public::Ed25519PublicKey::from(&self.public_key);
+        let pub_key = ssh_key::PublicKey::from(ssh_pub);
+        pub_key.fingerprint(ssh_key::HashAlg::Sha256).to_string()
+    }
+
+    /// Exporte la paire de clés Ed25519 aux formats standards OpenSSH (`openssh-key-v1` + `authorized_keys`)
+    /// en utilisant la crate native RustCrypto `ssh-key`.
+    ///
+    /// Retourne `(private_key_openssh_pem, public_key_authorized_keys_line)`.
+    pub fn to_openssh_keypair(&self, comment: &str) -> Result<(zeroize::Zeroizing<String>, String)> {
+        let ed_kp = ssh_key::private::Ed25519Keypair::from(&self.signing_key);
+        let kp_data = ssh_key::private::KeypairData::Ed25519(ed_kp);
+        let clean_comment = comment.trim();
+        let priv_key = ssh_key::PrivateKey::new(kp_data, clean_comment)
+            .map_err(|e| CryptoError::SignatureError(format!("ssh-key PrivateKey::new failed: {e}")))?;
+
+        let priv_openssh = priv_key
+            .to_openssh(ssh_key::LineEnding::LF)
+            .map_err(|e| CryptoError::SignatureError(format!("ssh-key to_openssh failed: {e}")))?;
+        let trimmed_priv = zeroize::Zeroizing::new(priv_openssh.trim_end().to_string());
+
+        let pub_openssh = priv_key
+            .public_key()
+            .to_openssh()
+            .map_err(|e| CryptoError::SignatureError(format!("ssh-key public to_openssh failed: {e}")))?;
+
+        Ok((trimmed_priv, pub_openssh))
+    }
+
+    /// Importe et valide une paire de clés Ed25519 depuis une clé privée au format OpenSSH (`-----BEGIN OPENSSH PRIVATE KEY-----`) via `ssh-key`.
+    pub fn from_openssh_private_key(openssh_pem: &str) -> Result<Self> {
+        let priv_key = ssh_key::PrivateKey::from_openssh(openssh_pem)
+            .map_err(|e| CryptoError::SignatureError(format!("Invalid OpenSSH private key: {e}")))?;
+        let ed_kp = priv_key
+            .key_data()
+            .ed25519()
+            .ok_or_else(|| CryptoError::SignatureError("OpenSSH key is not an Ed25519 key".into()))?;
+        let signing_key = ed25519_dalek::SigningKey::try_from(ed_kp)
+            .map_err(|e| CryptoError::SignatureError(format!("Invalid Ed25519 keypair in OpenSSH key: {e}")))?;
+        let public_key = signing_key.verifying_key();
+        Ok(KeyPair {
+            signing_key,
+            public_key,
+        })
+    }
 }
 
 impl std::fmt::Debug for KeyPair {
@@ -244,5 +300,32 @@ mod tests {
         
         let is_valid = keypair.verify(message, &signature).unwrap();
         assert!(!is_valid);
+    }
+
+    #[test]
+    fn test_openssh_keypair_format_and_fingerprint() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let keypair = KeyPair::from_seed(&[7u8; 32]);
+        let (priv_pem, pub_line) = keypair.to_openssh_keypair("fluxlock@local").unwrap();
+
+        assert!(priv_pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----\n"));
+        assert!(priv_pem.ends_with("\n-----END OPENSSH PRIVATE KEY-----"));
+        assert!(pub_line.starts_with("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"));
+        assert!(pub_line.ends_with(" fluxlock@local"));
+        assert!(keypair.openssh_fingerprint().starts_with("SHA256:"));
+
+        // Verify outer binary container layout matches PROTOCOL.key openssh-key-v1
+        let body: String = priv_pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect();
+        let decoded = STANDARD.decode(body).unwrap();
+        assert!(decoded.starts_with(b"openssh-key-v1\0"));
+
+        // Verify ssh-key round-trip parsing and signature verification
+        let parsed = KeyPair::from_openssh_private_key(&priv_pem).unwrap();
+        assert_eq!(parsed.export_public_key(), keypair.export_public_key());
+        let sig = parsed.sign(b"ssh-key crate roundtrip");
+        assert!(keypair.verify(b"ssh-key crate roundtrip", &sig).unwrap());
     }
 }

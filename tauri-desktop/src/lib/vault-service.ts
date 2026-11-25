@@ -45,6 +45,7 @@ export interface Password {
   url?: string
   notes?: string
   category?: string
+  has_totp?: boolean
   created_at: string
   updated_at: string
 }
@@ -56,6 +57,153 @@ export interface PasswordPayload {
   url?: string
   notes?: string
   category?: string
+  totp_secret?: string
+}
+
+export interface TotpOutput {
+  code: string
+  period: number
+  remaining_seconds: number
+  digits: number
+  algorithm: string
+  issuer?: string
+  account?: string
+}
+
+export interface TotpLiveItem {
+  id: number
+  source: 'standalone' | 'password'
+  issuer: string
+  account: string
+  code: string
+  period: number
+  remaining_seconds: number
+  digits: number
+  algorithm: string
+}
+
+export interface CreateTotpPayload {
+  issuer?: string
+  account?: string
+  secret_or_uri: string
+  algorithm?: string
+  digits?: number
+  period?: number
+}
+
+export interface ImportTotpMigrationResponse {
+  imported_count: number
+  accounts: string[]
+}
+
+export interface PaymentCard {
+  id: number
+  user_id: number
+  title: string
+  cardholder_name: string
+  card_number: string
+  brand: string
+  last4: string
+  exp_month: string
+  exp_year: string
+  cvv: string
+  notes?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface PaymentCardPayload {
+  title: string
+  cardholder_name: string
+  card_number: string
+  exp_month: string
+  exp_year: string
+  cvv: string
+  notes?: string
+}
+
+export interface IdentityDocument {
+  id: number
+  user_id: number
+  doc_type: string
+  title: string
+  full_name: string
+  document_number: string
+  issuing_authority?: string
+  issue_date?: string
+  expiry_date?: string
+  nationality?: string
+  birth_date?: string
+  notes?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface IdentityDocumentPayload {
+  doc_type: string
+  title: string
+  full_name: string
+  document_number: string
+  issuing_authority?: string
+  issue_date?: string
+  expiry_date?: string
+  nationality?: string
+  birth_date?: string
+  notes?: string
+}
+
+export interface IssuedSdJwt {
+  compact_sd_jwt: string
+  issuer_public_key_b64url: string
+  sd_digests: string[]
+}
+
+export interface PasskeyEntry {
+  id: number
+  user_id: number
+  credential_id: string
+  rp_id: string
+  rp_name: string
+  user_handle: string
+  user_name: string
+  user_display_name: string
+  cose_algorithm: number
+  public_key: string
+  sign_count: number
+  created_at: string
+  last_used_at?: string
+}
+
+export interface CreatedPasskey {
+  credential_id_b64url: string
+  rp_id: string
+  rp_name: string
+  user_handle_b64url: string
+  user_name: string
+  user_display_name: string
+  cose_algorithm: number
+  public_key_b64url: string
+  cose_public_key_b64url: string
+  authenticator_data_b64url: string
+  client_data_json_b64url: string
+}
+
+export interface PasskeyAssertion {
+  credential_id_b64url: string
+  rp_id: string
+  authenticator_data_b64url: string
+  client_data_json_b64url: string
+  signature_b64url: string
+  user_handle_b64url?: string
+  new_sign_count: number
+}
+
+export interface VaultSyncStatus {
+  sync_enabled: boolean
+  paired_devices_count: number
+  oplog_entries_count: number
+  latest_hlc?: string | null
+  merkle_root_blake3: string
 }
 
 export interface SecureFile {
@@ -231,6 +379,73 @@ export const passwords = {
 
   decrypt: (encrypted: string) =>
     invoke<string>('decrypt_password', { encrypted }),
+
+  generateTotp: (id: number) =>
+    invoke<TotpOutput>('generate_password_totp', { id }),
+}
+
+/* ─── Dedicated TOTP 2FA Authenticator (RFC 6238 / RFC 4226) ─── */
+
+export const totpAuthenticator = {
+  list: () => invoke<TotpLiveItem[]>('get_totp_authenticators'),
+  create: (request: CreateTotpPayload) =>
+    invoke<number>('create_totp_authenticator', { request: clean(request) }),
+  importBatch: (request: { raw_input?: string; qr_image_base64?: string }) =>
+    invoke<ImportTotpMigrationResponse>('import_totp_migration_batch', { request }),
+  delete: (id: number, source: 'standalone' | 'password') =>
+    invoke<boolean>('delete_totp_authenticator', { id, source }),
+}
+
+/* ─── Payment Cards (ISO/IEC 7812-1 Luhn + Lazy Decryption) ─── */
+
+export const paymentCards = {
+  list: () => invoke<PaymentCard[]>('get_payment_cards'),
+  create: (request: PaymentCardPayload) =>
+    invoke<number>('create_payment_card', { request: clean(request) }),
+  update: (request: PaymentCardPayload & { id: number }) =>
+    invoke<boolean>('update_payment_card', { request: clean(request) }),
+  decryptSecret: (id: number) =>
+    invoke<{ card_number: string; cvv: string }>('decrypt_payment_card_secret', { id }),
+  delete: (id: number) =>
+    invoke<boolean>('delete_payment_card', { id }),
+}
+
+/* ─── Identity Documents & IETF SD-JWT (EUDI Wallet / eIDAS 2.0) ─── */
+
+export const identityDocuments = {
+  list: () => invoke<IdentityDocument[]>('get_identity_documents'),
+  create: (request: IdentityDocumentPayload) =>
+    invoke<number>('create_identity_document', { request: clean(request) }),
+  decryptNumber: (id: number) =>
+    invoke<string>('decrypt_identity_document_number', { id }),
+  generateSdJwt: (id: number, selectedClaims: string[]) =>
+    invoke<IssuedSdJwt>('generate_identity_sd_jwt', { id, selectedClaims }),
+  delete: (id: number) =>
+    invoke<boolean>('delete_identity_document', { id }),
+}
+
+/* ─── Passkeys (W3C WebAuthn Level 3 Software Authenticator) ─── */
+
+export const passkeys = {
+  list: () => invoke<PasskeyEntry[]>('get_passkeys_list'),
+  create: (request: {
+    rp_id: string
+    rp_name: string
+    user_name: string
+    user_display_name: string
+    challenge_b64url?: string
+    origin?: string
+  }) => invoke<CreatedPasskey>('create_passkey_entry', { request }),
+  authenticate: (request: { id: number; challenge_b64url: string; origin?: string }) =>
+    invoke<PasskeyAssertion>('authenticate_passkey_entry', { request }),
+  delete: (id: number) =>
+    invoke<boolean>('delete_passkey_entry', { id }),
+}
+
+/* ─── Continuous P2P CRDT Sync Status ─── */
+
+export const vaultSync = {
+  getStatus: () => invoke<VaultSyncStatus>('get_vault_sync_status'),
 }
 
 /* ─── CSV Import/Export ─── */

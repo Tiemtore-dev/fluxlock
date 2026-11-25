@@ -113,7 +113,7 @@ pub(super) async fn connection<R: tauri::Runtime, S: AsyncRead + AsyncWrite + Un
             let mut pending=state.autofill.pending.lock().await;
             if pending.is_some(){return Err("Une demande est déjà ouverte".into());}
             let id=token();let window=format!("autofill-auth-{}",&id[..16]);
-            *pending=Some(Pending{id:id.clone(),connection:connection_id.clone(),peer:peer.clone(),vault_id:vault,window:window.clone(),expires:Instant::now()+Duration::from_secs(60),target:None,fingerprint:fingerprint.clone(),browser_confirmed:false,native_confirmed:false,accepted:false,verifying:false,authenticated:false,key:None,user:0,candidates:Vec::new()});
+            *pending=Some(Pending{id:id.clone(),connection:connection_id.clone(),peer:peer.clone(),vault_id:vault,window:window.clone(),expires:Instant::now()+Duration::from_secs(60),target:None,fingerprint:fingerprint.clone(),browser_confirmed:false,native_confirmed:false,accepted:false,verifying:false,authenticated:false,key:None,user:0,candidates:Vec::new(),card_mode:false,card_candidates:Vec::new(),save_payload:None,saved_done:false,passkey_request:None,passkey_result:None});
             request_id=Some(id.clone());drop(pending);show_prompt(&app,&window,&id)?;
         }
         let welcome=seal(&mut channel,serde_json::json!({"state":if paired{"connected"}else{"pairing"},"fingerprint":fingerprint,"request_id":request_id}),false)?;

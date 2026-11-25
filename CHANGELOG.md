@@ -7,6 +7,25 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.5.0] - 2026-11-25
+
+### Cryptographie Post-Quantique Stable, Clés OpenSSH & Protection AAD
+
+- **Migration vers les crates RustCrypto stables** : mise à niveau de `ml-kem` vers `0.3.4` (FIPS 203), `ml-dsa` vers `0.1.2` (FIPS 204), `pkcs8` vers `0.11.0`, `signature` vers `3.0.0`, et intégration du crate officiel `ssh-key 0.6.7` pour la génération et la sérialisation authentique de paires de clés `ssh-ed25519` (`openssh-key-v1` PEM + empreinte `SHA256:...`), `X25519` (clamping RFC 7748 §5), `ML-DSA-65` et `ML-KEM-768`.
+- **Chiffrement authentifié lié par AAD contextuelle (`v2:aad:`) & Lazy Decryption** : chaque colonne sensible SQLite est chiffrée avec `ChaCha20-Poly1305` (RFC 8439) en liant cryptographiquement `(user_id, table, column)` dans l'AAD, empêchant toute attaque par permutation de colonnes ou de lignes. Les secrets critiques (mots de passe, numéros de cartes PAN/CVV, numéros de pièces d'identité, graines TOTP, clés privées) restent chiffrés dans les listes et ne sont déchiffrés qu'unitairement à la demande avec purge mémoire automatique après 60 secondes.
+- **Partage de fichiers par clé éphémère HKDF (RFC 5869)** : dérivation d'une clé de partage dédiée par lien via `HKDF-SHA256` sans jamais exposer la clé maître du coffre.
+
+### Authentificateur 2FA (TOTP), Passkeys WebAuthn, Cartes Bancaires & Identité Souveraine
+
+- **Onglet dédié « Codes 2FA (TOTP) » (`/totp`) & Analyseur QR Code 100 % Pur Rust Multiplateforme** : moteur RFC 6238 / RFC 4226 (`HMAC-SHA1`, `HMAC-SHA256`, `HMAC-SHA512`, 6 à 8 chiffres), décodeur Protobuf natif pour l'import groupé depuis Google Authenticator (`otpauth-migration://offline?data=...`), import multi-lignes `otpauth://totp/...` (2FAS, Aegis, Bitwarden, Proton Pass), et analyseur d'images QR Code 100 % pur Rust (`rqrr` + `image`) fonctionnant hors-ligne en mémoire vive sur **macOS, Windows, Linux et Android**.
+- **Onglet dédié « Passkeys WebAuthn Level 3 » (`/passkeys`) & Parcours Navigateur 1-Clic** : authentificateur logiciel conforme W3C WebAuthn Level 3 / FIDO2 CTAP2 (clés résidentes COSE `EdDSA -8` `Ed25519`, flags `UP | UV | BE | BS | AT`), relié à l'extension navigateur via le canal post-quantique pour créer une Passkey ou signer une assertion en un geste (Touch ID / Windows Hello / Mot de passe maître) avec vérification anti-phishing stricte du `rp_id`.
+- **Onglet dédié « Cartes bancaires » (`/cards`) & Remplissage WHATWG `cc-*`** : validation algorithmique de Luhn (ISO/IEC 7812-1), détection automatique du réseau émetteur et remplissage sécurisé des formulaires de paiement HTTPS (`cc-name`, `cc-number`, `cc-exp`, `cc-exp-month`, `cc-exp-year`, `cc-csc`).
+- **Capture de mot de passe à la volée (`ProposeSave`)** : détection des formulaires de création ou de connexion (`new-password` / `current-password`) dans l'extension navigateur et enregistrement chiffré dans le coffre via la fenêtre native de confirmation FluXlock.
+- **Onglet dédié « Documents d'identité » (`/identities`) & Preuves IETF SD-JWT** : stockage chiffré des pièces d'identité (CNI, Passeport, Permis, Identité Européenne EUDI Wallet) et émission de justificatifs à divulgation sélective (`draft-ietf-oauth-selective-disclosure-jwt`) salés sur 128 bits CSPRNG et hachés en `SHA-256`.
+- **Synchronisation continue P2P multi-appareils (`vault_sync.rs`)** : Horloge Logique Hybride (HLC — Kulkarni et al.) avec garde-fou anti-dérive de 5 minutes, journal d'opérations CRDT LWW-Element-Set signé `ML-DSA-65` et calcul de racine de Merkle `BLAKE3`.
+
+---
+
 ## [2.4.2] - 2026-11-24
 
 ### Extension Navigateur & Relais Natif Automatique
